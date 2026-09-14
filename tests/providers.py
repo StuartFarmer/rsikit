@@ -18,4 +18,16 @@ class ScriptedProvider:
             raise RuntimeError("Scripted provider exhausted") from exc
         if isinstance(response, Exception):
             raise response
+        if isinstance(response, tuple):
+            return response
         return response.model_dump_json() if isinstance(response, BaseModel) else response, []
+
+
+class NativeScriptedProvider(ScriptedProvider):
+    """Script native session turns, retaining continuation and completion status."""
+
+    async def aturn(self, context, *, continuation=None, tools=None, tool_results=None):
+        self.calls.append(
+            {"context": context, "continuation": continuation, "results": tool_results}
+        )
+        return next(self.responses)
