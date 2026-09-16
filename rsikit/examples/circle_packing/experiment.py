@@ -16,9 +16,13 @@ from rsikit import (
     Evaluation,
     EvaluationError,
     HillClimb,
+    PromptProposer,
     ProposalRejected,
     Proposer,
+    ReflectionMemory,
     RepairingProposer,
+    ShinkaEvolve,
+    ShinkaProposer,
 )
 from rsikit.sandbox import PythonSandbox
 
@@ -155,7 +159,17 @@ async def _run(
     seed=0,
     population_size=4,
     islands=4,
+    prompt_mode="legacy",
+    instructions=None,
+    reflect=False,
+    model_settings=None,
+    shinka_options=None,
+    shinka_providers=(),
 ):
+    if strategy_name == "shinkaevolve":
+        prompt_mode = "modular"
+    if prompt_mode != "modular" and (instructions or reflect):
+        raise ValueError("Editable instructions and reflection require modular prompt mode")
     folder = Path(__file__).resolve().parent
     initial = (folder / "initial.py").read_text(encoding="utf-8")
     directory = directory.resolve()
@@ -185,6 +199,13 @@ async def _run(
 
     async def check(source):
         nonlocal checks
+        if strategy_name == "shinkaevolve":
+            # Novelty filtering follows repairs; defer execution until it accepts the source.
+            try:
+                compile(source, "<candidate>", "exec")
+            except SyntaxError as exc:
+                return Evaluation(valid=False, feedback=f"SyntaxError: {exc}")
+            return Evaluation(valid=True)
         if source in checked:
             result, _ = checked[source]
             return Evaluation(valid=result.valid, feedback=result.feedback)
@@ -198,12 +219,27 @@ async def _run(
             )
         return Evaluation(valid=result.valid, feedback=result.feedback)
 
-    operations = PackingProposer(
-        initial, provider, evaluation_timeout=sandbox.timeout, packings=packings
+    task = (folder / "prompts/task.txt").read_text(encoding="utf-8")
+    operations = (
+        ShinkaProposer(task, provider, ensemble=shinka_providers, instructions=instructions)
+        if strategy_name == "shinkaevolve"
+        else PromptProposer(task, provider, instructions=instructions)
+        if prompt_mode == "modular"
+        else PackingProposer(
+            initial, provider, evaluation_timeout=sandbox.timeout, packings=packings
+        )
     )
+    memory = ReflectionMemory(task, provider) if reflect else None
 
     async def propose(parent, history):
-        return await operations(parent, history, context=strategy.context)
+        context = dict(strategy.context)
+        if prompt_mode == "modular":
+            context["evidence"] = [
+                {"id": c.id, "circles": packings.get(str(c.id))}
+                for c in (*context.get("parents", (parent,)), *context.get("inspirations", ()))
+            ]
+            context["guidance"] = (*context.get("guidance", ()), *(memory.texts if memory else ()))
+        return await operations(parent, history, context=context)
 
     proposer = RepairingProposer(propose, check, operations.repair, max_repairs=max_repairs)
     baseline = await measure(initial, directory / "candidates/0000")
@@ -227,6 +263,18 @@ async def _run(
         # Non-overlap gives pi*sum(r^2) <= 1; Cauchy bounds sum(r) <= sqrt(10/pi).
         "dgm-archive": (DGMArchive, {"score_bounds": (0, math.sqrt(10 / math.pi)), "seed": seed}),
     }
+    if strategy_name == "shinkaevolve":
+        options["shinkaevolve"] = (
+            ShinkaEvolve,
+            {
+                "islands": islands,
+                "seed": seed,
+                "models": len(operations.models),
+                "novelty": operations.assess_novelty,
+                "reflect": operations.summarize,
+                **(shinka_options or {}),
+            },
+        )
     strategy_class, settings = options[strategy_name]
     strategy = strategy_class(initial, baseline, proposer, objective="sum_radii", **settings)
 
@@ -237,10 +285,14 @@ async def _run(
             "summary.json": {
                 "status": status,
                 "model": getattr(provider, "model", "scripted"),
+                "model_settings": dict(model_settings or {}),
                 "strategy": strategy_name,
+                "prompt_mode": prompt_mode,
+                "reflect": reflect,
+                "instructions": dict(instructions or {}),
                 "seed": seed,
                 "population_size": population_size if strategy_name == "eoh" else None,
-                "islands": islands if strategy_name == "alphaevolve" else None,
+                "islands": islands if strategy_name in ("alphaevolve", "shinkaevolve") else None,
                 "iterations": iterations,
                 "max_repairs": max_repairs,
                 "timeout": timeout,
@@ -266,6 +318,20 @@ async def _run(
                 for result in proposer.history
             ],
         }
+        if prompt_mode == "modular":
+            records["proposal_records.json"] = operations.records
+        if strategy_name == "shinkaevolve":
+            records["shinka.json"] = {
+                "proposals": strategy.proposals,
+                "events": strategy.events,
+                "scratchpad": strategy.scratchpad,
+                "model_gains": [[str(g) for g in gains] for gains in strategy.model_gains],
+                "models": [getattr(model, "model", "scripted") for model in operations.models],
+                "novelty_enabled": strategy.embed is not None,
+            }
+        if memory:
+            records["reflections.json"] = memory.records
+            records["reflection_attempts.json"] = memory.attempts
         for name, data in records.items():
             (directory / name).write_text(json.dumps(data, indent=2), encoding="utf-8")
         (directory / "best.py").write_text(strategy.best.source, encoding="utf-8")
@@ -280,14 +346,38 @@ async def _run(
         for step in range(iterations):
             print(f"Generation {step + 1}/{iterations}...", flush=True)
             repair_runs = len(proposer.history)
+            before = len(strategy.history)
+            deadline = asyncio.get_running_loop().time() + timeout
             candidates = await asyncio.wait_for(strategy.generate(), timeout)
             evaluations = []
             for candidate in candidates:
-                result, location = checked[candidate.source]
-                shutil.copytree(location, directory / "candidates" / f"{candidate.id:04d}")
+                destination = directory / "candidates" / f"{candidate.id:04d}"
+                if strategy_name == "shinkaevolve":
+                    result = await asyncio.wait_for(
+                        measure(candidate.source, destination),
+                        max(0, deadline - asyncio.get_running_loop().time()),
+                    )
+                    if result.valid:
+                        packings[str(candidate.id)] = json.loads(
+                            (destination / "circles.json").read_text()
+                        )
+                else:
+                    result, location = checked[candidate.source]
+                    shutil.copytree(location, destination)
                 evaluations.append(result)
             checked.clear()
             await strategy.update(candidates, evaluations)
+            if memory:
+                for completed in strategy.history[before:]:
+                    await asyncio.wait_for(
+                        memory.observe(
+                            strategy.history[completed.parent_id],
+                            completed,
+                            objective=strategy.objective,
+                            maximize=strategy.maximize,
+                        ),
+                        max(0, deadline - asyncio.get_running_loop().time()),
+                    )
             last = strategy.history[-1].evaluation
             repairs = (
                 len(proposer.history[-1].attempts) - 1 if len(proposer.history) > repair_runs else 0

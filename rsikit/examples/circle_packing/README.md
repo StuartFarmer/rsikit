@@ -25,13 +25,14 @@ your OpenRouter account. A shorter first run is `--iterations 2`.
 
 ## Compare strategies
 
-Run the same problem, seed program, evaluator, repair loop, and visualizations with:
+Run the same problem, seed program, evaluator, and visualizations with:
 
 ```sh
 optimizer/.venv/bin/python -B -m rsikit.examples.circle_packing --strategy hillclimb --iterations 25
 optimizer/.venv/bin/python -B -m rsikit.examples.circle_packing --strategy alphaevolve --iterations 25
 optimizer/.venv/bin/python -B -m rsikit.examples.circle_packing --strategy eoh --iterations 25
 optimizer/.venv/bin/python -B -m rsikit.examples.circle_packing --strategy dgm-archive --iterations 25
+optimizer/.venv/bin/python -B -m rsikit.examples.circle_packing --strategy shinkaevolve --iterations 25
 ```
 
 | Option | Behavior |
@@ -40,12 +41,35 @@ optimizer/.venv/bin/python -B -m rsikit.examples.circle_packing --strategy dgm-a
 | `alphaevolve` | Four islands, per-cell champions, exploration, cross-island inspirations, and weaker-half reseeding every 20 attempts. |
 | `eoh` | Thought/source pairs using E1 diversity, E2 shared ideas, M1 structural change, M2 tuning, and M3 simplification. |
 | `dgm-archive` | Retain feasible packings including regressions; sample by quality and child count; diagnose and modify the selected packing. |
+| `shinkaevolve` | Weighted island parents, diff/full/crossover proposals, UCB model sampling, and periodic meta recommendations. |
 
 `--iterations` counts individual candidate attempts, including rejections. It is
 not an equal token/cost budget: DGM archive search makes two calls (diagnose +
-modify) before repairs; the others make one. For N attempts and R repairs, upper
+modify) before repairs; HillClimb, AlphaEvolve, and EoH make one. For N attempts and R repairs, upper
 bounds are `N*(2+R)` and `N*(1+R)` model calls. Malformed EoH JSON consumes an
 attempt; source repair begins only after a source has been extracted successfully.
+
+ShinkaEvolve automatically uses the modular template root. It permits at most
+three proposals per attempt, each with up to R syntax repairs, plus one meta call
+before each new generation following ten completed attempts. Without embeddings,
+this bounds calls by `3*N*(1+R) + floor((N-1)/10)` for N > 0. The shared generation
+deadline covers those calls. Geometry is evaluated once **after** novelty acceptance;
+invalid geometry is recorded for future generations, without another repair loop.
+The other strategies retain their existing feasibility-repair behavior.
+
+The CLI defaults to one model and exact-duplicate rejection. Add
+`--ensemble-model MODEL_ID` (repeatable) to include more mutation providers under
+UCB selection. The base `--model` handles repair, novelty judging, and meta calls.
+Programmatic callers can pass `shinka_providers=(provider_a, provider_b)` and
+`shinka_options={"embed": async_embedding_callback}` to `experiment.run()` to
+enable embedding-based novelty rejection and the LLM judge. Extra judge calls are
+bounded by the proposal count. No embedding service or model is selected implicitly.
+All these calls use the supplied API accounts; offline tests use scripted providers.
+
+Shinka runs also save `shinka.json` with proposal/novelty decisions, migration and
+meta events, the scratchpad, provider names, and Decimal model gains as strings.
+`selections.json` includes the chosen model index and patch operation. See the
+[RSIKit API](../../README.md#shinkaevolve) for archive and normalization choices.
 
 EoH defaults to a population of four: three additions beside the seed, then 20
 attempts per full cycle (four per operator). Parents come from the same population
@@ -55,7 +79,7 @@ rejections can delay it. For a smaller test, use `--population-size 2 --iteratio
 If stopped mid-cycle, the best evaluated solution is still returned and plotted.
 
 `--seed` controls parent sampling, not model determinism. `--islands` changes the
-AlphaEvolve island count. Its diversity cell is `(number of radii > 0.15, number
+AlphaEvolve or ShinkaEvolve island count. AlphaEvolve's diversity cell is `(number of radii > 0.15, number
 of centers in the central half-square)`. DGM archive sampling normalizes scores
 by `sqrt(10/pi)`, an area-based upper bound on the sum of radii.
 
@@ -68,6 +92,40 @@ These are adaptations of the local search policies. AlphaEvolve is serial and
 single-objective; EoH is seeded. **DGM archive search is not full DGM:** this
 benchmark evolves an executable packing function, not the agent's own search
 implementation. Diagnosis and modification use the fixed model directly.
+
+## Modular prompts and reflection
+
+Legacy prompts remain the default. Opt into the task-independent RSIKit operations:
+
+```sh
+optimizer/.venv/bin/python -B -m rsikit.examples.circle_packing --prompt-mode modular --reflect --iterations 5
+optimizer/.venv/bin/python -B -m rsikit.examples.circle_packing --prompt-mode modular --instruction-file instruction.txt
+```
+
+These are new experimental prompts, not a wording-preserving migration. The
+instruction file supplies plain text for `mutate` (HillClimb); programmatic callers
+can pass an `instructions` mapping for any operation. With ShinkaEvolve, the file
+applies to `diff`, `full`, and `cross`. All five strategies work in
+modular mode. The CLI configures the checkout template root once; programmatic
+callers must do the same for the generic proposer/reflection templates.
+
+`--reflect` adds measured pair/failure guidance after candidate completion and
+injects its bounded run-local memory into subsequent proposals. Ties need no
+reflection call. A reflection failure preserves the completed candidate, saves
+progress and propagates. The generation timeout also bounds its reflection.
+
+Modular runs save `proposal_records.json` (rendered requests, raw responses,
+parsed drafts and errors). Reflection runs additionally save `reflections.json`
+and `reflection_attempts.json`. `summary.json` records prompt mode, instruction
+text, reflection setting and model settings. Omitted provider settings such as
+temperature are recorded as unknown, not inferred.
+
+With reflection, add at most one model call per attempt to the call bounds above:
+`N*(3+R)` for DGM and `N*(2+R)` for HillClimb, AlphaEvolve, and EoH.
+For ShinkaEvolve without embeddings, the bound becomes
+`3*N*(1+R) + floor((N-1)/10) + N` for N > 0. Iterations are still not an equal
+cost allowance. The [offline prompt-search example](../prompt_search.py) shows an
+application-owned shared call cap for generation, repair, reflection and revision.
 
 ## Problem and initial solution
 
@@ -107,7 +165,9 @@ Convert NumPy arrays/scalars to ordinary lists/numbers before returning.
    returned geometry. On failure, request a repaired version and evaluate it once.
    The default allows two repairs; `--max-repairs 0` disables them. Repeated identical
    versions within a repair chain reuse their recorded outcome.
-4. Give the successful execution's score to the strategy. Do not execute again.
+   ShinkaEvolve instead repairs syntax, applies its novelty gate, and only then
+   executes once; geometry failures remain invalid evaluated attempts.
+4. Give the execution's score or invalid result to the strategy. Do not execute again.
 5. Update selection state and repeat. Render the saved outputs at the end.
 
 [system.j2](prompts/system.j2) contains the shared task instructions, included in
@@ -119,8 +179,9 @@ and SciPy 1.15.3 preloaded. Each request forks a fresh child, loads the candidat
 and calls `pack_circles()` exactly once. The child has a ten-second wall-time budget
 (`--evaluation-timeout`), cannot spawn processes/threads, and is killed on timeout.
 Candidate prints are discarded so they cannot corrupt the result protocol.
-Exceptions, invalid return data, and timeouts feed the repair loop; worker failures
-abort the run without retrying an uncertain execution.
+Exceptions, invalid return data, and timeouts feed the repair loop for the other
+strategies; ShinkaEvolve records them as invalid evaluation feedback. Worker
+failures abort the run without retrying an uncertain execution.
 
 The container has no network, host mounts, or API credentials; it runs as a non-root
 user with a read-only root filesystem, a 16 MiB temporary filesystem, one CPU,

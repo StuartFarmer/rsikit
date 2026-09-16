@@ -19,12 +19,27 @@ def main():
     parser.add_argument("--iterations", type=int, default=5)
     parser.add_argument(
         "--strategy",
-        choices=("hillclimb", "alphaevolve", "eoh", "dgm-archive"),
+        choices=("hillclimb", "alphaevolve", "eoh", "dgm-archive", "shinkaevolve"),
         default="hillclimb",
     )
     parser.add_argument("--seed", type=int, default=0)
+    parser.add_argument("--prompt-mode", choices=("legacy", "modular"), default="legacy")
+    parser.add_argument(
+        "--instruction-file", type=Path, help="Plain-text mutate instruction (modular mode)"
+    )
+    parser.add_argument(
+        "--reflect", action="store_true", help="Use measured reflection (modular mode)"
+    )
     parser.add_argument("--population-size", type=int, default=4, help="EoH population size")
-    parser.add_argument("--islands", type=int, default=4, help="AlphaEvolve island count")
+    parser.add_argument(
+        "--islands", type=int, default=4, help="AlphaEvolve/ShinkaEvolve island count"
+    )
+    parser.add_argument(
+        "--ensemble-model",
+        action="append",
+        default=[],
+        help="Additional ShinkaEvolve mutation model; repeat for an ensemble",
+    )
     parser.add_argument("--max-repairs", type=int, default=2)
     parser.add_argument(
         "--evaluation-timeout", type=float, default=10, help="Seconds per function execution"
@@ -37,6 +52,12 @@ def main():
         default=Path("runs") / f"circle-packing-{datetime.now(timezone.utc):%Y%m%dT%H%M%S.%fZ}",
     )
     args = parser.parse_args()
+    if args.strategy == "shinkaevolve":
+        args.prompt_mode = "modular"
+    elif args.ensemble_model:
+        parser.error("--ensemble-model requires --strategy shinkaevolve")
+    if (args.reflect or args.instruction_file) and args.prompt_mode != "modular":
+        parser.error("--reflect and --instruction-file require --prompt-mode modular")
     if not os.environ.get("OPENROUTER_API_KEY"):
         parser.error("Set OPENROUTER_API_KEY before running.")
     if importlib.util.find_spec("openai") is None:
@@ -44,9 +65,26 @@ def main():
             "Install: uv pip install --python optimizer/.venv/bin/python "
             "-r rsikit/examples/circle_packing/requirements.txt"
         )
-    prompts.TEMPLATE_ROOT = Path(__file__).resolve().parent / "prompts"
+    prompts.TEMPLATE_ROOT = (
+        Path(__file__).resolve().parents[3]
+        if args.prompt_mode == "modular"
+        else Path(__file__).resolve().parent / "prompts"
+    )
     provider = OpenRouterAPI(
         args.model, timeout=args.timeout, max_output_tokens=args.max_tokens, max_retries=0
+    )
+    ensemble = (
+        (
+            provider,
+            *(
+                OpenRouterAPI(
+                    model, timeout=args.timeout, max_output_tokens=args.max_tokens, max_retries=0
+                )
+                for model in args.ensemble_model
+            ),
+        )
+        if args.ensemble_model
+        else ()
     )
     print(f"Model: {args.model}\nStrategy: {args.strategy}", flush=True)
     strategy = asyncio.run(
@@ -61,6 +99,23 @@ def main():
             seed=args.seed,
             population_size=args.population_size,
             islands=args.islands,
+            prompt_mode=args.prompt_mode,
+            instructions={
+                operation: args.instruction_file.read_text(encoding="utf-8")
+                for operation in (
+                    ("diff", "full", "cross") if args.strategy == "shinkaevolve" else ("mutate",)
+                )
+            }
+            if args.instruction_file
+            else None,
+            reflect=args.reflect,
+            shinka_providers=ensemble,
+            model_settings={
+                "model": args.model,
+                "max_output_tokens": args.max_tokens,
+                "temperature": None,
+                "max_retries": 0,
+            },
         )
     )
     improved = (

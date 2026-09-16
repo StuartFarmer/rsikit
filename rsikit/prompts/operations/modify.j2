@@ -1,0 +1,7 @@
+Implement a revision informed by this diagnosis:
+{{ diagnosis }}
+
+{% include "rsikit/prompts/operations/context.j2" %}
+
+Return only JSON with a short description of the idea and complete source, matching:
+{{ schema | tojson }}

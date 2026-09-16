@@ -1,0 +1,10 @@
+Compare these measured programs and suggest one concrete next change.
+The worse/better ordering already accounts for the objective direction.
+Ground advice in the observations; do not claim causation or new correctness.
+Return concise guidance, not source code or revised evaluation scores.
+
+Task: {{ instance.task }}
+Objective: {{ objective }}
+<worse>{{ worse.model_dump(mode="json") | tojson }}</worse>
+<better>{{ better.model_dump(mode="json") | tojson }}</better>
+Prior guidance: {{ instance.texts | tojson }}

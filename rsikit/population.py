@@ -4,11 +4,10 @@ These strategies optimize artifacts. DGMArchive does not execute self-modifying
 agents. See README and NOTICE for the scope and attribution of these adaptations.
 """
 
-import math
 import random
-from collections import Counter
 from collections.abc import Callable
 
+from .selection import better, lineage_weights, rank_parents, top_candidates
 from .strategies import Candidate, SequentialStrategy
 
 
@@ -41,9 +40,9 @@ class AlphaEvolve(SequentialStrategy):
     def select_parent(self) -> Candidate:
         island = self.rng.randrange(len(self.islands))
         population = list(self.islands[island].values())
-        champion = sorted(
-            population, key=lambda c: self._score(c.evaluation), reverse=self.maximize
-        )[0]
+        champion = top_candidates(population, 1, objective=self.objective, maximize=self.maximize)[
+            0
+        ]
         parent = self.rng.choice(population) if self.rng.random() < self.exploration else champion
         pool = {c.id: c for archive in self.islands for c in archive.values() if c.id != parent.id}
         inspirations = self.rng.sample(list(pool.values()), min(len(pool), self.inspirations))
@@ -61,10 +60,8 @@ class AlphaEvolve(SequentialStrategy):
             key = self.cell(candidate)
             incumbent = island.get(key)
             self.cells[candidate.id] = key
-            if incumbent is None or (
-                self._score(candidate.evaluation) > self._score(incumbent.evaluation)
-                if self.maximize
-                else self._score(candidate.evaluation) < self._score(incumbent.evaluation)
+            if incumbent is None or better(
+                candidate, incumbent, objective=self.objective, maximize=self.maximize
             ):
                 island[key] = candidate
         completed = len(self.history)
@@ -74,7 +71,7 @@ class AlphaEvolve(SequentialStrategy):
     def reset_islands(self, *, attempt=None) -> None:
         # FunSearch seed-all-islands / weaker-half reseeding; see NOTICE.
         champions = [
-            sorted(a.values(), key=lambda c: self._score(c.evaluation), reverse=self.maximize)[0]
+            top_candidates(a.values(), 1, objective=self.objective, maximize=self.maximize)[0]
             for a in self.islands
         ]
         ranked = list(range(len(self.islands)))
@@ -130,9 +127,7 @@ class EoH(SequentialStrategy):
             return self.best
         operation = self.OPERATORS[self.cycle_step // self.population_size]
         count = self.parent_count if operation in ("E1", "E2") else 1
-        size = len(self.population)
-        weights = [1 / (rank + size) for rank in range(1, size + 1)]
-        parents = self.rng.choices(self.population, weights=weights, k=count)
+        parents = rank_parents(self.population, count, rng=self.rng)
         self.context = {"operation": operation, "parents": tuple(parents)}
         return parents[0]
 
@@ -146,11 +141,12 @@ class EoH(SequentialStrategy):
             self.offspring.append(candidate)
         self.cycle_step += 1
         if self.cycle_step == self.population_size * len(self.OPERATORS):
-            self.population = sorted(
+            self.population = top_candidates(
                 self.population + self.offspring,
-                key=lambda c: self._score(c.evaluation),
-                reverse=self.maximize,
-            )[: self.population_size]
+                self.population_size,
+                objective=self.objective,
+                maximize=self.maximize,
+            )
             self.offspring = []
             self.cycle_step = 0
             self.cycles += 1
@@ -181,17 +177,12 @@ class DGMArchive(SequentialStrategy):
         self.archive = [self.best]
 
     def selection_weights(self) -> list[float]:
-        lower, upper = self.score_bounds
-        children = Counter(c.parent_id for c in self.archive)
-        weights = []
-        for candidate in self.archive:
-            quality = min(
-                1.0, max(0.0, (self._score(candidate.evaluation) - lower) / (upper - lower))
-            )
-            if not self.maximize:
-                quality = 1 - quality
-            weights.append(1 / (1 + math.exp(-10 * (quality - 0.5))) / (1 + children[candidate.id]))
-        return weights
+        return lineage_weights(
+            self.archive,
+            objective=self.objective,
+            maximize=self.maximize,
+            score_bounds=self.score_bounds,
+        )
 
     def select_parent(self) -> Candidate:
         parent = self.rng.choices(self.archive, weights=self.selection_weights(), k=1)[0]

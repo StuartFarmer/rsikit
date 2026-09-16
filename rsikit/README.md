@@ -115,7 +115,7 @@ process timeout; it is not an OS sandbox for arbitrary programs.
 
 ## Strategy contract
 
-All four strategies share `generate()` / `update()` and keep state internally.
+All five strategies share `generate()` / `update()` and keep state internally.
 `SequentialStrategy` is their abstract base for common single-candidate bookkeeping;
 selection and population/archive admission live in the concrete classes.
 
@@ -123,11 +123,13 @@ selection and population/archive admission live in the concrete classes.
 | --- | --- |
 | `HillClimb` | Always propose from the best measured candidate. |
 | `AlphaEvolve` | Island/cell champions, exploration, cross-island inspirations, and periodic weaker-half reseeding. |
+| `ShinkaEvolve` | Weighted island parents, bounded novelty resampling, adaptive model selection, and periodic meta recommendations. |
 | `EoH` | Rank-weighted parents; fixed-population E1/E2/M1/M2/M3 cycles; elite selection after a full cycle. |
 | `DGMArchive` | Keep all feasible candidates, including regressions; sample by normalized quality and admitted-child count. |
 
 These adapt the local [AlphaEvolve](../alphaevolve/agent.py), [EoH](../eoh/agent.py),
-and [DGM](../dgm/agent.py) policies without runtime imports from sibling agents.
+[DGM](../dgm/agent.py), and [ShinkaEvolve](../shinkaevolve/agent.py) policies without
+runtime imports from sibling agents.
 AlphaEvolve here uses one configured objective and serial generation, without
 ensembles, meta-prompt evolution, or evaluation cascades. EoH starts with the
 provided seed and fills the remaining population. `DGMArchive` adapts archive
@@ -180,6 +182,103 @@ logging. This strategy imposes no generation timeout. For example, wrap its call
 in `asyncio.wait_for(strategy.generate(), timeout=120)` when needed.
 Other strategies can own different state and generation logic without changing
 this loop. The provided abstract base is optional for independent strategy implementations.
+
+## ShinkaEvolve
+
+`ShinkaEvolve` owns the archive and measured search decisions. `ShinkaProposer`
+owns separate diff, full-rewrite, crossover, novelty-judge, and meta-scratchpad
+prompts. The host still evaluates candidates and calls `update()`:
+
+```python
+from pathlib import Path
+import rsikit
+from slick import prompts
+
+prompts.TEMPLATE_ROOT = Path(rsikit.__file__).resolve().parent.parent
+
+
+def make_shinka(initial, baseline, task, provider, embed=None, ensemble=()):
+    operations = rsikit.ShinkaProposer(task, provider, ensemble=ensemble)
+
+    async def propose(parent, history):
+        return await operations(parent, history, context=strategy.context)
+
+    strategy = rsikit.ShinkaEvolve(
+        initial, baseline, propose,
+        objective="score", maximize=True,
+        models=len(operations.models),
+        embed=embed,
+        novelty=operations.assess_novelty,
+        reflect=operations.summarize,
+    )
+    return strategy, operations
+
+
+async def optimize(strategy, evaluate, iterations=100):
+    for _ in range(iterations):
+        candidates = await strategy.generate()
+        evaluations = [await evaluate(candidate) for candidate in candidates]
+        await strategy.update(candidates, evaluations)
+    return strategy.best
+```
+
+The initial `baseline` is an already measured RSIKit `Evaluation`. Its metrics and
+feedback, like all RSIKit evaluations, are public prompt context; keep private and
+held-out measurements outside these records. Sources use RSIKit's existing edit
+boundary convention, including tolerance for one final LF/CRLF.
+
+Default parent weights are sigmoid fitness relative to the island median, divided
+by one plus the parent's submitted offspring count. `parent_selection="power"`
+uses fitness rank to `-power_alpha`; `"uniform"` and `"best"` are also available.
+All policies support `maximize=False`. Each island retains at most `archive_size`
+programs: top elites plus random stepping stones. Ring migration copies
+nonchampions from a snapshot; it never exports an island champion.
+
+`context` includes the selected `model`, `patch` (`diff`, `full`, or `cross`),
+parents, inspirations, objective/direction, guidance, and retry diagnostics.
+Use `models=len(operations.models)` when supplying an ensemble. `ShinkaProposer`
+selects that provider; providers may have different decoding settings. Repairs
+use the base provider; `novelty_provider` and `meta_provider` optionally separate
+the auxiliary models. No providers are created by the library.
+
+Model rewards use improvement above the better of the parent and initial score.
+The same pooled-maximum normalization before the exponential reward as the
+[standalone example](../shinkaevolve/README.md) keeps rewards bounded and invariant
+to positive fitness rescaling. UCB scores become sampling weights; untried models
+go first. Every completed attempt, including a rejected generation, counts once.
+Failed/non-improving attempts receive zero reward. Infrastructure failures and
+cancellation propagate without committing history or model credit.
+
+Supply async `embed(mutable_source) -> Sequence[float]` for embedding filtering.
+Vectors are cached, normalized, and compared within the selected island. Above
+`novelty_threshold`, async `novelty(source, nearest_candidate, similarity)` returns
+`(accepted, reason)`; `operations.assess_novelty` implements the LLM judge. Without
+a judge, high-similarity proposals are rejected directly. Without embeddings,
+only exact duplicates are filtered. There is no implicit embedding service.
+
+`max_proposals` bounds source-generation calls per `generate()`; rejected edits,
+novelty failures, and invalid generated judge JSON share that allowance. Exhaustion
+records one invalid history entry and returns `[]`. No rejected proposal reaches
+the external evaluator. If you compose `RepairingProposer`, use syntax/interface
+checks that do not execute candidates when evaluation savings matter; the novelty
+gate runs after that proposer returns its repaired source.
+
+When configured, meta reflection runs before generation after every
+`meta_interval` completed attempts. Thus stopping does not buy an unused final
+reflection. `operations.summarize(recent, previous, objective=..., maximize=...)`
+receives recent attempts plus their parents and the seed, and replaces the scratchpad with
+at most `max_recommendations` items. Malformed generated recommendations preserve
+the previous scratchpad; infrastructure failures propagate. Meta calls have their
+own records and do not earn mutation-model reward. Scratchpad/cached embeddings
+may update even if a subsequent provider call fails; completed search history does
+not. A retry reuses already completed meta analysis.
+
+Inspect `islands`, `offspring`, `model_gains`, `scratchpad`, `proposals`, and
+`events` alongside the usual `history`, `pending`, and `selections`.
+`operations.records` retains raw model calls and parsing failures. Improvement
+history uses `Decimal` to avoid overflow before normalization; serialize it as
+strings if needed. State remains in memory, and all timeouts and call budgets
+belong to the host.
 
 ## Repair during generation
 
@@ -267,6 +366,121 @@ Runtime dependencies are Slick, Pydantic, and the standard library. No sibling
 agent is required. In this checkout, use the adjacent Slick source as described
 in the root README.
 
+## Reusable API-only improvement modules
+
+All model weights stay fixed. The editable state is instruction text, selected
+context, measured reflection, and the host's candidate archive. The existing
+`generate()` / `update()` loop and two-argument proposal callback still apply.
+
+| Building block | Responsibility |
+| --- | --- |
+| `PromptProposer` | Separate initialization, crossover, mutation, simplification, inspiration, diagnosis/modification and repair prompts |
+| `recent_context(history, limit=8)` | Explicit recent-outcome selection |
+| `ReflectionMemory` | Bounded guidance from measured pairs or failed attempts |
+| `better`, `top_candidates`, `rank_parents`, `lineage_weights` | Reusable score comparison, elite survival and parent selection |
+| `PromptSearch` / `PromptTrial` | Evolve an instruction through fresh downstream comparisons |
+
+For these **new** templates, configure Slick's root to the checkout root once
+at application startup. Existing `SlickProposer` keeps its original root above.
+
+```python
+from pathlib import Path
+import rsikit
+from slick import prompts
+
+prompts.TEMPLATE_ROOT = Path(rsikit.__file__).resolve().parent.parent
+
+def make_strategy(initial, baseline, task, provider):
+    operations = rsikit.PromptProposer(
+        task, provider, instructions={"mutate": "Prefer small, testable changes."}
+    )
+
+    async def propose(parent, history):
+        return await operations(parent, history, context=strategy.context)
+
+    strategy = rsikit.HillClimb(initial, baseline, propose)
+    return strategy, operations
+```
+
+The same closure works with `EoH`, `AlphaEvolve` or `DGMArchive`. Operation names
+are `mutate`, `INIT`, `E1`, `E2`, `M1`, `M2`, `M3`, `alphaevolve`, and
+`dgm-archive`. Instructions are plain text, never evaluated as templates. The
+trusted task, edit boundaries and output schema stay outside the editable block.
+Generation returns `Draft(description, source)` internally and source to the
+strategy. `operations.records` retains rendered prompts, raw responses, lineage
+and errors, including failed parsing. Invalid generated drafts become rejected
+attempts; provider failures propagate. `operations.repair` composes with the
+existing `RepairingProposer`.
+
+After `update()`, optionally call
+`await memory.observe(parent, completed, objective=strategy.objective,
+maximize=strategy.maximize)` and supply `context["guidance"] = memory.texts` on
+the next proposal. Valid unequal scores produce pair reflections; invalid attempts
+with diagnostics produce failure reflections. Ties use no API call. Completed
+guidance is bounded by `max_items`; `attempts` retains the full call trace. Each
+independent trial starts with fresh memory. Reflection errors propagate after the
+candidate update; a failed reflection does not undo measured search progress.
+
+Selection helpers consume valid measured candidates. For example,
+`top_candidates(population, 4, objective="error", maximize=False)` returns the
+four lowest-error candidates. They do not replace archive admission policies:
+EoH keeps cycle-end elites, DGM retains feasible stepping stones, and AlphaEvolve
+keeps champions in distinct cells.
+
+### Evolve one instruction
+
+```python
+search = rsikit.PromptSearch(task, provider, evaluate_instruction)
+best = await search.run(
+    "Prefer small, testable changes.",
+    development=("case-a/repeat-0", "case-a/repeat-1"),
+    selection=("case-b/repeat-0", "case-b/repeat-1"),
+    revisions=3,
+)
+```
+
+The application supplies `async evaluate_instruction(instruction, cases)`, returning
+`PromptTrial(case_ids, utilities, feedback)` in exactly the requested order.
+Utilities are finite and higher is better; negate a minimization objective.
+Include failed outputs using a declared finite penalty rather than dropping them.
+Construct fresh strategy/proposer/memory state for every independent case/repeat.
+
+Each revision must strictly beat a freshly measured incumbent on development
+**and** selection. Evaluation order alternates. Selection feedback never enters
+the revision prompt; callers supply disjoint cohorts and withhold final tests.
+Blank/unchanged revisions and ties retain the incumbent. Incomplete comparisons
+cannot promote; exceptions preserve `best`, `history` and partial `measurements`.
+This is measured instruction hill climbing, not a full reproduction of
+Promptbreeder or GEPA.
+
+Run the complete offline composition from the checkout:
+
+```sh
+optimizer/.venv/bin/python -B -m rsikit.examples.prompt_search --output /tmp/prompt-search.json
+```
+
+It reuses the packing geometry evaluator and parses literal source without executing
+it. Scripted outputs demonstrate a development winner that loses selection, followed
+by a winner on both. The cases are independent repeats of the same packing task;
+this checks the decision plumbing, not generalization or live model quality.
+
+The example owns `BudgetedProvider`: every generation, repair, reflection and
+instruction-revision dispatch consumes the same allowance, including failed API
+calls. Per-trial caps include repair and reflection. Before a pair, capacity is
+checked for the worst-case complete development and selection comparison.
+Exhaustion saves progress and retains the accepted instruction. Transport retries
+must be disabled; hidden provider retries are not counted. Token/currency usage is
+saved as unknown. JSON also records model/settings, task/evaluator identity, case
+IDs, instructions, raw calls, candidate/check evidence and partial comparisons.
+
+For live comparisons, use the same model, decoding settings, evaluator and resource
+allowance for static instructions, static+reflection, evolved instructions and
+existing EoH operators. Record actual resource use. Evaluate the selected instruction
+once on untouched final cases; never reuse selection/final evidence in reflection
+memory construction for development trials. Applications still own isolation,
+timeouts and persistence. Templates are configured for checkout use; installed
+package loading is not provided by this increment.
+
 ## Evaluation contract
 
 ```python
@@ -339,5 +553,6 @@ optimizer/.venv/bin/python -B -m unittest discover -s rsikit/tests
 ../slick/.venv/bin/ruff format rsikit --check
 ```
 
-Tests reuse `tests/providers.py` for scripted Slick calls. The runtime and offline
-example have no dependency on that helper. No paid model calls are needed.
+Tests and the offline prompt-search demonstration reuse `tests/providers.py` for
+scripted Slick calls. The library has no dependency on that helper. No paid model
+calls are needed.

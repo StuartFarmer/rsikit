@@ -1,11 +1,32 @@
 """Verify strategy policy differences with deterministic proposals and measured scores."""
 
+import random
 import unittest
 
 from rsikit import AlphaEvolve, DGMArchive, EoH, Evaluation, HillClimb, SequentialStrategy
 
 
 class PopulationTests(unittest.IsolatedAsyncioTestCase):
+    async def test_extracted_decisions_keep_regression_eligibility_separate_from_best(self):
+        from rsikit.selection import better, lineage_weights, rank_parents, top_candidates
+
+        archive = await self.make_strategy(DGMArchive, score_bounds=(0, 2))
+        child = await self.step(archive, 0.2)
+        self.assertFalse(better(child, archive.best, objective="score"))
+        self.assertEqual(top_candidates(archive.archive, 1, objective="score"), [archive.best])
+        self.assertIn(child, archive.archive)
+        self.assertEqual(
+            lineage_weights(archive.archive, objective="score", score_bounds=(0, 2)),
+            archive.selection_weights(),
+        )
+        self.assertEqual(
+            [c.id for c in rank_parents(archive.archive, 4, rng=random.Random(1))], [0, 1, 1, 0]
+        )
+        islands = await self.make_strategy(AlphaEvolve, cell=lambda c: (c.id,), reset_interval=0)
+        niche = await self.step(islands, 0.2)
+        self.assertTrue(any(niche in cells.values() for cells in islands.islands))
+        self.assertEqual(islands.best.id, 0)
+
     async def test_failed_diversity_callback_does_not_commit_half_an_update(self):
         fail = True
 

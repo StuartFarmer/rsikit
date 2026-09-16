@@ -194,3 +194,98 @@ class GeometryTests(unittest.TestCase):
         ):
             with self.subTest(invalid=invalid):
                 self.assertFalse(evaluate(invalid)["valid"])
+
+
+class ModularPackingTests(unittest.IsolatedAsyncioTestCase):
+    async def test_shinka_filters_before_execution_and_saves_model_history(self):
+        executions = []
+
+        class LiteralSandbox:
+            timeout, image = 10, "literal-parser"
+
+            async def __call__(self, source):
+                executions.append(source)
+                return {"value": read_circles(source)}
+
+        async def embed(source):
+            return [1.0]
+
+        initial = (ROOT / "initial.py").read_text()
+        renamed = initial.replace("0.10", "0.100")
+        improved = initial.replace("0.10", "0.125")
+        provider = ScriptedProvider(
+            [
+                renamed,
+                '{"novel": false, "reason": "Same packing"}',
+                improved,
+                '{"novel": true, "reason": "Improved radii"}',
+            ]
+        )
+        with (
+            tempfile.TemporaryDirectory() as temp,
+            patch.object(prompts, "TEMPLATE_ROOT", ROOT.parents[2]),
+        ):
+            output = Path(temp) / "run"
+            strategy = await experiment._run(
+                output,
+                provider,
+                sandbox=LiteralSandbox(),
+                iterations=1,
+                strategy_name="shinkaevolve",
+                shinka_options={"embed": embed, "patch_types": (("full", 1),)},
+            )
+            self.assertEqual(executions, [initial, improved])
+            self.assertAlmostEqual(strategy.best.evaluation.metrics["sum_radii"], 1.25)
+            saved = json.loads((output / "shinka.json").read_text())
+            self.assertTrue(saved["novelty_enabled"])
+            self.assertEqual(len(saved["proposals"]), 2)
+            self.assertEqual(len(saved["model_gains"][0]), 1)
+            self.assertEqual(json.loads((output / "selections.json").read_text())[0]["model"], 0)
+
+    async def test_modular_generation_reflection_and_saved_evidence_without_docker(self):
+        class LiteralSandbox:
+            timeout, image = 10, "literal-parser"
+
+            async def __call__(self, source):
+                return {"value": read_circles(source)}
+
+        initial = (ROOT / "initial.py").read_text()
+        improved = initial.replace("0.10", "0.125")
+        for kind in ("hillclimb", "eoh", "alphaevolve", "dgm-archive"):
+            responses = (["Increase radii"] if kind == "dgm-archive" else []) + [
+                json.dumps({"description": "Use clearance", "source": improved}),
+                "Keep larger radii",
+            ]
+            with (
+                self.subTest(kind=kind),
+                tempfile.TemporaryDirectory() as temp,
+                patch.object(prompts, "TEMPLATE_ROOT", ROOT.parents[2]),
+            ):
+                output = Path(temp) / "run"
+                result = await experiment._run(
+                    output,
+                    ScriptedProvider(responses),
+                    sandbox=LiteralSandbox(),
+                    prompt_mode="modular",
+                    model_settings={
+                        "model": "fixed-api-model",
+                        "max_output_tokens": 1024,
+                        "temperature": 0.3,
+                    },
+                    reflect=True,
+                    iterations=1,
+                    strategy_name=kind,
+                )
+                self.assertAlmostEqual(result.best.evaluation.metrics["sum_radii"], 1.25)
+                self.assertEqual(
+                    json.loads((output / "reflections.json").read_text())[0]["text"],
+                    "Keep larger radii",
+                )
+                records = json.loads((output / "proposal_records.json").read_text())
+                self.assertEqual(records[0]["parent_ids"], [0])
+                self.assertEqual(records[0]["draft"]["source"], improved)
+                summary = json.loads((output / "summary.json").read_text())
+                self.assertEqual(
+                    summary["model_settings"],
+                    {"model": "fixed-api-model", "max_output_tokens": 1024, "temperature": 0.3},
+                )

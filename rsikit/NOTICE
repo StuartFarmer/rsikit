@@ -1,4 +1,5 @@
-RSIKit search recipes adapt the local slick-bits AlphaEvolve, EoH, and DGM implementations.
+RSIKit search recipes adapt the local slick-bits AlphaEvolve, EoH, DGM, and
+ShinkaEvolve implementations.
 
 The AlphaEvolve seed-all-islands and weaker-half reseeding policies derive from
 FunSearch's program database, via slick-bits/alphaevolve:
@@ -11,3 +12,11 @@ and externally composed proposal generation, repair, and evaluation.
 
 These are research recipes, not reproductions of unpublished AlphaEvolve internals.
 DGMArchive adapts archive selection only; it does not execute evolving agents.
+
+ShinkaEvolve follows Lange, Imajuku, and Cetin, "ShinkaEvolve: Towards Open-Ended
+and Sample-Efficient Program Evolution" (Sakana AI), sections 3 and Appendix A.
+Official framework: https://github.com/SakanaAI/ShinkaEvolve
+Local adaptation: RSIKit generate/update lifecycle, caller-owned evaluation,
+maximize/minimize support, per-island elite/random archives, bounded resampling,
+pooled-maximum reward normalization before expm1, and independently composed
+model, embedding, novelty, and meta callbacks. No official framework code is imported.

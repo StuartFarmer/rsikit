@@ -1,5 +1,11 @@
 # Auto-improving agents as reusable RSIKit building blocks
 
+**Architecture revision:** the [concept-first module comparison](rsikit-conceptual-modules-comparison.md)
+supersedes the grouping and next-build priorities below. It makes variation,
+selection/samplers, islands, archives and quality diversity explicit reusable
+families. This document remains the detailed agent evidence inventory; its training
+comparisons are outside the user's API-only scope.
+
 Investigation date: 2026-09-16. Scope: the local evolutionary/code-improvement agents, relevant reflection and memory methods, and selected adjacent methods that contribute a distinct reusable mechanism. This is a mechanism comparison, not a performance ranking or a claim to reproduce the papers.
 
 Implementation scope subsequently narrowed by the user: **fixed pretrained API models only; no weight updates or fine-tuning**. The [API-only implementation plan](../docs/superpowers/plans/2026-09-16-rsikit-api-improvement.md) removes M12 and focuses on editable instructions, context, reflection and downstream-tested prompt changes. Training methods below remain research comparisons, not planned features.
