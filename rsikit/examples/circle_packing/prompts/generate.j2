@@ -1,0 +1,16 @@
+{% include "system.j2" %}
+
+Propose a feasible packing with a larger sum of radii than the incumbent.
+You may rearrange all circles, vary their radii, and exploit unused space.
+Return only the complete Python source, without commentary.
+
+<incumbent>
+{{ parent.source }}
+{{ parent.evaluation.model_dump(mode="json") | tojson }}
+</incumbent>
+
+<recent_attempts>
+{% for candidate in history %}
+{{ candidate.model_dump(mode="json") | tojson }}
+{% endfor %}
+</recent_attempts>

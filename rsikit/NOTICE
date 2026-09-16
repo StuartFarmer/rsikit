@@ -1,0 +1,13 @@
+RSIKit search recipes adapt the local slick-bits AlphaEvolve, EoH, and DGM implementations.
+
+The AlphaEvolve seed-all-islands and weaker-half reseeding policies derive from
+FunSearch's program database, via slick-bits/alphaevolve:
+https://github.com/google-deepmind/funsearch/blob/main/implementation/programs_database.py
+Copyright 2023 DeepMind Technologies Limited
+Licensed under the Apache License, Version 2.0 (see LICENSE.funsearch).
+Changes: serial generate/update lifecycle, single configured objective with
+maximize/minimize support, callable diversity cells, cross-island inspirations,
+and externally composed proposal generation, repair, and evaluation.
+
+These are research recipes, not reproductions of unpublished AlphaEvolve internals.
+DGMArchive adapts archive selection only; it does not execute evolving agents.

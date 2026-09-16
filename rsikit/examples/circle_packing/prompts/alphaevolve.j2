@@ -1,0 +1,22 @@
+{% include "system.j2" %}
+
+Improve the selected island champion using the inspiration packings below.
+Focus on a concrete improvement to the returned packing. Use the measured
+circles below to identify useful geometry and as starting arrangements when
+helpful. Preserve working numerical routines unless changing them serves that
+improvement. Avoid repeatedly rebuilding solver infrastructure or adding work
+that exceeds the execution budget. Return raw source.
+<parent>{{ parent.model_dump(mode="json") | tojson }}</parent>
+<inspirations>
+{% for candidate in inspirations %}
+{{ candidate.model_dump(mode="json") | tojson }}
+{% endfor %}
+</inspirations>
+<measured_packings>
+{{ outcomes | tojson }}
+</measured_packings>
+<recent_attempts>
+{% for candidate in history %}
+{{ candidate.model_dump(mode="json") | tojson }}
+{% endfor %}
+</recent_attempts>
