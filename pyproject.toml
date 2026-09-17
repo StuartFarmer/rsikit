@@ -13,12 +13,14 @@ dependencies = [
     "numpy>=1.24,<3",
     "slick-ai>=0.3,<0.4",
     "pydantic>=2,<3",
+    "sqlmodel>=0.0.24,<0.1",
 ]
 
 [project.optional-dependencies]
 dev = ["ruff>=0.4"]
 openai = ["slick-ai[openai]>=0.3,<0.4"]
 openrouter = ["slick-ai[openai]>=0.3,<0.4"]
+video = ["gymnasium[classic-control]>=1.3,<2", "moviepy>=2,<3"]
 
 [tool.hatch.build.targets.wheel]
 packages = ["rsikit"]

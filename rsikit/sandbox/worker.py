@@ -6,7 +6,7 @@ import resource
 import socket
 import sys
 
-from rsikit.policy import Policy
+from rsikit.controller import Controller
 from rsikit.sandbox.codec import MAX_MESSAGE, decode, decode_space, dumps, encode, loads
 
 
@@ -20,8 +20,8 @@ async def candidate(channel):
                 namespace = {"__name__": "candidate"}
                 exec(compile(request["source"], "candidate.py", "exec"), namespace)
                 solution = namespace["Solution"]
-                if not isinstance(solution, type) or not issubclass(solution, Policy):
-                    raise TypeError("Solution must subclass rsikit.policy.Policy")
+                if not isinstance(solution, type) or not issubclass(solution, Controller):
+                    raise TypeError("Solution must subclass rsikit.Controller")
                 policy = solution(
                     decode_space(request["observation_space"]),
                     decode_space(request["action_space"]),

@@ -6,13 +6,14 @@ import math
 from pathlib import Path
 from uuid import uuid4
 
+from rsikit.controller import Controller
 from rsikit.episode import InfrastructureError, PolicyError, PolicyTimeout, run_episode
 from rsikit.policy import Policy
 
 from .codec import MAX_MESSAGE, MAX_SOURCE, decode, dumps, encode, encode_space, loads
 
 
-class SandboxPolicy(Policy):
+class SandboxPolicy(Controller):
     """Persistent remote instance; candidate source is never executed on the host."""
 
     def __init__(
@@ -226,3 +227,19 @@ async def run_program(
         max_steps=max_steps,
         instructions=instructions,
     )
+
+
+async def run_policy(policy: Policy, make_env, **kwargs) -> tuple:
+    """Execute a generated Policy directly; its implementation never runs on the host."""
+    call_timeout = kwargs.pop("call_timeout", 10.0)
+
+    def make_controller(observation_space, action_space, *, instructions):
+        return SandboxPolicy(
+            observation_space,
+            action_space,
+            instructions=instructions,
+            source=policy._implementation,
+            call_timeout=call_timeout,
+        )
+
+    return await run_episode(make_env, make_controller, **kwargs)

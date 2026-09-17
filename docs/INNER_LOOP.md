@@ -1,13 +1,16 @@
 # Inner-loop API
 
+For generated policy objects and durable evaluations, start with [Run](RUNS.md).
+The functions below are the stateless execution layer.
+
 A task is a standard Gymnasium environment. RSIKit connects it to an async policy,
 runs until termination or truncation, and closes both. No weights are trained.
 
 ```python
-from rsikit import Policy, run_episode
+from rsikit import Controller, run_episode
 
 
-class Solution(Policy):
+class Solution(Controller):
     async def act(self, observation):
         return self.action_space.sample()
 
@@ -34,7 +37,7 @@ Existing Gymnasium time limits apply. Optional `max_steps` adds a `TimeLimit`
 cap; it cannot extend a registered environment's limit. Set a cap for custom
 environments that may never terminate. Seeds default to `None`.
 
-## Policy lifecycle and instructions
+## Controller lifecycle and instructions
 
 The policy constructor receives copied observation/action spaces and optional
 `instructions`. Each episode creates one instance, calls `await reset(seed=...)`,
@@ -59,7 +62,7 @@ from rsikit import run_program
 result = await run_program(Path("solution.py"), "CartPole-v1", max_steps=100)
 ```
 
-The source must export `Solution(Policy)`. `run_program` has the same environment,
+The source must export `Solution(Controller)`. `run_program` has the same environment,
 seed, instruction, step-limit, and return contracts as `run_episode`. It reads
 source as data and runs it in Docker; never import generated source on the host.
 The environment and scoring stay on the host. One remote policy instance and

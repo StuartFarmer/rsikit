@@ -13,8 +13,8 @@ import gymnasium as gym
 import numpy as np
 from gymnasium import spaces
 
+from rsikit.controller import Controller
 from rsikit.episode import InfrastructureError, PolicyError, PolicyTimeout, run_episode
-from rsikit.policy import Policy
 from rsikit.sandbox import SandboxPolicy, run_program
 from rsikit.sandbox.codec import decode, decode_space, dumps, encode, encode_space, loads
 
@@ -22,9 +22,9 @@ INSTRUCTIONS = "Count from zero.\nPreserve café and π exactly."
 COUNTER_SOURCE = """
 import asyncio
 import os
-from rsikit import Policy
+from rsikit import Controller
 
-class Solution(Policy):
+class Solution(Controller):
     async def reset(self, *, seed=None):
         await super().reset(seed=seed)
         self.count = 0 if self.instructions == "Count from zero.\\nPreserve café and π exactly." else 5
@@ -57,7 +57,7 @@ class CounterEnv(gym.Env):
         return self.count, float(action + 1), self.count == 2, False, {}
 
 
-class CounterPolicy(Policy):
+class CounterPolicy(Controller):
     async def reset(self, *, seed=None):
         await super().reset(seed=seed)
         self.count = 0 if self.instructions == INSTRUCTIONS else 5
@@ -212,7 +212,7 @@ class SandboxEpisodeSmoke(unittest.IsolatedAsyncioTestCase):
         ):
             await evaluate(INITIAL)
 
-    async def test_inner_loop_demo_reports_all_five_policies_and_failures(self):
+    async def test_inner_loop_demo_passes_generated_policies_to_run(self):
         import contextlib
         import io
         import json
@@ -220,50 +220,97 @@ class SandboxEpisodeSmoke(unittest.IsolatedAsyncioTestCase):
         from slick import prompts
 
         import examples.inner_loop as demo
+        import rsikit.generation as generation
+        from rsikit import Run
         from tests.providers import ScriptedProvider
 
-        def source(action):
-            return (
-                "from rsikit import Policy\nclass Solution(Policy):\n"
-                f"    async def act(self, observation):\n        return {action}\n"
+        def response(name, action):
+            return json.dumps(
+                {
+                    "name": name,
+                    "summary": "Generated test policy",
+                    "implementation": (
+                        "from rsikit import Controller\nclass Solution(Controller):\n"
+                        f"    async def act(self, observation):\n        return {action}\n"
+                    ),
+                }
             )
 
         provider = ScriptedProvider(
             [
-                demo.PolicyProposal(
-                    summary="scripted random", source=source("self.action_space.sample()")
-                ),
-                demo.PolicyProposal(
-                    summary="scripted angle", source=source("int(observation[2] > 0)")
-                ),
-                demo.PolicyProposal(
-                    summary="scripted PD",
-                    source=source("int(observation[2] + 0.5 * observation[3] > 0)"),
-                ),
-                demo.PolicyProposal(summary="invalid action", source=source("50")),
-                demo.PolicyProposal(summary="duplicate", source=source("int(observation[2] > 0)")),
+                response("Dice", "self.action_space.sample()"),
+                response("Angle", "int(observation[2] > 0)"),
+                response("PD", "int(observation[2] + 0.5 * observation[3] > 0)"),
+                response("Broken", "50"),
+                response("Other", "int(observation[2] + 0.6 * observation[3] > 0)"),
             ]
         )
-        provider.model = "scripted-test-provider"
         with tempfile.TemporaryDirectory() as directory:
             output = Path(directory) / "demo"
-            printed = io.StringIO()
-            with patch.object(prompts, "TEMPLATE_ROOT", Path(demo.__file__).parent / "prompts"):
-                with contextlib.redirect_stdout(printed):
+            with patch.object(
+                prompts, "TEMPLATE_ROOT", Path(generation.__file__).parent / "prompts"
+            ):
+                with contextlib.redirect_stdout(io.StringIO()):
                     result = await demo.run_demo(provider, output, seeds=(1, 2), max_steps=30)
             self.assertEqual(len(provider.calls), 5)
-            self.assertEqual(len(list(output.glob("*.py"))), 5)
+            self.assertEqual(len(list((output / "exports").glob("*.py"))), 5)
             self.assertEqual(json.loads((output / "results.json").read_text()), result)
-            self.assertEqual(result["model"], "scripted-test-provider")
-            rows = result["policies"]
-            self.assertEqual(rows[2]["mean_return"], 30)
-            self.assertEqual([episode["seed"] for episode in rows[2]["episodes"]], [1, 2])
-            self.assertIsNone(rows[3]["mean_return"])
-            self.assertIn("PolicyError", rows[3]["error"])
-            self.assertIn("Duplicate policy", rows[4]["error"])
-            for approach in demo.APPROACHES:
-                self.assertIn(f"| {approach} |", printed.getvalue())
-                self.assertIn(f"| {approach} |", (output / "report.md").read_text())
+            self.assertEqual(result[2]["name"], "PD")
+            self.assertEqual(result[2]["mean_return"], 30)
+            self.assertIsNone(result[3]["mean_return"])
+            with Run.open(output) as run:
+                self.assertEqual(len(run.policies()), 5)
+                self.assertEqual(len(run.executions()), 10)
+                self.assertEqual(len(await run.resume()), 10)
+
+    async def test_run_records_real_video_artifact(self):
+        import json
+        from importlib.util import find_spec
+
+        from slick import prompts
+
+        import rsikit.generation as generation
+        from rsikit import Run, generate
+        from tests.providers import ScriptedProvider
+
+        if find_spec("moviepy") is None or find_spec("pygame") is None:
+            self.skipTest("Install .[video] for video checks")
+        with patch.object(prompts, "TEMPLATE_ROOT", Path(generation.__file__).parent / "prompts"):
+            policy = await generate(
+                "Balance CartPole",
+                provider=ScriptedProvider(
+                    [
+                        json.dumps(
+                            {
+                                "name": "Steady",
+                                "implementation": (
+                                    "from rsikit import Controller\nclass Solution(Controller):\n"
+                                    "    async def act(self, observation):\n"
+                                    "        return int(observation[2] + 0.5 * observation[3] > 0)\n"
+                                ),
+                            }
+                        )
+                    ]
+                ),
+            )
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory) / "video"
+            with Run.create(
+                name="video", path=output, environment="CartPole-v1", max_steps=5, record_video=True
+            ) as run:
+                result = (await run.evaluate(policy, seeds=[1]))[0]
+                self.assertEqual(result.status, "completed")
+                self.assertEqual(result.reward, 5)
+                self.assertEqual(len(result.artifacts), 1)
+                video = output / result.artifacts[0]
+                self.assertGreater(video.stat().st_size, 100)
+                from moviepy import VideoFileClip
+
+                with VideoFileClip(str(video)) as clip:
+                    self.assertGreater(clip.duration, 0)
+                    self.assertEqual(clip.get_frame(0).shape[2], 3)
+            with Run.open(output) as run:
+                self.assertEqual(run.executions()[0].artifacts, result.artifacts)
 
     async def test_failure_deadline_and_cleanup(self):
         for body in ("raise RuntimeError('candidate failure')", "return object()", "os._exit(3)"):

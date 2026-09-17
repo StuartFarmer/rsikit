@@ -7,7 +7,7 @@ from copy import deepcopy
 
 import gymnasium as gym
 
-from .policy import Policy
+from .controller import Controller
 
 
 class InfrastructureError(RuntimeError):
@@ -24,7 +24,7 @@ class PolicyTimeout(PolicyError):
 
 async def run_episode(
     make_env: str | Callable[[], gym.Env],
-    make_policy: Callable[..., Policy],
+    make_policy: Callable[..., Controller],
     *,
     env_seed: int | None = None,
     policy_seed: int | None = None,
