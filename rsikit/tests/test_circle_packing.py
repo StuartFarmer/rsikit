@@ -13,7 +13,7 @@ from slick import prompts
 from rsikit.examples.circle_packing import experiment, visualize
 from rsikit.examples.circle_packing.evaluate import evaluate, read_circles
 from rsikit.sandbox import PythonSandbox
-from tests.providers import ScriptedProvider
+from rsikit.tests.providers import ScriptedProvider
 
 ROOT = Path(__file__).resolve().parents[1] / "examples/circle_packing"
 

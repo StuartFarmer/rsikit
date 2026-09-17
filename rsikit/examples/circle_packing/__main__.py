@@ -62,7 +62,7 @@ def main():
         parser.error("Set OPENROUTER_API_KEY before running.")
     if importlib.util.find_spec("openai") is None:
         parser.error(
-            "Install: uv pip install --python optimizer/.venv/bin/python "
+            "Install: uv pip install --python .venv/bin/python "
             "-r rsikit/examples/circle_packing/requirements.txt"
         )
     prompts.TEMPLATE_ROOT = (

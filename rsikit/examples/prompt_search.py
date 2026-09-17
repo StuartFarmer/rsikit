@@ -216,7 +216,7 @@ def demo_responses() -> list[str]:
 
 
 if __name__ == "__main__":
-    from tests.providers import ScriptedProvider
+    from rsikit.tests.providers import ScriptedProvider
 
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--output", type=Path, default=Path("runs/prompt-search-offline.json"))

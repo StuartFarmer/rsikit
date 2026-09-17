@@ -11,7 +11,7 @@ from slick import prompts
 
 from rsikit import Candidate, EoH, Evaluation, EvaluationError, HillClimb, ProposalRejected
 from rsikit.proposer import Draft, PromptProposer
-from tests.providers import ScriptedProvider
+from rsikit.tests.providers import ScriptedProvider
 
 ROOT = Path(__file__).resolve().parents[2]
 
@@ -26,6 +26,42 @@ def candidate(identifier, score, *, valid=True, feedback=""):
 
 
 class PromptComponentTests(unittest.IsolatedAsyncioTestCase):
+    async def test_crossover_records_all_parents_and_keeps_primary_edit_boundary(self):
+        class Cross(HillClimb):
+            def select_parent(self):
+                self.context = {"operation": "crossover", "parents": tuple(self.history[:2])}
+                return self.history[0]
+
+        initial = "fixed\n# EVOLVE-BLOCK-START\nold\n# EVOLVE-BLOCK-END\n"
+        source = initial.replace("old", "combined")
+        provider = ScriptedProvider(
+            [
+                Draft(description="combine", source=source),
+                Draft(description="illegal", source=source.replace("fixed", "changed")),
+            ]
+        )
+        operations = PromptProposer("Improve", provider)
+
+        async def propose(parent, history):
+            return await operations(parent, history, context=strategy.context)
+
+        strategy = Cross(initial, Evaluation(valid=True, metrics={"score": 1}), propose)
+        strategy.history.append(candidate(1, 0.5))
+        batch = await strategy.generate()
+        self.assertEqual(batch[0].source, source)
+        self.assertEqual(batch[0].parent_ids, (0, 1))
+        self.assertEqual(batch[0].parent_id, 0)
+        await strategy.update(batch, [Evaluation(valid=True, metrics={"score": 2})])
+        self.assertEqual(await strategy.generate(), [])
+        self.assertEqual(strategy.history[-1].parent_ids, (0, 1))
+        self.assertFalse(strategy.history[-1].evaluation.valid)
+        self.assertEqual(operations.records[0]["operation"], "crossover")
+        with self.assertRaisesRegex(ValueError, "distinct parents"):
+            await operations(
+                strategy.best, tuple(strategy.history), context={"operation": "crossover"}
+            )
+        self.assertEqual(len(provider.calls), 2)
+
     async def test_provider_schema_failure_does_not_become_a_candidate_rejection(self):
         with self.assertRaises(ValidationError) as failure:
             Draft.model_validate({})

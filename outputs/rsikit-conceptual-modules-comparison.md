@@ -6,6 +6,13 @@ the architectural grouping and next-build priorities of the
 its agent-by-agent evidence. The first API-only implementation remains useful,
 but does not yet provide this full set of independently reusable concepts.
 
+**Implementation follow-up:** the [concept module plan](../docs/superpowers/plans/2026-09-16-rsikit-concepts.md)
+now delivers direct samplers, UCB1, Beta-Bernoulli Thompson sampling, explicit
+crossover/lineage, elite/stepping-stone/QD archives, feature grids and snapshot
+migration. The [usage guide](../README.md) and
+[two offline compositions](../rsikit/examples/concepts.py) show their current contracts.
+The broader families below still include variants beyond this first implementation.
+
 Scope: pretrained models called through APIs. Editable prompts, examples, guidance,
 candidate artifacts and host-side search state. Updating a sampler's counts or
 posterior is ordinary search bookkeeping; it does not update the LLM's weights.
@@ -51,10 +58,10 @@ below are grounded in inspected local code or the linked primary literature.
 | Component variation | Parent system(s) and named editable component → changed component(s) | GEPA and InstOptima; preserve components outside the chosen edit scope |
 | Guided variation | Any compatible operator plus attributed feedback → a child | ReEvo guidance can condition crossover or mutation; reflection is not itself a crossover operator |
 
-Sources: [EoH](../eoh/agent.py), [AEL](../ael/agent.py),
-[LLM-GP](../llm_gp/agent.py), [EvoPrompt](../evoprompt/agent.py),
-[ReEvo](../reevo/agent.py), [GEPA](../gepa/agent.py),
-[InstOptima](../instoptima/agent.py).
+Sources: [EoH](https://github.com/StuartFarmer/slick-bits/blob/355335f290ddb1ea9b08dbd41aeccc6136779a69/eoh/agent.py), [AEL](https://github.com/StuartFarmer/slick-bits/blob/355335f290ddb1ea9b08dbd41aeccc6136779a69/ael/agent.py),
+[LLM-GP](https://github.com/StuartFarmer/slick-bits/blob/355335f290ddb1ea9b08dbd41aeccc6136779a69/llm_gp/agent.py), [EvoPrompt](https://github.com/StuartFarmer/slick-bits/blob/355335f290ddb1ea9b08dbd41aeccc6136779a69/evoprompt/agent.py),
+[ReEvo](https://github.com/StuartFarmer/slick-bits/blob/355335f290ddb1ea9b08dbd41aeccc6136779a69/reevo/agent.py), [GEPA](https://github.com/StuartFarmer/slick-bits/blob/355335f290ddb1ea9b08dbd41aeccc6136779a69/gepa/agent.py),
+[InstOptima](https://github.com/StuartFarmer/slick-bits/blob/355335f290ddb1ea9b08dbd41aeccc6136779a69/instoptima/agent.py).
 
 Separate **operator intent** from **proposal mechanism**. A crossover can be an
 LLM prompt or a deterministic merge of compatible components. The operation's
@@ -115,12 +122,12 @@ evidence of independent causal contribution.
 | Local source | Selection mechanism and option identity | Caveat / confidence |
 |---|---|---|
 | [RSIKit EoH/DGM](../rsikit/selection.py) | Rank-weighted parents; sigmoid quality divided by one plus admitted child count | Inspected implementation; neither is an uncertainty-estimating bandit |
-| [AdaEvolve](../adaevolve/agent.py) | UCB-style argmax over islands, with decayed improvement reward; distinct exploration-intensity rule | Inspected; reward uses decayed counts while bonus uses raw visits; migrants do not receive UCB credit |
-| [QUBE](../qube/agent.py) | Confidence ranking over behavioral clusters, then length-biased softmax sampling within selected clusters | Inspected; island choice is uniform; quality becomes observed offspring mean, not just parent quality; fallback uses a seed score |
-| [ShinkaEvolve](../shinkaevolve/agent.py) | UCB-like weights over model/provider options, sampled proportionally; positive gains transformed on a pooled scale | Inspected local adaptation; proportional choice is not classic argmax UCB1 |
-| [ProTeGi](../protegi/agent.py) | UCB/UCB-E allocate evaluation examples among prompt candidates; also successive rejects/halving | Inspected; uncertainty concerns estimated prompt quality, not mutation productivity |
-| [LATS](../lats/agent.py) | UCT selects tree branches using visits and backed-up reward | Inspected tree donor; requires tree lifecycle, not only a UCB formula |
-| Thompson sampling | Proposed member of the same selection family | No named implementation found in the local `agent.py` scan; grounded in the primary tutorial, not attributed to these agents |
+| [AdaEvolve](https://github.com/StuartFarmer/slick-bits/blob/355335f290ddb1ea9b08dbd41aeccc6136779a69/adaevolve/agent.py) | UCB-style argmax over islands, with decayed improvement reward; distinct exploration-intensity rule | Inspected; reward uses decayed counts while bonus uses raw visits; migrants do not receive UCB credit |
+| [QUBE](https://github.com/StuartFarmer/slick-bits/blob/355335f290ddb1ea9b08dbd41aeccc6136779a69/qube/agent.py) | Confidence ranking over behavioral clusters, then length-biased softmax sampling within selected clusters | Inspected; island choice is uniform; quality becomes observed offspring mean, not just parent quality; fallback uses a seed score |
+| [ShinkaEvolve](https://github.com/StuartFarmer/slick-bits/blob/355335f290ddb1ea9b08dbd41aeccc6136779a69/shinkaevolve/agent.py) | UCB-like weights over model/provider options, sampled proportionally; positive gains transformed on a pooled scale | Inspected local adaptation; proportional choice is not classic argmax UCB1 |
+| [ProTeGi](https://github.com/StuartFarmer/slick-bits/blob/355335f290ddb1ea9b08dbd41aeccc6136779a69/protegi/agent.py) | UCB/UCB-E allocate evaluation examples among prompt candidates; also successive rejects/halving | Inspected; uncertainty concerns estimated prompt quality, not mutation productivity |
+| [LATS](https://github.com/StuartFarmer/slick-bits/blob/355335f290ddb1ea9b08dbd41aeccc6136779a69/lats/agent.py) | UCT selects tree branches using visits and backed-up reward | Inspected tree donor; requires tree lifecycle, not only a UCB formula |
+| [RSIKit Thompson sampling](../rsikit/selection.py) | New Beta-Bernoulli implementation in the selection family | No named implementation was found in the original local `agent.py` scan; added from the primary method, not attributed to those donors |
 
 An observation should retain the selected option, selection role, attempt ID,
 outcome, reference baseline, reward definition and resource usage. For example,
@@ -137,15 +144,15 @@ local policy or memory state. A topology specifies which islands can exchange
 candidates. Migration determines what moves, where, when and how arrivals are
 admitted. Reset/reseeding replaces a search population; it is not the same as
 migrating a few candidates. Island selection is delegated to a sampler.
-[Local AlphaEvolve](../alphaevolve/agent.py), [AdaEvolve](../adaevolve/agent.py)
-and [ShinkaEvolve](../shinkaevolve/agent.py) demonstrate different exchange policies.
+[Local AlphaEvolve](https://github.com/StuartFarmer/slick-bits/blob/355335f290ddb1ea9b08dbd41aeccc6136779a69/alphaevolve/agent.py), [AdaEvolve](https://github.com/StuartFarmer/slick-bits/blob/355335f290ddb1ea9b08dbd41aeccc6136779a69/adaevolve/agent.py)
+and [ShinkaEvolve](https://github.com/StuartFarmer/slick-bits/blob/355335f290ddb1ea9b08dbd41aeccc6136779a69/shinkaevolve/agent.py) demonstrate different exchange policies.
 
 **An archive is a retained set with an admission rule.** It can keep elites,
 all valid stepping stones, niche champions, non-dominated tradeoffs or complementary
 specialists. A global best can be tracked independently. Selecting a candidate
 for reproduction does not imply it survives the next archive update.
-[DGM archive](../rsikit/population.py), [MEOH](../meoh/agent.py),
-[EoH-S](../eoh_s/agent.py).
+[DGM archive](../rsikit/population.py), [MEOH](https://github.com/StuartFarmer/slick-bits/blob/355335f290ddb1ea9b08dbd41aeccc6136779a69/meoh/agent.py),
+[EoH-S](https://github.com/StuartFarmer/slick-bits/blob/355335f290ddb1ea9b08dbd41aeccc6136779a69/eoh_s/agent.py).
 
 **Quality diversity combines measured quality with behavioral coverage.** In a
 MAP-Elites-style recipe, descriptors locate a candidate in a niche and its quality
@@ -153,7 +160,7 @@ competes with the incumbent of that niche. A useful new niche may contain a
 candidate worse than the global best. Requested features in a generation prompt
 do not establish its measured niche.
 [MAP-Elites paper](https://arxiv.org/abs/1504.04909),
-[In-context QD implementation](../in_context_qd/agent.py).
+[In-context QD implementation](https://github.com/StuartFarmer/slick-bits/blob/355335f290ddb1ea9b08dbd41aeccc6136779a69/in_context_qd/agent.py).
 
 | Diversity concept | What must stay distinct |
 |---|---|
@@ -211,11 +218,11 @@ descriptor calculation or archive admission.
 
 | Concept | Present implementation | Missing reusable boundary |
 |---|---|---|
-| Variation | `PromptProposer` has separate operation prompts, guidance and multi-parent context | Public conceptual mutation/crossover vocabulary, arity and full lineage beyond recipe aliases |
-| Selection | `better`, `top_candidates`, `rank_parents`, `lineage_weights` | Common selection family containing simple samplers and explicit stateful UCB/Thompson policies; observation attribution |
-| Archives/survival | Elite, all-valid and niche policies live inside concrete strategies | Independently usable admission/store behavior with explicit update timing |
-| Islands | `AlphaEvolve` owns island cell dictionaries and reset policy | Reusable island membership/topology and migration separate from local archive type |
-| QD | `AlphaEvolve` accepts a cell callback and keeps cell champions | Reusable descriptors/grid, QD archive and coverage/quality measurements |
+| Variation | `PromptProposer` has mutation, explicit crossover, legacy EoH operations and multi-parent lineage | Further component/differential operator variants |
+| Selection | Direct samplers, UCB1 and binary Thompson policies, attributed observations and existing survival helpers | Discounted/windowed variants, continuous-reward posteriors and explicit racing recipes |
+| Archives/survival | Independent elite, all-valid and QD archives with measured admission | Pareto and specialist portfolio policies; legacy recipe extraction remains incremental |
+| Islands | Independent archive populations plus snapshot migration over directed routes; adaptive allocation in the example | Generalized reseeding/spawning policies remain inside donor recipes |
+| QD | `FeatureGrid`, measured-cell `QDArchive`, coverage and example quality measurements | Richer descriptors/novelty and alternative niche structures |
 | Reflection/memory | `ReflectionMemory`, recent context and recorded evidence | Broader consolidation/retrieval and scope policies when a recipe needs them |
 | Evaluation | Validity, named finite metrics and task feedback | Explicit per-case vectors, descriptors and repeated-observation metadata where required |
 | Meta-optimization | `PromptSearch` compares instruction revisions with independent selection evidence | Reuse variation/sampling/archive concepts inside text-level meta-search |
@@ -253,8 +260,10 @@ the source inventory. This revision checked current local selection, variation,
 island and QD code; links above identify the implementations. Local behavior has
 high confidence from source inspection; it is not a fresh claim of paper fidelity
 or reproduced benchmark results. ShinkaEvolve and ProTeGi provide additional local
-selection examples beyond that earlier inventory. Thompson sampling is explicitly
-a proposed addition. No runtime code, model calls or training jobs were changed/run.
+selection examples beyond that earlier inventory. Thompson sampling was proposed
+in this revision and subsequently implemented separately in RSIKit. The taxonomy
+pass changed documentation only; the linked follow-up implementation used offline
+scripted checks and made no live model calls or training runs.
 
 Primary references newly checked:
 

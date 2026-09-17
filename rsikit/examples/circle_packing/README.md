@@ -5,14 +5,14 @@ evaluator, model prompts, repair loop, and measured selection.
 
 ## Run
 
-From the `slick-bits` repository root, using the existing environment and adjacent
+From the RSIKit repository root, using the existing environment and adjacent
 Slick checkout:
 
 ```sh
-uv pip install --python optimizer/.venv/bin/python -r rsikit/examples/circle_packing/requirements.txt
+uv pip install --python .venv/bin/python -r rsikit/examples/circle_packing/requirements.txt
 docker build -t rsikit-sandbox:local rsikit/sandbox
 export OPENROUTER_API_KEY='your-key'
-optimizer/.venv/bin/python -B -m rsikit.examples.circle_packing --iterations 5
+.venv/bin/python -B -m rsikit.examples.circle_packing --iterations 5
 ```
 
 Start Docker Desktop before running. Build the image once (and rebuild when its
@@ -28,11 +28,11 @@ your OpenRouter account. A shorter first run is `--iterations 2`.
 Run the same problem, seed program, evaluator, and visualizations with:
 
 ```sh
-optimizer/.venv/bin/python -B -m rsikit.examples.circle_packing --strategy hillclimb --iterations 25
-optimizer/.venv/bin/python -B -m rsikit.examples.circle_packing --strategy alphaevolve --iterations 25
-optimizer/.venv/bin/python -B -m rsikit.examples.circle_packing --strategy eoh --iterations 25
-optimizer/.venv/bin/python -B -m rsikit.examples.circle_packing --strategy dgm-archive --iterations 25
-optimizer/.venv/bin/python -B -m rsikit.examples.circle_packing --strategy shinkaevolve --iterations 25
+.venv/bin/python -B -m rsikit.examples.circle_packing --strategy hillclimb --iterations 25
+.venv/bin/python -B -m rsikit.examples.circle_packing --strategy alphaevolve --iterations 25
+.venv/bin/python -B -m rsikit.examples.circle_packing --strategy eoh --iterations 25
+.venv/bin/python -B -m rsikit.examples.circle_packing --strategy dgm-archive --iterations 25
+.venv/bin/python -B -m rsikit.examples.circle_packing --strategy shinkaevolve --iterations 25
 ```
 
 | Option | Behavior |
@@ -69,7 +69,7 @@ All these calls use the supplied API accounts; offline tests use scripted provid
 Shinka runs also save `shinka.json` with proposal/novelty decisions, migration and
 meta events, the scratchpad, provider names, and Decimal model gains as strings.
 `selections.json` includes the chosen model index and patch operation. See the
-[RSIKit API](../../README.md#shinkaevolve) for archive and normalization choices.
+[RSIKit API](../../../README.md#shinkaevolve) for archive and normalization choices.
 
 EoH defaults to a population of four: three additions beside the seed, then 20
 attempts per full cycle (four per operator). Parents come from the same population
@@ -98,8 +98,8 @@ implementation. Diagnosis and modification use the fixed model directly.
 Legacy prompts remain the default. Opt into the task-independent RSIKit operations:
 
 ```sh
-optimizer/.venv/bin/python -B -m rsikit.examples.circle_packing --prompt-mode modular --reflect --iterations 5
-optimizer/.venv/bin/python -B -m rsikit.examples.circle_packing --prompt-mode modular --instruction-file instruction.txt
+.venv/bin/python -B -m rsikit.examples.circle_packing --prompt-mode modular --reflect --iterations 5
+.venv/bin/python -B -m rsikit.examples.circle_packing --prompt-mode modular --instruction-file instruction.txt
 ```
 
 These are new experimental prompts, not a wording-preserving migration. The
@@ -238,7 +238,7 @@ seconds. Matplotlib and Pillow render it without a display server or FFmpeg.
 To generate or rebuild these visuals for an existing run without model calls:
 
 ```sh
-optimizer/.venv/bin/python -B -m rsikit.examples.circle_packing.visualize runs/circle-packing-YOUR_RUN
+.venv/bin/python -B -m rsikit.examples.circle_packing.visualize runs/circle-packing-YOUR_RUN
 ```
 
 Attempt IDs may have gaps when generation exhausts repairs. Their final source
@@ -260,7 +260,7 @@ retries are disabled. Increase output tokens if reasoning leaves truncated code.
 ## Verify without model calls
 
 ```sh
-RSIKIT_DOCKER_TESTS=1 optimizer/.venv/bin/python -B -m unittest discover -s rsikit/tests
+RSIKIT_DOCKER_TESTS=1 .venv/bin/python -B -m unittest discover -s rsikit/tests
 ```
 
 The integration tests use scripted responses and the real Docker worker: a failed

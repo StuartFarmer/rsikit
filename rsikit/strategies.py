@@ -15,6 +15,7 @@ class Candidate(BaseModel, frozen=True):
     id: int
     source: str
     parent_id: int | None = None
+    parent_ids: tuple[int, ...] = ()
     evaluation: Evaluation | None = None
 
 
@@ -82,6 +83,7 @@ class SequentialStrategy(ABC):
         if self.pending is not None:
             raise RuntimeError("Update the pending candidate before generating again")
         parent = self.select_parent()
+        parent_ids = tuple(c.id for c in self.context.get("parents", (parent,)))
         try:
             source = await self.propose(parent, tuple(self.history))
         except ProposalRejected as exc:
@@ -90,11 +92,14 @@ class SequentialStrategy(ABC):
                     id=len(self.history),
                     source=exc.source,
                     parent_id=parent.id,
+                    parent_ids=parent_ids,
                     evaluation=Evaluation(valid=False, feedback=str(exc)),
                 )
             )
             return []
-        candidate = Candidate(id=len(self.history), source=source, parent_id=parent.id)
+        candidate = Candidate(
+            id=len(self.history), source=source, parent_id=parent.id, parent_ids=parent_ids
+        )
         try:
             validate_source(source, parent.source)
         except InvalidCandidate as exc:

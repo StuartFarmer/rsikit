@@ -10,7 +10,7 @@ from slick import prompts
 
 from rsikit import Candidate, Evaluation, EvaluationError, ShinkaEvolve, ShinkaProposer
 from rsikit.edits import InvalidCandidate, apply_diff
-from tests.providers import ScriptedProvider
+from rsikit.tests.providers import ScriptedProvider
 
 ROOT = Path(__file__).resolve().parents[2]
 SOURCE = "fixed\n# EVOLVE-BLOCK-START\nseed\n# EVOLVE-BLOCK-END\n"

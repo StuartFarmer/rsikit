@@ -167,6 +167,7 @@ class PromptProposer(Proposer):
         provider = _RecordedProvider(self.provider, record)
         operations = {
             "mutate": self.mutate,
+            "crossover": self.crossover,
             "INIT": self.initialize,
             "E1": self.explore_diverse,
             "E2": self.explore_shared,
@@ -176,6 +177,8 @@ class PromptProposer(Proposer):
             "alphaevolve": self.use_inspirations,
         }
         try:
+            if operation == "crossover" and len({c.id for c in parents}) < 2:
+                raise ValueError("Crossover needs at least two distinct parents")
             if operation == "dgm-archive":
                 diagnosis = await self.diagnose(data, provider=provider)
                 record["diagnosis"] = diagnosis
@@ -221,6 +224,10 @@ class PromptProposer(Proposer):
 
     @prompt(template="rsikit/prompts/operations/mutate.j2", output_type=Draft)
     async def mutate(self, data, *, generated: Draft) -> Draft:
+        return generated
+
+    @prompt(template="rsikit/prompts/operations/crossover.j2", output_type=Draft)
+    async def crossover(self, data, *, generated: Draft) -> Draft:
         return generated
 
     @prompt(template="rsikit/prompts/operations/initialize.j2", output_type=Draft)

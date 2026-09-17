@@ -90,9 +90,7 @@ def main():
     if not os.environ.get("OPENROUTER_API_KEY"):
         parser.error("Set OPENROUTER_API_KEY before running this example.")
     if importlib.util.find_spec("openai") is None:
-        parser.error(
-            "Install the SDK: uv pip install --python optimizer/.venv/bin/python 'openai>=2,<3'"
-        )
+        parser.error("Install the SDK: uv pip install --python .venv/bin/python 'openai>=2,<3'")
     prompts.TEMPLATE_ROOT = Path(__file__).resolve().parents[2] / "prompts"
     provider = OpenRouterAPI(
         args.model, timeout=args.timeout, max_output_tokens=args.max_tokens, max_retries=0

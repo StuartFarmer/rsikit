@@ -44,7 +44,7 @@ class OpenRouterExampleTests(unittest.IsolatedAsyncioTestCase):
             self.assertIn(initial, requests[1]["messages"][0]["content"])
 
     async def test_repair_demo_uses_model_to_fix_supplied_broken_source(self):
-        from tests.providers import ScriptedProvider
+        from rsikit.tests.providers import ScriptedProvider
 
         initial = (ROOT / "examples/sine/initial.py").read_text()
         fixed = initial.replace("return x", "return x - x**3 / 6")

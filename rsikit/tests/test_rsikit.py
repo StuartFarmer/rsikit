@@ -10,7 +10,7 @@ from unittest.mock import patch
 from slick import prompts
 
 import rsikit
-from tests.providers import ScriptedProvider
+from rsikit.tests.providers import ScriptedProvider
 
 ROOT = Path(__file__).resolve().parents[1]
 SEED = "def solve(x):\n    return x + 1\n"

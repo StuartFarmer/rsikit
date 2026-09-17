@@ -11,7 +11,7 @@ from slick import prompts
 
 from rsikit import EvaluationError
 from rsikit.prompt_search import PromptSearch, PromptTrial
-from tests.providers import ScriptedProvider
+from rsikit.tests.providers import ScriptedProvider
 
 ROOT = Path(__file__).resolve().parents[2]
 
