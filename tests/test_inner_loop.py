@@ -8,10 +8,10 @@ import numpy as np
 from gymnasium import spaces
 from gymnasium.utils.env_checker import check_env
 
+from examples.cartpole import Solution as CartPolePolicy
+from examples.circle_packing.initial import Solution as PackingPolicy
 from rsikit.envs import CirclePackingEnv
 from rsikit.episode import InfrastructureError, PolicyError, run_episode
-from rsikit.examples.cartpole import Solution as CartPolePolicy
-from rsikit.examples.circle_packing.initial import Solution as PackingPolicy
 from rsikit.policy import Policy
 
 

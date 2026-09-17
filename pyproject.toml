@@ -18,9 +18,10 @@ dependencies = [
 [project.optional-dependencies]
 dev = ["ruff>=0.4"]
 openai = ["slick-ai[openai]>=0.3,<0.4"]
+openrouter = ["slick-ai[openai]>=0.3,<0.4"]
 
 [tool.hatch.build.targets.wheel]
 packages = ["rsikit"]
 
 [tool.hatch.build.targets.sdist]
-include = ["rsikit/", "docs/", "README.md", "pyproject.toml", "ruff.toml", ".gitignore"]
+include = ["rsikit/", "examples/", "tests/", "docs/", "README.md", "pyproject.toml", "ruff.toml", ".gitignore"]

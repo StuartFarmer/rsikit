@@ -14,7 +14,7 @@ import rsikit.alphaevolve as alphaevolve
 from rsikit.alphaevolve import AlphaEvolve, Config, Evaluation, EvaluationStage, InvalidCandidate
 from rsikit.alphaevolve.agent import Guidance
 from rsikit.alphaevolve.edits import Edit, Mutation, Program, apply_edits, check_rewrite
-from rsikit.tests.providers import ScriptedProvider
+from tests.providers import ScriptedProvider
 
 ROOT = Path(alphaevolve.__file__).parent / "prompts"
 SOURCE = """from rsikit import Policy

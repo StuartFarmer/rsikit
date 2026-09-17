@@ -49,7 +49,7 @@ assess generalization after search.
 
 Install RSIKit with `.[openai]` for the example provider, or pass another Slick
 provider supported by your application. The bundled CLI example is
-`python -m rsikit.examples.alphaevolve --model YOUR_MODEL`. It runs sequentially
+`python -m examples.alphaevolve --model YOUR_MODEL`. It runs sequentially
 and saves the best source. Docker is required for `evaluate_program`; no model
 credentials or network access are given to generated policies.
 

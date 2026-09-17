@@ -158,9 +158,9 @@ class SandboxEpisodeSmoke(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(isolated[:4], local[:4])
             self.assertEqual(isolated[4]["episode"]["r"], 3.0)
             self.assertEqual(isolated[4]["episode"]["l"], 2)
+        from examples import cartpole
+        from examples.circle_packing import initial
         from rsikit.envs import CirclePackingEnv
-        from rsikit.examples import cartpole
-        from rsikit.examples.circle_packing import initial
 
         packing = await run_program(
             Path(initial.__file__), CirclePackingEnv, env_seed=1, policy_seed=2, max_steps=5
@@ -183,11 +183,11 @@ class SandboxEpisodeSmoke(unittest.IsolatedAsyncioTestCase):
         from slick import prompts
 
         import rsikit.alphaevolve as alphaevolve
+        from examples import cartpole
+        from examples.alphaevolve import INITIAL
         from rsikit.alphaevolve import AlphaEvolve, Config, evaluate_program
         from rsikit.alphaevolve.edits import Program
-        from rsikit.examples import cartpole
-        from rsikit.examples.alphaevolve import INITIAL
-        from rsikit.tests.providers import ScriptedProvider
+        from tests.providers import ScriptedProvider
 
         provider = ScriptedProvider([Program(source=Path(cartpole.__file__).read_text())])
         evaluate = partial(evaluate_program, make_env="CartPole-v1", seeds=(1, 2), max_steps=50)
@@ -211,6 +211,59 @@ class SandboxEpisodeSmoke(unittest.IsolatedAsyncioTestCase):
             self.assertRaisesRegex(InfrastructureError, "Docker unavailable"),
         ):
             await evaluate(INITIAL)
+
+    async def test_inner_loop_demo_reports_all_five_policies_and_failures(self):
+        import contextlib
+        import io
+        import json
+
+        from slick import prompts
+
+        import examples.inner_loop as demo
+        from tests.providers import ScriptedProvider
+
+        def source(action):
+            return (
+                "from rsikit import Policy\nclass Solution(Policy):\n"
+                f"    async def act(self, observation):\n        return {action}\n"
+            )
+
+        provider = ScriptedProvider(
+            [
+                demo.PolicyProposal(
+                    summary="scripted random", source=source("self.action_space.sample()")
+                ),
+                demo.PolicyProposal(
+                    summary="scripted angle", source=source("int(observation[2] > 0)")
+                ),
+                demo.PolicyProposal(
+                    summary="scripted PD",
+                    source=source("int(observation[2] + 0.5 * observation[3] > 0)"),
+                ),
+                demo.PolicyProposal(summary="invalid action", source=source("50")),
+                demo.PolicyProposal(summary="duplicate", source=source("int(observation[2] > 0)")),
+            ]
+        )
+        provider.model = "scripted-test-provider"
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory) / "demo"
+            printed = io.StringIO()
+            with patch.object(prompts, "TEMPLATE_ROOT", Path(demo.__file__).parent / "prompts"):
+                with contextlib.redirect_stdout(printed):
+                    result = await demo.run_demo(provider, output, seeds=(1, 2), max_steps=30)
+            self.assertEqual(len(provider.calls), 5)
+            self.assertEqual(len(list(output.glob("*.py"))), 5)
+            self.assertEqual(json.loads((output / "results.json").read_text()), result)
+            self.assertEqual(result["model"], "scripted-test-provider")
+            rows = result["policies"]
+            self.assertEqual(rows[2]["mean_return"], 30)
+            self.assertEqual([episode["seed"] for episode in rows[2]["episodes"]], [1, 2])
+            self.assertIsNone(rows[3]["mean_return"])
+            self.assertIn("PolicyError", rows[3]["error"])
+            self.assertIn("Duplicate policy", rows[4]["error"])
+            for approach in demo.APPROACHES:
+                self.assertIn(f"| {approach} |", printed.getvalue())
+                self.assertIn(f"| {approach} |", (output / "report.md").read_text())
 
     async def test_failure_deadline_and_cleanup(self):
         for body in ("raise RuntimeError('candidate failure')", "return object()", "os._exit(3)"):
