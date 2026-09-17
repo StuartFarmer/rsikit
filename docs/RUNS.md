@@ -1,118 +1,102 @@
 # Local runs
 
-`Policy` is the agent interface: `reset`, `act`, and `close`. `generate` returns a
-named Policy definition without executing its implementation or choosing a backend.
-`Run` chooses the executor and schedules evaluations.
+The environment owns task configuration. The executor owns worker concurrency,
+timeouts, and its sandbox. Run stores policies, scores, and returned artifacts.
 
 ```python
-from rsikit import DockerExecutor, Run, generate
+import gymnasium as gym
+from rsikit import DockerSandbox, Executor, Run
 
-policies = [await generate(task, provider=provider) for _ in range(5)]
-with Run.create(
-    name="cartpole",
-    environment="CartPole-v1",
-    executor=DockerExecutor(),
-    concurrency=4,
-) as run:
-    scores = await run.evaluate(*policies, seeds=[0, 1, 2])
-    for policy in policies:
-        print(policy.name, scores[policy.id])  # {0: score, 1: score, 2: score}
+executor = Executor(sandbox=DockerSandbox(), concurrency=4, call_timeout=10)
+with gym.make("CartPole-v1", max_episode_steps=500) as environment:
+    with Run.create(name="comparison", environment=environment, executor=executor) as run:
+        scores = await run.evaluate(*policies, seeds=[0, 1, 2])
+        print(scores)  # {policy_id: {seed: score}}
 ```
 
-Configure Slick's template root once as shown in the README. The LLM supplies the
-policy's name and implementation, validated by Pydantic. Generated definitions
-retain the Policy class contract but remain unloaded and cannot be instantiated
-on the host. The executor loads the actual generated `Solution(Policy)` class.
-There is no sandbox subclass attached during generation.
+Policies come directly from `await generate(task, provider=provider)`. Their names
+come from the model. Generation neither executes their implementations nor selects
+a sandbox. `Policy` remains the agent's reset/act/close interface.
 
-## Execution
+## Environment
 
-`Run.executor` is explicit. It defaults to `DockerExecutor()` when omitted.
-`Run` registers the entire group before dispatching work, skips existing scores,
-limits active evaluations with positive `concurrency` (default 1), and commits each
-score as it arrives. `evaluate` always returns `{policy_id: {seed: score}}`, including
-when only one policy is supplied. Repeated policies or seeds are evaluated once.
+Pass a configured Gymnasium **instance**. Use `gym.make` arguments, `TimeLimit`,
+custom environment attributes such as `instructions`, and native wrappers. Run has
+no environment kwargs, step limit, instructions, render, or recording options.
 
-`DockerExecutor.evaluate` creates the Gymnasium environment and explicitly
-constructs `SandboxPolicy` for the generated agent. Each evaluation gets a fresh
-Docker container. The environment and scoring run on the host; observations and
-actions cross the sandbox boundary. The executor closes both sides before returning
-or raising. `DockerExecutor(image=...)` selects the worker image.
+The supplied environment is a template for independent evaluations. It is serialized
+with cloudpickle and each worker loads its own instance inside the sandbox. The host
+instance is not stepped or closed by Run; its caller owns it. Use an unstarted environment
+that supports serialization. Required environment modules and dependencies must be
+installed in the sandbox image; local classes that cloudpickle serializes by value
+are also supported. Host and sandbox Python minor versions must match.
 
-The `Executor` protocol has one async method, `evaluate`, returning one finite score.
-Its inputs are the implementation text and ordinary serializable evaluation
-arguments: environment ID, kwargs, seed, step limit, instructions, timeout, and
-optional video directory. It receives no Run, ORM session, or dynamic Python class.
-A process or cloud executor can implement this method without changing generation
-or Run storage. Only the Docker implementation is included. A remote executor is
-responsible for delivering requested videos to the supplied output directory.
+## Executor and sandbox
 
-All evaluations in a group are attempted. If any fail, successful scores remain
-saved and `evaluate` raises the first error in submission order after the group
-finishes. Cancellation cancels outstanding work and waits for executor cleanup.
-Custom executors must honor cancellation and clean up their workers before raising.
+`Executor(concurrency=4, call_timeout=10, sandbox=DockerSandbox())` starts **one Docker
+container for a batch**, then launches up to four evaluation processes inside it.
+Each process owns its environment and launches the generated agent in a separate
+process. Observation/action communication stays inside the container. Completed
+scores and artifacts stream back to Run. The container is removed when the batch
+finishes or is cancelled. Fully cached evaluations start no container.
 
-## Storage
+`call_timeout` bounds each agent lifecycle call. Native environment code remains
+responsible for its own step behavior. Cancellation waits for worker and sandbox
+cleanup. Successful evaluations are persisted even when another evaluation fails;
+the executor raises an error after delivering the successful results.
 
-Each run has one `run.sqlite` database with two SQLModel tables:
+Sandbox implementations provide `start`, `evaluate`, and `close`. This keeps
+Docker-specific process commands out of Run and Executor. Only Docker is implemented;
+a future sandbox can use the same boundary. Shared-container workers share the
+container's security boundary, rather than having one container boundary per policy.
 
-- `settings`: the run name and evaluation settings.
-- `policy`: ID, model-generated name, implementation, and a seed-to-score mapping.
+Build the worker image using your Python minor version (the Dockerfile defaults to 3.14):
 
-There are no episode records or additional metrics. A score is the sum of Gymnasium
-rewards. `None` means the requested evaluation has not completed. `run.scores(policy)`
-returns the stored mapping; `run.policies()` reloads Policy definitions.
-Policy IDs are hashes of the generated name and implementation, so identical
-policies reuse their existing scores.
-
-Python exports are enabled by default (`Run.create(export=True)`). Set `export=False`
-to keep policies only in SQLite. Exports are ordinary `Solution(Policy)` modules.
-Missing exports are recreated when opening a run; editing one does not change the
-database. Generated names are sanitized for filenames.
-
-```text
-runs/cartpole-<timestamp>-<id>/
-    run.sqlite
-    .lock
-    exports/<policy-id>_<name>.py
-    videos/<policy-id>/<seed>/rl-video-episode-0.mp4
+```sh
+docker build --build-arg PYTHON_VERSION=3.14 -t rsikit-sandbox:local -f rsikit/sandbox/Dockerfile .
 ```
 
-Pass `path=...` to choose a new directory. It must not already exist. Run settings
-include a registered Gymnasium environment ID, JSON `environment_kwargs`, optional
-`max_steps` and `instructions`, and the sandbox `call_timeout`. Register custom
-environments in your application before using them.
+## Recording and artifacts
 
-## Resume
+Configure Gymnasium normally:
 
 ```python
-with Run.open("runs/YOUR_RUN", executor=DockerExecutor(), concurrency=4) as run:
+environment = gym.wrappers.RecordVideo(
+    gym.make("CartPole-v1", max_episode_steps=500, render_mode="rgb_array"),
+    video_folder="recordings",
+    episode_trigger=lambda _: True,
+)
+```
+
+The worker preserves recording triggers, frame rates, and lengths. It relocates
+output paths into that evaluation's temporary directory so workers cannot overwrite
+each other's recordings. Gymnasium creates and closes the recordings. The worker
+returns those files and any custom `info["artifacts"]` mapping of relative names to
+bytes. Run saves them under `artifacts/<policy-id>/<seed>/`. It performs no rendering.
+Returned results contain only a score and artifact bytes; transport is limited to
+64 MiB per evaluation. Larger artifacts need a streaming transport later.
+
+## Storage and resume
+
+Each run directory contains `run.sqlite`, exported policies under `exports/`, and
+returned files under `artifacts/`. SQLite has two tables:
+
+- `settings`: name and Python-export preference.
+- `policy`: ID, generated name, implementation, and seed-to-score mapping.
+
+`Run.create(export=True)` remains the default. Missing Python exports are recreated
+when opening a run. `run.policies()` reloads definitions; `run.scores(policy)` returns
+stored scores. `None` means unfinished. Identical policies and seeds reuse scores.
+There are no episode metrics, optimizer checkpoints, or stored environment objects.
+
+```python
+with Run.open("runs/YOUR_RUN", environment=environment, executor=executor) as run:
     await run.resume()
-    for policy in run.policies():
-        print(policy.name, run.scores(policy))
 ```
 
-Requested seeds are saved before execution. Each score is committed immediately.
-Completed scores are reused; missing scores are retried from the beginning with
-the same seed for both environment and policy. Errors propagate without becoming
-scores. This includes policy errors: resume will encounter the same error again
-unless its cause has been resolved. There is no failure history or automatic repair.
-
-One process owns a run directory at a time via an OS lock (macOS/Linux). Calls to
-`evaluate` are serialized; evaluations within a group can run concurrently.
-Close the run before moving or copying its directory.
-Use the same environment code and dependencies when reopening it. Executors and
-concurrency are runtime choices, not serialized state; supply them again to `open`.
-The default executor on reopening is Docker.
-
-Resume only evaluates already-stored policies. It does not generate more policies
-or restore optimizer state. Databases from the earlier episode-record design are
-not supported; create a new run.
-
-## Video
-
-`Run.create(record_video=True)` asks the executor to record video. The Docker
-executor uses Gymnasium's `RecordVideo`. Install `.[video]`
-for CartPole rendering. Videos live in the directory shown above and are not
-tracked as database records. Retrying an unfinished seed replaces its video.
-Rebuild the Docker image when upgrading to the restored `Policy` interface.
+Supply the same configured environment when reopening; Run does not reconstruct it.
+The entire group's requested seeds are persisted before dispatch. Each result and
+its artifacts are saved as they arrive. Resume retries unfinished evaluations,
+including failed ones. It does not regenerate policies or restore mid-episode state.
+One process may own a run directory at a time (macOS/Linux file lock). Close it before
+moving or copying the directory.

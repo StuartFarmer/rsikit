@@ -257,7 +257,10 @@ class SandboxEpisodeSmoke(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(result[2]["name"], "PD")
             self.assertEqual(result[2]["mean_score"], 30)
             self.assertIsNone(result[3]["mean_score"])
-            with Run.open(output) as run:
+            with (
+                gym.make("CartPole-v1", max_episode_steps=30) as env,
+                Run.open(output, environment=env) as run,
+            ):
                 self.assertEqual(len(run.policies()), 5)
                 self.assertEqual(sum(len(run.scores(p)) for p in run.policies()), 10)
                 with self.assertRaises(PolicyError):
@@ -295,11 +298,14 @@ class SandboxEpisodeSmoke(unittest.IsolatedAsyncioTestCase):
             )
         with tempfile.TemporaryDirectory() as directory:
             output = Path(directory) / "video"
-            with Run.create(
-                name="video", path=output, environment="CartPole-v1", max_steps=5, record_video=True
-            ) as run:
+            env = gym.wrappers.RecordVideo(
+                gym.make("CartPole-v1", max_episode_steps=5, render_mode="rgb_array"),
+                str(Path(directory) / "recordings"),
+                episode_trigger=lambda _: True,
+            )
+            with env, Run.create(name="video", path=output, environment=env) as run:
                 self.assertEqual(await run.evaluate(policy, seeds=[1]), {policy.id: {1: 5.0}})
-                videos = list((output / "videos" / policy.id / "1").glob("*.mp4"))
+                videos = list((output / "artifacts" / policy.id / "1").rglob("*.mp4"))
                 self.assertEqual(len(videos), 1)
                 video = videos[0]
                 self.assertGreater(video.stat().st_size, 100)
@@ -308,7 +314,10 @@ class SandboxEpisodeSmoke(unittest.IsolatedAsyncioTestCase):
                 with VideoFileClip(str(video)) as clip:
                     self.assertGreater(clip.duration, 0)
                     self.assertEqual(clip.get_frame(0).shape[2], 3)
-            with Run.open(output) as run:
+            with (
+                gym.make("CartPole-v1", max_episode_steps=5) as env,
+                Run.open(output, environment=env) as run,
+            ):
                 self.assertEqual(run.scores(run.policies()[0]), {1: 5.0})
                 self.assertTrue(video.exists())
 
@@ -355,6 +364,149 @@ class SandboxEpisodeSmoke(unittest.IsolatedAsyncioTestCase):
                 policy_seed=2,
                 max_steps=5,
             )
+
+    async def test_batch_shares_one_container_with_independent_environment_processes(self):
+        import json
+
+        from slick import prompts
+
+        import rsikit.generation as generation
+        from rsikit import DockerSandbox, Executor, Run, generate
+        from tests.providers import ScriptedProvider
+
+        class Environment(gym.Env):
+            instructions = "independent environment"
+
+            def __init__(self):
+                self.observation_space = spaces.Discrete(3)
+                self.action_space = spaces.Discrete(1)
+                self.count = 0
+
+            def reset(self, *, seed=None, options=None):
+                super().reset(seed=seed)
+                self.count = 0
+                return 0, {}
+
+            def step(self, action):
+                import os
+                import socket
+                import time
+
+                time.sleep(0.1)
+                self.count += 1
+                return (
+                    self.count,
+                    1.0,
+                    False,
+                    False,
+                    {"artifacts": {"worker.txt": f"{socket.gethostname()}:{os.getpid()}".encode()}},
+                )
+
+        response = json.dumps(
+            {
+                "name": "Single container",
+                "implementation": (
+                    "from rsikit import Policy\nclass Solution(Policy):\n"
+                    "    async def act(self, observation):\n"
+                    "        assert self.instructions == 'independent environment'\n"
+                    "        return 0\n"
+                ),
+            }
+        )
+        with patch.object(prompts, "TEMPLATE_ROOT", Path(generation.__file__).parent / "prompts"):
+            policy = await generate("test", provider=ScriptedProvider([response]))
+        sandbox = DockerSandbox()
+        with (
+            tempfile.TemporaryDirectory() as directory,
+            gym.wrappers.TimeLimit(Environment(), max_episode_steps=2) as env,
+        ):
+            with (
+                patch.object(sandbox, "start", wraps=sandbox.start) as start,
+                Run.create(
+                    name="pool",
+                    path=Path(directory) / "run",
+                    environment=env,
+                    executor=Executor(sandbox=sandbox, concurrency=2),
+                ) as run,
+            ):
+                result = await run.evaluate(policy, seeds=[0, 1, 2, 3])
+                self.assertEqual(result, {policy.id: {0: 2.0, 1: 2.0, 2: 2.0, 3: 2.0}})
+                start.assert_awaited_once_with(2)
+                workers = [p.read_text().split(":") for p in run.path.rglob("worker.txt")]
+                self.assertEqual(len(workers), 4)
+                self.assertEqual(len({host for host, pid in workers}), 1)
+                self.assertEqual(len({pid for host, pid in workers}), 4)
+                self.assertEqual(env.unwrapped.count, 0)
+                self.assertIsNone(sandbox.name)
+
+    async def test_batch_timeout_and_cancellation_remove_shared_container(self):
+        from rsikit import DockerSandbox, Executor, Run
+        from rsikit.policy import _policy_class
+
+        loop = asyncio.get_running_loop()
+        previous_handler = loop.get_exception_handler()
+        self.addCleanup(loop.set_exception_handler, previous_handler)
+        loop_errors = []
+        loop.set_exception_handler(lambda loop, context: loop_errors.append(context))
+        policy = _policy_class(
+            "stuck",
+            "from rsikit import Policy\nclass Solution(Policy):\n    async def act(self, observation):\n        while True: pass\n",
+        )
+        sandbox = DockerSandbox()
+        executor = Executor(sandbox=sandbox, call_timeout=0.1)
+        with (
+            tempfile.TemporaryDirectory() as directory,
+            gym.make("CartPole-v1") as env,
+            Run.create(
+                name="cleanup",
+                path=Path(directory) / "run",
+                environment=env,
+                executor=executor,
+            ) as run,
+        ):
+            with self.assertRaises(PolicyTimeout):
+                await run.evaluate(policy)
+            self.assertEqual(run.scores(policy), {0: None})
+            self.assertIsNone(sandbox.name)
+
+            started, release = asyncio.Event(), asyncio.Event()
+            create_process = asyncio.create_subprocess_exec
+            interrupted_creation, processes = [], []
+
+            async def delayed_create(*args, **kwargs):
+                process = await create_process(*args, **kwargs)
+                if args[:2] == ("docker", "exec"):
+                    processes.append(process)
+                    started.set()
+                    try:
+                        await release.wait()
+                    except asyncio.CancelledError:
+                        interrupted_creation.append(True)
+                        raise
+                return process
+
+            executor.call_timeout = 60
+            with patch("rsikit.sandbox.docker.asyncio.create_subprocess_exec", delayed_create):
+                pending = asyncio.create_task(run.resume())
+                await asyncio.wait_for(started.wait(), 10)
+                name = sandbox.name
+                pending.cancel()
+                release.set()
+                with self.assertRaises(asyncio.CancelledError):
+                    await pending
+            for process in processes:
+                await process.communicate()
+            self.assertEqual(interrupted_creation, [])
+            self.assertIsNone(sandbox.name)
+            inspect = await asyncio.create_subprocess_exec(
+                "docker",
+                "inspect",
+                name,
+                stdout=asyncio.subprocess.DEVNULL,
+                stderr=asyncio.subprocess.DEVNULL,
+            )
+            self.assertNotEqual(await inspect.wait(), 0)
+            self.assertEqual(loop_errors, [])
 
 
 if __name__ == "__main__":

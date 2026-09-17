@@ -1,77 +1,98 @@
-"""Execute one policy evaluation; Run owns batching and score persistence."""
+"""Evaluate groups inside one sandbox; Run only persists returned results."""
 
+import asyncio
+import logging
+import sys
+from collections.abc import AsyncIterator, Iterable
 from typing import Protocol
 
+import cloudpickle
 import gymnasium as gym
+from pydantic import BaseModel, Field, FiniteFloat
 
-from .episode import run_episode
-from .sandbox import SandboxPolicy
+from .sandbox.docker import DockerSandbox
 
 
-class Executor(Protocol):
-    """A serializable request in, one score out. Clean up before returning or raising."""
+class Sandbox(Protocol):
+    async def start(self, workers: int) -> None: ...
+    async def evaluate(
+        self, implementation: str, environment: bytes, seed: int, call_timeout: float
+    ) -> tuple[float, dict[str, bytes]]: ...
+    async def close(self) -> None: ...
+
+
+class Result(BaseModel):
+    score: FiniteFloat
+    artifacts: dict[str, bytes] = Field(default_factory=dict)
+
+
+class Executor:
+    """Own worker concurrency, policy call timeouts, and sandbox lifecycle."""
+
+    def __init__(
+        self, *, sandbox: Sandbox | None = None, concurrency: int = 1, call_timeout: float = 10.0
+    ):
+        if concurrency < 1:
+            raise ValueError("concurrency must be at least 1")
+        self.sandbox = DockerSandbox() if sandbox is None else sandbox
+        self.concurrency = concurrency
+        self.call_timeout = call_timeout
+        self._busy = asyncio.Lock()
 
     async def evaluate(
         self,
-        implementation: str,
-        *,
-        environment: str,
-        seed: int,
-        environment_kwargs: dict,
-        max_steps: int | None,
-        instructions: str | None,
-        call_timeout: float,
-        video_dir: str | None,
-    ) -> float: ...
+        jobs: Iterable[tuple[str, str, int]],
+        environment: gym.Env,
+    ) -> AsyncIterator[tuple[str, int, Result]]:
+        """Yield completed (policy ID, seed, result) tuples from one sandbox per batch."""
+        jobs = list(jobs)
+        if not jobs:
+            return
+        # Only caller-provided environments are serialized, never returned worker objects.
+        definition = cloudpickle.dumps(environment)
+        async with self._busy:
+            slots = asyncio.Semaphore(self.concurrency)
 
+            async def evaluate(policy_id, implementation, seed):
+                async with slots:
+                    score, artifacts = await self.sandbox.evaluate(
+                        implementation,
+                        definition,
+                        seed,
+                        self.call_timeout,
+                    )
+                    return policy_id, seed, Result(score=score, artifacts=artifacts)
 
-class DockerExecutor:
-    """Run an agent in a fresh Docker sandbox, with its Gymnasium environment on the host."""
-
-    def __init__(self, *, image: str = "rsikit-sandbox:local"):
-        self.image = image
-
-    async def evaluate(
-        self,
-        implementation: str,
-        *,
-        environment: str,
-        seed: int,
-        environment_kwargs: dict,
-        max_steps: int | None,
-        instructions: str | None,
-        call_timeout: float,
-        video_dir: str | None,
-    ) -> float:
-        def make_env():
-            kwargs = dict(environment_kwargs)
-            if video_dir is not None:
-                kwargs["render_mode"] = "rgb_array"
-            env = gym.make(environment, **kwargs)
-            if video_dir is not None:
+            tasks = []
+            error = None
+            try:
+                starting = asyncio.create_task(self.sandbox.start(self.concurrency))
                 try:
-                    env = gym.wrappers.RecordVideo(env, video_dir, episode_trigger=lambda _: True)
-                except BaseException:
-                    env.close()
+                    await asyncio.shield(starting)
+                except asyncio.CancelledError:
+                    await starting
                     raise
-            return env
-
-        def make_policy(observation_space, action_space, *, instructions):
-            return SandboxPolicy(
-                observation_space,
-                action_space,
-                instructions=instructions,
-                source=implementation,
-                image=self.image,
-                call_timeout=call_timeout,
-            )
-
-        *_, info = await run_episode(
-            make_env,
-            make_policy,
-            env_seed=seed,
-            policy_seed=seed,
-            max_steps=max_steps,
-            instructions=instructions,
-        )
-        return float(info["episode"]["r"])
+                tasks = [asyncio.create_task(evaluate(*job)) for job in jobs]
+                for task in asyncio.as_completed(tasks):
+                    try:
+                        completed = await task
+                    except Exception as exc:
+                        if error is None:
+                            error = exc
+                    else:
+                        yield completed
+                if error is not None:
+                    raise error
+            finally:
+                primary = sys.exc_info()[1]
+                for task in tasks:
+                    task.cancel()
+                await asyncio.gather(*tasks, return_exceptions=True)
+                try:
+                    await self.sandbox.close()
+                except Exception:
+                    if primary is None:
+                        raise
+                    logging.getLogger(__name__).exception(
+                        "Sandbox cleanup failed while handling an evaluation error"
+                    )

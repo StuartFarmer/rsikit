@@ -2,16 +2,17 @@
 
 import asyncio
 import fcntl
-import math
 import re
+from contextlib import aclosing
 from datetime import datetime, timezone
 from pathlib import Path
 from uuid import uuid4
 
+import gymnasium as gym
 from sqlalchemy import JSON, Column
 from sqlmodel import Field, Session, SQLModel, create_engine, select
 
-from .execution import DockerExecutor, Executor
+from .execution import Executor
 from .policy import Policy, _policy_class
 
 
@@ -22,13 +23,7 @@ def _slug(name: str) -> str:
 class _Settings(SQLModel, table=True):
     __tablename__ = "settings"
     name: str = Field(primary_key=True)
-    environment: str
-    environment_kwargs: dict = Field(default_factory=dict, sa_column=Column(JSON))
-    max_steps: int | None = None
-    instructions: str | None = None
-    call_timeout: float = 10.0
     export: bool = True
-    record_video: bool = False
 
 
 class _StoredPolicy(SQLModel, table=True):
@@ -47,27 +42,12 @@ class Run:
         cls,
         *,
         name: str,
-        environment: str,
+        environment: gym.Env,
         path: str | Path | None = None,
-        environment_kwargs: dict | None = None,
-        max_steps: int | None = None,
-        instructions: str | None = None,
-        call_timeout: float = 10.0,
         export: bool = True,
-        record_video: bool = False,
         executor: Executor | None = None,
-        concurrency: int = 1,
     ) -> "Run":
-        settings = _Settings(
-            name=name,
-            environment=environment,
-            environment_kwargs=environment_kwargs or {},
-            max_steps=max_steps,
-            instructions=instructions,
-            call_timeout=call_timeout,
-            export=export,
-            record_video=record_video,
-        )
+        settings = _Settings(name=name, export=export)
         stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
         directory = (
             Path(path)
@@ -75,27 +55,27 @@ class Run:
             else Path("runs") / f"{_slug(name)}-{stamp}-{uuid4().hex[:8]}"
         )
         directory.mkdir(parents=True, exist_ok=False)
-        return cls(directory, settings, executor=executor, concurrency=concurrency)
+        return cls(directory, environment, settings, executor=executor)
 
     @classmethod
     def open(
-        cls, path: str | Path, *, executor: Executor | None = None, concurrency: int = 1
+        cls, path: str | Path, *, environment: gym.Env, executor: Executor | None = None
     ) -> "Run":
         directory = Path(path)
         if not (directory / "run.sqlite").is_file():
             raise FileNotFoundError(directory / "run.sqlite")
-        return cls(directory, executor=executor, concurrency=concurrency)
+        return cls(directory, environment, executor=executor)
 
     def __init__(
         self,
         path: Path,
+        environment: gym.Env,
         settings: _Settings | None = None,
         *,
         executor: Executor | None = None,
-        concurrency: int = 1,
     ):
-        self.executor = DockerExecutor() if executor is None else executor
-        self._slots = asyncio.Semaphore(concurrency)
+        self.environment = environment
+        self.executor = Executor() if executor is None else executor
         self.path = path.resolve()
         self._lock = (self.path / ".lock").open("a")
         self._engine = None
@@ -194,43 +174,30 @@ class Run:
             return result
 
     async def _execute(self, jobs):
-        async def evaluate(policy_id, implementation, seed):
-            async with self._slots:
-                score = float(
-                    await self.executor.evaluate(
-                        implementation,
-                        environment=self._settings.environment,
-                        seed=seed,
-                        environment_kwargs=dict(self._settings.environment_kwargs),
-                        max_steps=self._settings.max_steps,
-                        instructions=self._settings.instructions,
-                        call_timeout=self._settings.call_timeout,
-                        video_dir=(
-                            str(self.path / "videos" / policy_id / str(seed))
-                            if self._settings.record_video
-                            else None
-                        ),
-                    )
-                )
-                if not math.isfinite(score):
-                    raise ValueError("Executor returned a non-finite score")
-                # Read the latest mapping so concurrent seeds keep each other's scores.
+        requested = {(policy_id, seed) for policy_id, _, seed in jobs}
+        async with aclosing(self.executor.evaluate(jobs, self.environment)) as results:
+            async for policy_id, seed, result in results:
+                if (policy_id, seed) not in requested:
+                    raise ValueError("Executor returned an unexpected or duplicate result")
+                root = (self.path / "artifacts" / policy_id / str(seed)).resolve()
+                if not root.is_relative_to(self.path):
+                    raise ValueError("Artifact directory must stay inside the run")
+                for name, data in result.artifacts.items():
+                    destination = (root / name).resolve()
+                    if not destination.is_relative_to(root):
+                        raise ValueError("Artifact path must stay inside the evaluation directory")
+                    destination.parent.mkdir(parents=True, exist_ok=True)
+                    temporary = destination.with_name(destination.name + ".tmp")
+                    temporary.write_bytes(data)
+                    temporary.replace(destination)
                 with Session(self._engine) as session:
                     stored = session.get(_StoredPolicy, policy_id)
-                    stored.scores = {**stored.scores, str(seed): score}
+                    stored.scores = {**stored.scores, str(seed): result.score}
                     session.add(stored)
                     session.commit()
-
-        tasks = [asyncio.create_task(evaluate(*job)) for job in jobs]
-        try:
-            outcomes = await asyncio.gather(*tasks, return_exceptions=True)
-        finally:
-            for task in tasks:
-                task.cancel()
-            await asyncio.gather(*tasks, return_exceptions=True)
-        for outcome in outcomes:
-            if isinstance(outcome, BaseException):
-                raise outcome
+                requested.remove((policy_id, seed))
+        if requested:
+            raise RuntimeError("Executor finished without returning all requested results")
 
     async def resume(self) -> None:
         """Evaluate only missing scores with this run's executor."""

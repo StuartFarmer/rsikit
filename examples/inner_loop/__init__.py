@@ -5,13 +5,15 @@ import json
 import os
 from pathlib import Path
 from statistics import fmean
+from tempfile import TemporaryDirectory
 
+import gymnasium as gym
 from jinja2 import Environment, StrictUndefined
 from slick import prompts
 from slick.providers import OpenRouterAPI
 
 import rsikit.generation as generation
-from rsikit import DockerExecutor, Run, generate
+from rsikit import DockerSandbox, Executor, Run, generate
 from rsikit.episode import PolicyError
 
 MODEL = "openai/gpt-oss-120b:nitro"
@@ -31,15 +33,16 @@ async def run_demo(
     task = Environment(undefined=StrictUndefined).from_string(
         (Path(__file__).parent / "prompts/task.j2").read_text()
     )
-    with Run.create(
-        name="cartpole-comparison",
-        environment=ENVIRONMENT,
-        path=output,
-        max_steps=max_steps,
-        record_video=video,
-        executor=DockerExecutor(),
-        concurrency=concurrency,
-    ) as run:
+    with (
+        TemporaryDirectory() as video_folder,
+        make_environment(max_steps, video, video_folder) as environment,
+        Run.create(
+            name="cartpole-comparison",
+            environment=environment,
+            path=output,
+            executor=Executor(sandbox=DockerSandbox(), concurrency=concurrency),
+        ) as run,
+    ):
         print(f"Run: {run.path}", flush=True)
         policies = []
         for index, approach in enumerate(APPROACHES, 1):
@@ -54,6 +57,15 @@ async def run_demo(
         except PolicyError as exc:
             print(f"Policy evaluation failed: {exc}", flush=True)
         return write_report(run)
+
+
+def make_environment(max_steps, video, video_folder):
+    env = gym.make(
+        ENVIRONMENT, max_episode_steps=max_steps, render_mode="rgb_array" if video else None
+    )
+    if video:
+        env = gym.wrappers.RecordVideo(env, video_folder, episode_trigger=lambda _: True)
+    return env
 
 
 def write_report(run):
@@ -91,7 +103,15 @@ async def main():
     parser.add_argument("--concurrency", type=int, default=2)
     args = parser.parse_args()
     if args.resume:
-        with Run.open(args.resume, executor=DockerExecutor(), concurrency=args.concurrency) as run:
+        with (
+            TemporaryDirectory() as video_folder,
+            make_environment(args.max_steps, args.video, video_folder) as environment,
+            Run.open(
+                args.resume,
+                environment=environment,
+                executor=Executor(sandbox=DockerSandbox(), concurrency=args.concurrency),
+            ) as run,
+        ):
             await run.resume()
             write_report(run)
         return
