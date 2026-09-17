@@ -18,7 +18,7 @@ class Policy(ABC, Generic[Observation, Action]):
         observation_space: Space[Observation],
         action_space: Space[Action],
         *,
-        instructions: str,
+        instructions: str = "",
     ):
         self.observation_space = observation_space
         self.action_space = action_space

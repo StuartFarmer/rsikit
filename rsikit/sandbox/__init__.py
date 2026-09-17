@@ -196,9 +196,9 @@ async def run_program(
     program: Path,
     make_env,
     *,
-    env_seed: int,
-    policy_seed: int,
-    max_steps: int,
+    env_seed: int | None = None,
+    policy_seed: int | None = None,
+    max_steps: int | None = None,
     instructions: str | None = None,
     call_timeout: float = 10.0,
 ):

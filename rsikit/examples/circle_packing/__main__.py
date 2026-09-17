@@ -14,18 +14,14 @@ async def main():
         "program", nargs="?", type=Path, default=Path(__file__).with_name("initial.py")
     )
     args = parser.parse_args()
-    episode = await run_program(
+    _, _, _, _, info = await run_program(
         args.program,
         CirclePackingEnv,
         env_seed=1,
         policy_seed=2,
         max_steps=1,
     )
-    print(f"status={episode.status} return={episode.return_} steps={episode.length}")
-    if episode.failure:
-        print(episode.failure)
-    if episode.transitions:
-        print(episode.transitions[-1].info)
+    print(info)
 
 
 if __name__ == "__main__":

@@ -13,7 +13,7 @@ import gymnasium as gym
 import numpy as np
 from gymnasium import spaces
 
-from rsikit.episode import EpisodeError, InfrastructureError, PolicyTimeout, run_episode
+from rsikit.episode import InfrastructureError, PolicyError, PolicyTimeout, run_episode
 from rsikit.policy import Policy
 from rsikit.sandbox import SandboxPolicy, run_program
 from rsikit.sandbox.codec import decode, decode_space, dumps, encode, encode_space, loads
@@ -155,10 +155,9 @@ class SandboxEpisodeSmoke(unittest.IsolatedAsyncioTestCase):
         local = await run_episode(CounterEnv, CounterPolicy, env_seed=1, policy_seed=2, max_steps=5)
         for _ in range(2):
             isolated = await self.run_source(COUNTER_SOURCE)
-            self.assertEqual(isolated.status, "completed", isolated.failure)
-            self.assertEqual([t.action for t in isolated.transitions], [0, 1])
-            self.assertEqual(isolated.return_, local.return_)
-            self.assertEqual(isolated.instructions, INSTRUCTIONS)
+            self.assertEqual(isolated[:4], local[:4])
+            self.assertEqual(isolated[4]["episode"]["r"], 3.0)
+            self.assertEqual(isolated[4]["episode"]["l"], 2)
         from rsikit.envs import CirclePackingEnv
         from rsikit.examples import cartpole
         from rsikit.examples.circle_packing import initial
@@ -166,23 +165,22 @@ class SandboxEpisodeSmoke(unittest.IsolatedAsyncioTestCase):
         packing = await run_program(
             Path(initial.__file__), CirclePackingEnv, env_seed=1, policy_seed=2, max_steps=5
         )
-        self.assertEqual(packing.status, "completed", packing.failure)
-        self.assertAlmostEqual(packing.return_, 1.0)
+        self.assertTrue(packing[2])
+        self.assertAlmostEqual(packing[4]["episode"]["r"], 1.0)
         cart = await run_program(
             Path(cartpole.__file__),
-            lambda: gym.make("CartPole-v1"),
-            instructions="Balance the pole",
+            "CartPole-v1",
             env_seed=1,
             policy_seed=2,
             max_steps=8,
         )
-        self.assertEqual(cart.status, "completed", cart.failure)
-        self.assertGreater(cart.length, 1)
+        self.assertTrue(cart[2] or cart[3])
+        self.assertGreater(cart[4]["episode"]["l"], 1)
 
     async def test_failure_deadline_and_cleanup(self):
         for body in ("raise RuntimeError('candidate failure')", "return object()", "os._exit(3)"):
-            episode = await self.run_source(COUNTER_SOURCE.replace("return action", body))
-            self.assertEqual(episode.status, "policy_error", episode.failure)
+            with self.assertRaises(PolicyError):
+                await self.run_source(COUNTER_SOURCE.replace("return action", body))
         timeout_source = COUNTER_SOURCE.replace("return action", "while True: pass")
         instances = []
 
@@ -197,8 +195,8 @@ class SandboxEpisodeSmoke(unittest.IsolatedAsyncioTestCase):
             instances.append(policy)
             return policy
 
-        episode = await run_episode(CounterEnv, factory, env_seed=1, policy_seed=2, max_steps=5)
-        self.assertEqual(episode.status, "timeout", episode.failure)
+        with self.assertRaises(PolicyTimeout):
+            await run_episode(CounterEnv, factory, env_seed=1, policy_seed=2, max_steps=5)
         self.assertIsNone(instances[0].process)
         result = await asyncio.create_subprocess_exec(
             "docker",
@@ -208,7 +206,7 @@ class SandboxEpisodeSmoke(unittest.IsolatedAsyncioTestCase):
             stderr=asyncio.subprocess.DEVNULL,
         )
         self.assertNotEqual(await result.wait(), 0)
-        with self.assertRaises(EpisodeError) as caught:
+        with self.assertRaises(InfrastructureError):
             await run_episode(
                 CounterEnv,
                 lambda obs, act, **kw: SandboxPolicy(
@@ -222,7 +220,6 @@ class SandboxEpisodeSmoke(unittest.IsolatedAsyncioTestCase):
                 policy_seed=2,
                 max_steps=5,
             )
-        self.assertIsInstance(caught.exception.__cause__, InfrastructureError)
 
 
 if __name__ == "__main__":

@@ -4,9 +4,26 @@ A small inner loop for class-based policies in
 [Gymnasium](https://gymnasium.farama.org/) environments.
 
 - `Policy`: task instructions, spaces, and async reset/act/close.
-- `run_episode`: evaluate trusted classes and record an episode.
+- `run_episode`: run trusted policy classes in existing Gymnasium environments.
 - `run_program`: evaluate generated classes inside Docker.
-- `Episode`: transitions, rewards, termination, and failures.
+
+```python
+from rsikit import Policy, run_episode
+
+
+class RandomPolicy(Policy):
+    async def act(self, observation):
+        return self.action_space.sample()
+
+
+# Inside an async function:
+observation, reward, terminated, truncated, info = await run_episode("CartPole-v1", RandomPolicy)
+print(info["episode"])  # Gymnasium totals: r (return), l (length), t (seconds)
+```
+
+Use an environment ID or a factory such as `lambda: gym.make("FrozenLake-v1")`.
+Instructions and seeds are optional. Gymnasium supplies the spaces, time limits,
+and episode statistics; there are no custom episode or transition objects.
 
 ## Setup
 
@@ -30,7 +47,7 @@ A program exports `Solution(Policy)`. One policy instance persists throughout an
 episode. The environment and scoring stay outside the restricted worker.
 
 See the [API guide](docs/INNER_LOOP.md) for task instructions, class contracts,
-episode records, and execution limits.
+results, and execution limits.
 
 ## Checks
 

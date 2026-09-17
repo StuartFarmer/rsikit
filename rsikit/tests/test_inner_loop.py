@@ -9,8 +9,7 @@ from gymnasium import spaces
 from gymnasium.utils.env_checker import check_env
 
 from rsikit.envs import CirclePackingEnv
-from rsikit.episode import EpisodeError, InfrastructureError, run_episode
-from rsikit.examples.cartpole import INSTRUCTIONS
+from rsikit.episode import InfrastructureError, PolicyError, run_episode
 from rsikit.examples.cartpole import Solution as CartPolePolicy
 from rsikit.examples.circle_packing.initial import Solution as PackingPolicy
 from rsikit.policy import Policy
@@ -47,7 +46,7 @@ class CounterPolicy(Policy):
         self.closed = False
 
     async def act(self, observation):
-        observation[0] = 9  # The runner protects the environment and saved observations.
+        observation[0] = 9  # The runner protects the environment from policy mutation.
         self.instructions = "Policy-owned prompt changed"
         action = self.calls
         self.calls += 1
@@ -68,7 +67,7 @@ class InnerLoopTests(unittest.IsolatedAsyncioTestCase):
             **kwargs,
         )
 
-    async def test_lifecycle_instructions_snapshots_and_limits(self):
+    async def test_lifecycle_instructions_and_limits(self):
         captured = []
 
         def factory(*args, **kwargs):
@@ -76,30 +75,21 @@ class InnerLoopTests(unittest.IsolatedAsyncioTestCase):
             captured.append(policy)
             return policy
 
-        episode = await self.run_counter(factory)
-        self.assertEqual((episode.status, episode.length, episode.return_), ("completed", 2, 3.0))
-        self.assertEqual([t.action for t in episode.transitions], [0, 1])
-        self.assertEqual([t.observation[0] for t in episode.transitions], [0, 1])
-        self.assertEqual(episode.initial_observation[0], 0)
-        self.assertTrue(episode.transitions[-1].terminated)
-        self.assertEqual(episode.instructions, captured[0].seen_instructions)
+        observation, reward, terminated, truncated, info = await self.run_counter(factory)
+        self.assertEqual(observation[0], 2)
+        self.assertEqual((reward, terminated, truncated), (2.0, True, False))
+        self.assertEqual((info["episode"]["r"], info["episode"]["l"]), (3.0, 2))
+        self.assertEqual(captured[0].calls, 2)
+        self.assertEqual(captured[0].seen_instructions, CounterEnv.instructions)
         self.assertTrue(captured[0].closed)
         for text in ("Override\nλ", ""):
-            result = await self.run_counter(factory, instructions=text)
-            self.assertEqual(result.instructions, text)
+            await self.run_counter(factory, instructions=text)
             self.assertEqual(captured[-1].seen_instructions, text)
-            self.assertEqual(result.transitions[0].action, 0)
-        limited = await self.run_counter(max_steps=1)
-        self.assertTrue(limited.transitions[-1].truncated)
-        self.assertFalse(limited.transitions[-1].terminated)
-        with self.assertRaisesRegex(ValueError, "instructions"):
-            await run_episode(
-                lambda: gym.make("CartPole-v1"),
-                CounterPolicy,
-                env_seed=1,
-                policy_seed=2,
-                max_steps=1,
-            )
+            self.assertEqual(captured[-1].calls, 2)
+        _, _, terminated, truncated, info = await self.run_counter(max_steps=1)
+        self.assertTrue(truncated)
+        self.assertFalse(terminated)
+        self.assertEqual(info["episode"]["l"], 1)
 
     async def test_policy_environment_and_cleanup_failures(self):
         class Invalid(CounterPolicy):
@@ -107,9 +97,9 @@ class InnerLoopTests(unittest.IsolatedAsyncioTestCase):
                 return 50
 
         env = CounterEnv()
-        invalid = await run_episode(lambda: env, Invalid, env_seed=1, policy_seed=2, max_steps=3)
-        self.assertEqual((invalid.status, env.steps), ("invalid_action", 0))
-        self.assertEqual(invalid.attempted_action, 50)
+        with self.assertRaisesRegex(PolicyError, "outside action_space"):
+            await run_episode(lambda: env, Invalid)
+        self.assertEqual(env.steps, 0)
         self.assertTrue(env.closed)
 
         class Broken(CounterPolicy):
@@ -121,24 +111,23 @@ class InnerLoopTests(unittest.IsolatedAsyncioTestCase):
             async def close(self):
                 raise RuntimeError("cleanup also failed")
 
-        failed = await self.run_counter(Broken)
-        self.assertEqual((failed.status, failed.length), ("policy_error", 1))
-        self.assertIn("policy failed", failed.failure)
-        self.assertEqual(len(failed.cleanup_errors), 1)
+        with self.assertLogs("rsikit.episode", level="ERROR") as logged:
+            with self.assertRaisesRegex(RuntimeError, "^policy failed$"):
+                await self.run_counter(Broken)
+        self.assertIn("cleanup also failed", logged.output[0])
 
         class BrokenEnv(CounterEnv):
             def step(self, action):
                 raise RuntimeError("environment failed")
 
-        with self.assertRaisesRegex(EpisodeError, "environment failed") as raised:
-            await run_episode(BrokenEnv, CounterPolicy, env_seed=1, policy_seed=2, max_steps=3)
-        self.assertEqual(raised.exception.episode.length, 0)
+        with self.assertRaisesRegex(RuntimeError, "environment failed"):
+            await run_episode(BrokenEnv, CounterPolicy)
 
         class BackendFailure(CounterPolicy):
             async def reset(self, *, seed=None):
                 raise InfrastructureError("worker unavailable")
 
-        with self.assertRaisesRegex(EpisodeError, "worker unavailable"):
+        with self.assertRaisesRegex(InfrastructureError, "worker unavailable"):
             await self.run_counter(BackendFailure)
 
     async def test_cancellation_closes_both_sides(self):
@@ -180,39 +169,39 @@ class InnerLoopTests(unittest.IsolatedAsyncioTestCase):
             await task
         self.assertTrue(env.closed)
 
-    async def test_packing_and_native_cartpole_use_same_runner(self):
+    async def test_custom_and_builtin_gymnasium_environments(self):
         check_env(CirclePackingEnv(), skip_render_check=True)
-        packing = await run_episode(
-            CirclePackingEnv, PackingPolicy, env_seed=1, policy_seed=2, max_steps=1
-        )
-        self.assertEqual((packing.status, packing.length), ("completed", 1))
-        self.assertAlmostEqual(packing.return_, 1.0)
-        self.assertTrue(packing.transitions[-1].info["feasible"])
+        _, _, terminated, _, info = await run_episode(CirclePackingEnv, PackingPolicy)
+        self.assertTrue(terminated)
+        self.assertEqual(info["episode"]["l"], 1)
+        self.assertAlmostEqual(info["episode"]["r"], 1.0)
+        self.assertTrue(info["feasible"])
 
         class Overlapping(PackingPolicy):
             async def act(self, observation):
                 return np.tile([0.5, 0.5, 0.1], (10, 1))
 
-        bad_geometry = await run_episode(
-            CirclePackingEnv, Overlapping, env_seed=1, policy_seed=2, max_steps=1
-        )
-        self.assertEqual((bad_geometry.status, bad_geometry.return_), ("completed", 0.0))
-        self.assertFalse(bad_geometry.transitions[-1].info["feasible"])
+        _, _, _, _, info = await run_episode(CirclePackingEnv, Overlapping)
+        self.assertEqual(info["episode"]["r"], 0.0)
+        self.assertFalse(info["feasible"])
         episodes = [
-            await run_episode(
-                lambda: gym.make("CartPole-v1"),
-                CartPolePolicy,
-                env_seed=1,
-                policy_seed=2,
-                max_steps=50,
-                instructions=INSTRUCTIONS,
-            )
+            await run_episode("CartPole-v1", CartPolePolicy, env_seed=1, policy_seed=2)
             for _ in range(2)
         ]
-        self.assertEqual(episodes[0].return_, episodes[1].return_)
-        self.assertEqual(episodes[0].status, "completed")
-        self.assertTrue(1 < episodes[0].length <= 50)
-        self.assertEqual(episodes[0].instructions, INSTRUCTIONS)
+        self.assertEqual(episodes[0][4]["episode"]["r"], episodes[1][4]["episode"]["r"])
+        self.assertTrue(episodes[0][2] or episodes[0][3])
+        self.assertTrue(1 < episodes[0][4]["episode"]["l"] <= 500)
+
+        class RandomPolicy(Policy):
+            async def act(self, observation):
+                assert self.instructions == ""
+                return self.action_space.sample()
+
+        _, _, terminated, truncated, info = await run_episode(
+            "FrozenLake-v1", RandomPolicy, env_seed=1, policy_seed=2
+        )
+        self.assertTrue(terminated or truncated)
+        self.assertTrue(0 < info["episode"]["l"] <= 100)
 
 
 if __name__ == "__main__":
