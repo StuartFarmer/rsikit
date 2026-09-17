@@ -4,11 +4,11 @@ build-backend = "hatchling.build"
 
 [project]
 name = "rsikit"
-version = "0.1.0"
-description = "Composable API-only evolutionary search, prompt improvement, and reflection."
+version = "0.2.0"
+description = "Class-based policies and isolated Gymnasium evaluation for API-only agent research."
 readme = "README.md"
 requires-python = ">=3.10"
-dependencies = ["slick-ai>=0.3,<0.4", "pydantic>=2,<3"]
+dependencies = ["slick-ai>=0.3,<0.4", "pydantic>=2,<3", "gymnasium>=1.3,<2", "numpy>=1.24,<3"]
 
 [project.optional-dependencies]
 packing = ["openai>=2,<3", "matplotlib>=3.8,<4", "pillow>=10"]

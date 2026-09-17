@@ -1,74 +1,177 @@
-"""One restricted Docker container per run, with a warm Python fork server."""
+"""Execute generated policies in a fresh restricted Docker container per episode."""
 
 import asyncio
-import json
+import contextlib
+import math
+from pathlib import Path
 from uuid import uuid4
 
-from rsikit.evaluation import EvaluationError
+from rsikit.episode import InfrastructureError, PolicyError, PolicyTimeout, run_episode
+from rsikit.policy import Policy
+
+from .codec import MAX_MESSAGE, MAX_SOURCE, decode, dumps, encode, encode_space, loads
 
 
-class PythonSandbox:
-    """Use as an async context manager; execute requests sequentially.
+class SandboxPolicy(Policy):
+    """Persistent remote instance; candidate source is never executed on the host."""
 
-    Candidate code stays inside Docker, with no host mounts, credentials, or
-    network. Each call forks clean interpreter state and calls the entry point
-    once. This is a local research container, not a hostile multi-tenant service.
-    """
-
-    def __init__(self, *, image="rsikit-sandbox:local", timeout=10):
-        self.image, self.timeout = image, timeout
+    def __init__(
+        self,
+        observation_space,
+        action_space,
+        *,
+        instructions,
+        source,
+        image="rsikit-sandbox:local",
+        call_timeout=10.0,
+    ):
+        super().__init__(observation_space, action_space, instructions=instructions)
+        if not math.isfinite(call_timeout) or call_timeout <= 0:
+            raise InfrastructureError("call_timeout must be positive and finite")
+        if len(source.encode()) > MAX_SOURCE:
+            raise PolicyError("Source exceeds 64 KiB")
+        try:
+            self.space_definitions = (encode_space(observation_space), encode_space(action_space))
+            dumps(self.space_definitions)
+        except (TypeError, ValueError, RecursionError) as exc:
+            raise InfrastructureError(f"Cannot encode policy spaces: {exc}") from exc
+        self.source, self.image, self.call_timeout = source, image, call_timeout
         self.name = f"rsikit-{uuid4().hex}"
         self.process = None
+        self.ready = False
 
-    async def __aenter__(self):
-        self.process = await asyncio.create_subprocess_exec(
-            "docker",
-            "run",
-            "--rm",
-            "-i",
-            "--name",
-            self.name,
-            "--network",
-            "none",
-            "--read-only",
-            "--cap-drop",
-            "ALL",
-            "--security-opt",
-            "no-new-privileges",
-            "--pids-limit",
-            "64",
-            "--memory",
-            "512m",
-            "--memory-swap",
-            "512m",
-            "--cpus",
-            "1",
-            "--tmpfs",
-            "/tmp:rw,noexec,nosuid,size=16m",
-            self.image,
-            stdin=asyncio.subprocess.PIPE,
-            stdout=asyncio.subprocess.PIPE,
-            limit=131_072,
-        )
-        try:
-            ready = await asyncio.wait_for(self.process.stdout.readline(), 60)
-            if json.loads(ready) != {"ready": True}:
-                raise ValueError("Missing ready message")
-        except asyncio.CancelledError:
-            await self.__aexit__(None, None, None)
-            raise
-        except (TimeoutError, ValueError, UnicodeError):
-            await self.__aexit__(None, None, None)
-            raise EvaluationError(
-                "Sandbox failed to start. Start Docker and build: "
-                "docker build -t rsikit-sandbox:local rsikit/sandbox"
-            ) from None
-        return self
-
-    async def __aexit__(self, *_):
+    async def reset(self, *, seed=None):
         if self.process is not None:
-            # EOF also stops a worker created after an early cancellation's rm.
-            self.process.stdin.close()
+            raise InfrastructureError("A SandboxPolicy serves only one episode")
+        try:
+            self.process = await asyncio.create_subprocess_exec(
+                "docker",
+                "run",
+                "--rm",
+                "--pull",
+                "never",
+                "-i",
+                "--name",
+                self.name,
+                "--network",
+                "none",
+                "--read-only",
+                "--cap-drop",
+                "ALL",
+                "--security-opt",
+                "no-new-privileges",
+                "--pids-limit",
+                "64",
+                "--memory",
+                "512m",
+                "--memory-swap",
+                "512m",
+                "--cpus",
+                "1",
+                "--tmpfs",
+                "/tmp:rw,noexec,nosuid,size=16m",
+                self.image,
+                stdin=asyncio.subprocess.PIPE,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.DEVNULL,
+                limit=MAX_MESSAGE + 1,
+            )
+            line = await asyncio.wait_for(self.process.stdout.readline(), 60)
+            if loads(line) != {"ready": True}:
+                raise ValueError("Missing ready message")
+            self.ready = True
+        except asyncio.CancelledError as exc:
+            await self._destroy_after(exc)
+            raise
+        except (OSError, ValueError, UnicodeError, asyncio.TimeoutError) as exc:
+            failure = InfrastructureError(
+                "Sandbox failed to start. Start Docker and build with: "
+                "docker build -t rsikit-sandbox:local -f rsikit/sandbox/Dockerfile ."
+            )
+            await self._destroy_after(failure)
+            raise failure from exc
+        await self._request(
+            {
+                "command": "start",
+                "source": self.source,
+                "observation_space": self.space_definitions[0],
+                "action_space": self.space_definitions[1],
+                "instructions": self.instructions,
+                "seed": seed,
+            }
+        )
+
+    async def _request(self, request):
+        if not self.ready:
+            raise InfrastructureError("Sandbox is not running")
+        try:
+            payload = dumps(request)
+        except (ValueError, TypeError, RecursionError) as exc:
+            raise InfrastructureError(f"Cannot encode sandbox request: {exc}") from exc
+
+        async def exchange():
+            self.process.stdin.write(payload)
+            await self.process.stdin.drain()
+            return await self.process.stdout.readline()
+
+        try:
+            response = loads(await asyncio.wait_for(exchange(), self.call_timeout))
+            if not isinstance(response, dict):
+                raise ValueError("Malformed supervisor response")
+            if set(response) == {"error"} and isinstance(response["error"], str):
+                raise PolicyError(response["error"])
+            expected = "action" if request["command"] == "act" else "ok"
+            if set(response) != {expected} or (expected == "ok" and response["ok"] is not True):
+                raise ValueError("Malformed supervisor response")
+            return response
+        except asyncio.TimeoutError as exc:
+            self.ready = False
+            failure = PolicyTimeout(f"Policy {request['command']} exceeded {self.call_timeout}s")
+            await self._destroy_after(failure)
+            raise failure from exc
+        except asyncio.CancelledError as exc:
+            self.ready = False
+            await self._destroy_after(exc)
+            raise
+        except (OSError, ValueError, UnicodeError, RecursionError) as exc:
+            self.ready = False
+            raise InfrastructureError(f"Sandbox protocol failed: {exc}") from exc
+
+    async def act(self, observation):
+        try:
+            encoded = encode(observation)
+        except (ValueError, TypeError, RecursionError) as exc:
+            raise InfrastructureError(f"Cannot encode observation: {exc}") from exc
+        response = await self._request({"command": "act", "observation": encoded})
+        try:
+            return decode(response["action"])
+        except (ValueError, TypeError, KeyError, IndexError, OverflowError, RecursionError) as exc:
+            raise PolicyError(f"Malformed candidate action: {exc}") from exc
+
+    async def close(self):
+        try:
+            if self.ready:
+                await self._request({"command": "close"})
+        except BaseException as exc:
+            await self._destroy_after(exc)
+            raise
+        else:
+            await self._destroy()
+
+    async def _destroy_after(self, primary):
+        try:
+            await self._destroy()
+        except Exception as exc:
+            primary.cleanup_error = exc
+
+    async def _destroy(self):
+        self.ready = False
+        if self.process is None:
+            return
+        process, self.process = self.process, None
+        process.stdin.close()
+        cleanup = None
+        try:
             cleanup = await asyncio.create_subprocess_exec(
                 "docker",
                 "rm",
@@ -77,27 +180,49 @@ class PythonSandbox:
                 stdout=asyncio.subprocess.DEVNULL,
                 stderr=asyncio.subprocess.DEVNULL,
             )
-            await cleanup.wait()
-            await self.process.wait()
-            self.process = None
+            await asyncio.wait_for(cleanup.wait(), 10)
+            await asyncio.wait_for(process.wait(), 10)
+        except (OSError, asyncio.TimeoutError) as exc:
+            raise InfrastructureError(f"Cannot remove sandbox {self.name}: {exc}") from exc
+        finally:
+            for child in (cleanup, process):
+                if child is not None and child.returncode is None:
+                    with contextlib.suppress(ProcessLookupError):
+                        child.kill()
+                    await child.wait()
 
-    async def __call__(self, source: str, *, function="pack_circles") -> dict:
-        if len(source.encode()) > 65_536:
-            return {"error": "Source exceeds 64 KiB"}
-        request = {"source": source, "function": function, "timeout": self.timeout}
-        try:
-            self.process.stdin.write(json.dumps(request).encode() + b"\n")
-            await self.process.stdin.drain()
-            line = await asyncio.wait_for(self.process.stdout.readline(), self.timeout + 5)
-            result = json.loads(line)
-            if not isinstance(result, dict) or set(result) not in ({"value"}, {"error"}):
-                raise ValueError("Invalid worker response")
-            return result
-        except (
-            TimeoutError,
-            ValueError,
-            UnicodeError,
-            BrokenPipeError,
-            ConnectionResetError,
-        ) as exc:
-            raise EvaluationError("Sandbox worker failed; candidate was not retried") from exc
+
+async def run_program(
+    program: Path,
+    make_env,
+    *,
+    env_seed: int,
+    policy_seed: int,
+    max_steps: int,
+    instructions: str | None = None,
+    call_timeout: float = 10.0,
+):
+    """Read source as data, then delegate the rollout to the shared episode runner."""
+    try:
+        with Path(program).open(encoding="utf-8") as stream:
+            source = stream.read(MAX_SOURCE + 1)
+    except (OSError, UnicodeError) as exc:
+        raise InfrastructureError(f"Cannot read policy source: {exc}") from exc
+
+    def make_policy(observation_space, action_space, *, instructions):
+        return SandboxPolicy(
+            observation_space,
+            action_space,
+            instructions=instructions,
+            source=source,
+            call_timeout=call_timeout,
+        )
+
+    return await run_episode(
+        make_env,
+        make_policy,
+        env_seed=env_seed,
+        policy_seed=policy_seed,
+        max_steps=max_steps,
+        instructions=instructions,
+    )

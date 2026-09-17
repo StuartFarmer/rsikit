@@ -1,3 +1,7 @@
+# Historical research development log
+
+The active API is now the Gymnasium policy/episode loop. See [the implementation plan](../docs/superpowers/plans/2026-09-17-gymnasium-inner-loop.md). The entries below describe the retired API.
+
 # RSIKit stateful strategy refactor
 
 Approved design: `candidates = await strategy.generate()` followed by

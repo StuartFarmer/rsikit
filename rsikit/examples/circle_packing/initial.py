@@ -1,15 +1,13 @@
-def pack_circles():
-    # EVOLVE-BLOCK-START
-    return [
-        (0.125, 0.125, 0.10),
-        (0.375, 0.125, 0.10),
-        (0.625, 0.125, 0.10),
-        (0.875, 0.125, 0.10),
-        (0.125, 0.375, 0.10),
-        (0.375, 0.375, 0.10),
-        (0.625, 0.375, 0.10),
-        (0.875, 0.375, 0.10),
-        (0.125, 0.625, 0.10),
-        (0.375, 0.625, 0.10),
-    ]
-    # EVOLVE-BLOCK-END
+"""A deterministic ten-circle baseline scoring 1.0."""
+
+import numpy as np
+
+from rsikit.policy import Policy
+
+
+class Solution(Policy):
+    async def act(self, observation):
+        return np.array(
+            [(x, y, 0.1) for y in (0.25, 0.75) for x in (0.1, 0.3, 0.5, 0.7, 0.9)],
+            dtype=np.float64,
+        )
