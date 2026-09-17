@@ -2,17 +2,17 @@ Generate a policy for the following task. Choose its short descriptive name.
 
 {{ task }}
 
-Implement a complete Python module defining Solution(Controller), importing
-Controller from rsikit. Implement async act(self, observation) returning an action
+Implement a complete Python module defining Solution(Policy), importing
+Policy from rsikit. Implement async act(self, observation) returning an action
 inside the environment's action space. The inherited constructor receives
 observation_space, action_space, and instructions. The inherited async reset(seed=...)
 seeds self.rng and self.action_space. Call await super().reset(seed=seed) if overriding
 reset, and clear any episode memory. Optional async close(self) releases resources.
 
-The worker provides Python, NumPy, Gymnasium, and rsikit.Controller. It has no
+The worker provides Python, NumPy, Gymnasium, and rsikit.Policy. It has no
 network, credentials, or host files. Do not call an LLM, create an environment,
 or include an executable main block. The implementation must be Python code,
-without Markdown fences. Summarize the approach without claiming measured results.
+without Markdown fences.
 
 # Output Format
 Return only JSON matching this schema:

@@ -1,11 +1,18 @@
-"""Generate a named policy value through Slick; no host execution or files."""
+"""Generate an executable Policy class through Slick."""
 
+from pydantic import BaseModel, Field
 from slick import prompt
 
-from rsikit.policy import Policy, _PolicyResponse
+from rsikit.policy import Policy
+from rsikit.sandbox import _policy_class
 
 
-@prompt(template="generate_policy.j2", output_type=_PolicyResponse)
-async def generate(task: str, *, generated: _PolicyResponse) -> Policy:
-    """Return the generated policy, including its model-chosen name."""
-    return generated.policy()
+class _Response(BaseModel, extra="forbid"):
+    name: str = Field(min_length=1)
+    implementation: str = Field(min_length=1)
+
+
+@prompt(template="generate_policy.j2", output_type=_Response)
+async def generate(task: str, *, generated: _Response) -> type[Policy]:
+    """Return a Policy class; the runner supplies spaces when instantiating it."""
+    return _policy_class(generated.name, generated.implementation)

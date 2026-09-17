@@ -10,9 +10,9 @@ from gymnasium.utils.env_checker import check_env
 
 from examples.cartpole import Solution as CartPolePolicy
 from examples.circle_packing.initial import Solution as PackingPolicy
-from rsikit.controller import Controller
 from rsikit.envs import CirclePackingEnv
 from rsikit.episode import InfrastructureError, PolicyError, run_episode
+from rsikit.policy import Policy
 
 
 class CounterEnv(gym.Env):
@@ -38,7 +38,7 @@ class CounterEnv(gym.Env):
         self.closed = True
 
 
-class CounterPolicy(Controller):
+class CounterPolicy(Policy):
     async def reset(self, *, seed=None):
         await super().reset(seed=seed)
         self.calls = 0
@@ -192,7 +192,7 @@ class InnerLoopTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(episodes[0][2] or episodes[0][3])
         self.assertTrue(1 < episodes[0][4]["episode"]["l"] <= 500)
 
-        class RandomPolicy(Controller):
+        class RandomPolicy(Policy):
             async def act(self, observation):
                 assert self.instructions == ""
                 return self.action_space.sample()

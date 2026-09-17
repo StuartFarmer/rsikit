@@ -1,29 +1,26 @@
-"""Durable jobs survive interruptions without regenerating or importing policies."""
+"""Generated policies act; storage keeps scores and resumes unfinished work."""
 
 import asyncio
 import json
 import shutil
+import sqlite3
 import tempfile
 import unittest
+from contextlib import closing
 from pathlib import Path
 from unittest.mock import AsyncMock, patch
 
+from gymnasium.spaces import Discrete
 from slick import prompts
-from sqlmodel import Session, select
 
 import rsikit.generation as generation
-from rsikit import Execution, Policy, Run, generate
+from rsikit import Policy, Run, generate
 from rsikit.episode import InfrastructureError, PolicyError
 from tests.providers import ScriptedProvider
 
 RESPONSE = {
     "name": "Model chose this name",
-    "summary": "A generated controller",
-    "implementation": """from rsikit import Controller
-class Solution(Controller):
-    async def act(self, observation):
-        return 0
-""",
+    "implementation": "from rsikit import Policy\nclass Solution(Policy):\n    async def act(self, observation):\n        return 0\n",
 }
 RESULT = (0, 1.0, True, False, {"episode": {"r": 7.0, "l": 7, "t": 0.1}})
 
@@ -39,120 +36,115 @@ class RunTests(unittest.IsolatedAsyncioTestCase):
         self.provider = ScriptedProvider([json.dumps(RESPONSE)])
         self.policy = await generate("test task", provider=self.provider)
 
-    async def test_generated_object_exports_storage_and_reuse(self):
-        self.assertIsInstance(self.policy, Policy)
+    async def test_policy_class_scores_exports_and_reuse(self):
+        self.assertTrue(issubclass(self.policy, Policy))
         self.assertEqual(self.policy.name, RESPONSE["name"])
-        self.assertFalse(hasattr(self.policy, "source"))
-        self.assertNotIn("implementation", self.policy.model_dump())
+        agent = self.policy(Discrete(2), Discrete(2))
+        self.assertIsInstance(agent, Policy)
+        self.assertEqual(agent.name, RESPONSE["name"])
+        self.assertFalse(hasattr(agent, "source"))
         runner = AsyncMock(return_value=RESULT)
-        with patch("rsikit.run.run_policy", runner):
+        with patch("rsikit.run.run_episode", runner):
             with Run.create(name="demo", environment="CartPole-v1", path=self.path) as run:
-                results = await run.evaluate(self.policy, seeds=iter([0, 1, 0]))
-                self.assertEqual(len(results), 2)
-                self.assertEqual([r.status for r in results], ["completed", "completed"])
+                self.assertEqual(
+                    await run.evaluate(self.policy, seeds=iter([0, 1, 0])), {0: 7.0, 1: 7.0}
+                )
                 await run.evaluate(self.policy, seeds=[0, 1])
                 self.assertEqual(runner.await_count, 2)
-                exports = list((self.path / "exports").glob("*.py"))
-                self.assertEqual(len(exports), 1)
-                self.assertEqual(exports[0].read_text(), RESPONSE["implementation"])
-                self.assertIsInstance(runner.call_args.args[0], Policy)
-            exports[0].unlink()
-            with Run.open(self.path) as reopened:
-                self.assertEqual(reopened.name, "demo")
-                self.assertEqual(reopened.policies()[0].id, self.policy.id)
-                self.assertEqual(len(await reopened.resume()), 2)
+                self.assertIs(runner.call_args.args[1].func, self.policy)
+                (export,) = (self.path / "exports").glob("*.py")
+                self.assertEqual(export.read_text(), RESPONSE["implementation"])
+            export.unlink()
+            with Run.open(self.path) as run:
+                (restored,) = run.policies()
+                self.assertTrue(issubclass(restored, Policy))
+                self.assertEqual(restored.id, self.policy.id)
+                await run.resume()
+                self.assertEqual(run.scores(restored), {0: 7.0, 1: 7.0})
                 self.assertEqual(runner.await_count, 2)
-                self.assertTrue(exports[0].exists())
+                self.assertTrue(export.exists())
+        with closing(sqlite3.connect(self.path / "run.sqlite")) as db:
+            self.assertEqual(
+                {row[0] for row in db.execute("SELECT name FROM sqlite_master WHERE type='table'")},
+                {"settings", "policy"},
+            )
+            self.assertEqual(
+                [row[1] for row in db.execute("PRAGMA table_info(policy)")],
+                ["id", "name", "implementation", "scores"],
+            )
         self.assertEqual(len(self.provider.calls), 1)
 
-    async def test_interrupted_episode_restarts_and_completed_episode_is_retained(self):
+    async def test_interruption_preserves_scores_and_resumes_after_move(self):
         started = asyncio.Event()
 
-        async def blocked(policy, make_env, *, env_seed, **kwargs):
+        async def blocked(*args, env_seed, **kwargs):
             if env_seed == 1:
                 started.set()
                 await asyncio.Event().wait()
             return RESULT
 
         with Run.create(name="resume", environment="CartPole-v1", path=self.path) as run:
-            with patch("rsikit.run.run_policy", blocked):
+            with patch("rsikit.run.run_episode", blocked):
                 task = asyncio.create_task(run.evaluate(self.policy, seeds=[0, 1, 2]))
                 await started.wait()
                 task.cancel()
                 with self.assertRaises(asyncio.CancelledError):
                     await task
-            self.assertEqual(
-                [r.status for r in run.executions()], ["completed", "pending", "pending"]
-            )
-            # Simulate a process dying after it commits 'running'.
-            with Session(run._engine) as session:
-                job = session.exec(select(Execution).where(Execution.env_seed == 1)).one()
-                job.status = "running"
-                session.add(job)
-                session.commit()
+            self.assertEqual(run.scores(self.policy), {0: 7.0, 1: None, 2: None})
         moved = self.path.with_name("moved")
         shutil.move(self.path, moved)
         runner = AsyncMock(return_value=RESULT)
-        with patch("rsikit.run.run_policy", runner), Run.open(moved) as run:
-            result = await run.resume()
-            self.assertEqual([r.status for r in result], ["completed"] * 3)
+        with patch("rsikit.run.run_episode", runner), Run.open(moved) as run:
+            await run.resume()
+            self.assertEqual(run.scores(self.policy), {0: 7.0, 1: 7.0, 2: 7.0})
             self.assertEqual([call.kwargs["env_seed"] for call in runner.call_args_list], [1, 2])
-            self.assertEqual([r.attempts for r in result], [1, 2, 1])
-            self.assertEqual(result[0].reward, 7)
 
-    async def test_failed_policies_are_terminal_infrastructure_errors_are_resumable(self):
-        with Run.create(name="failures", environment="CartPole-v1", path=self.path) as run:
-            with patch(
-                "rsikit.run.run_policy",
-                AsyncMock(
-                    side_effect=[
-                        PolicyError("bad action"),
-                        InfrastructureError("worker unavailable"),
-                    ]
-                ),
-            ):
-                with self.assertRaisesRegex(InfrastructureError, "worker unavailable"):
-                    await run.evaluate(self.policy, seeds=[0, 1, 2])
-            self.assertEqual([r.status for r in run.executions()], ["failed", "pending", "pending"])
-        runner = AsyncMock(return_value=RESULT)
-        with patch("rsikit.run.run_policy", runner), Run.open(self.path) as run:
-            result = await run.resume()
-            self.assertEqual([r.status for r in result], ["failed", "completed", "completed"])
-            self.assertEqual(runner.await_count, 2)
-            self.assertIsNone(result[0].reward)
-            self.assertIn("bad action", result[0].error)
+    async def test_errors_propagate_without_becoming_scores(self):
+        with Run.create(name="errors", environment="CartPole-v1", path=self.path) as run:
+            for error in (PolicyError("bad action"), InfrastructureError("worker unavailable")):
+                with patch("rsikit.run.run_episode", AsyncMock(side_effect=error)):
+                    with self.assertRaises(type(error)):
+                        await run.evaluate(self.policy, seeds=[0, 1])
+                self.assertEqual(run.scores(self.policy), {0: None, 1: None})
+            with patch("rsikit.run.run_episode", AsyncMock(return_value=RESULT)):
+                await run.resume()
+            self.assertEqual(run.scores(self.policy), {0: 7.0, 1: 7.0})
 
-    async def test_run_ownership_export_opt_out_and_policy_identity(self):
+    async def test_run_ownership_export_opt_out_and_identity(self):
         with Run.create(
             name="private", environment="CartPole-v1", path=self.path, export=False
         ) as run:
             with self.assertRaises(BlockingIOError):
                 Run.open(self.path)
-            with patch("rsikit.run.run_policy", AsyncMock(return_value=RESULT)):
-                await run.evaluate(self.policy, seeds=[0])
-                with self.assertRaisesRegex(ValueError, "cannot change"):
-                    await run.evaluate(
-                        self.policy.model_copy(update={"name": "changed"}), seeds=[0]
-                    )
+            with patch("rsikit.run.run_episode", AsyncMock(return_value=RESULT)):
+                await run.evaluate(self.policy)
+                with patch.object(self.policy, "name", "changed"):
+                    with self.assertRaisesRegex(ValueError, "cannot change"):
+                        await run.evaluate(self.policy)
             self.assertFalse((self.path / "exports").exists())
-        with Run.open(self.path) as run:
-            self.assertFalse((self.path / "exports").exists())
-            self.assertEqual(run.policies()[0].name, self.policy.name)
         with self.assertRaisesRegex(RuntimeError, "closed"):
             await run.resume()
         with self.assertRaises(FileNotFoundError):
             Run.open(self.path / "missing")
 
-    async def test_untrusted_generated_name_cannot_choose_export_path(self):
-        provider = ScriptedProvider([json.dumps({**RESPONSE, "name": "../../outside"})])
-        policy = await generate("task", provider=provider)
+    async def test_generated_code_is_not_executed_on_host_and_name_is_safe(self):
+        response = {
+            **RESPONSE,
+            "name": "../../outside",
+            "implementation": "raise AssertionError('host execution')\n"
+            + RESPONSE["implementation"],
+        }
+        policy = await generate("task", provider=ScriptedProvider([json.dumps(response)]))
         with Run.create(name="paths", environment="CartPole-v1", path=self.path) as run:
-            with patch("rsikit.run.run_policy", AsyncMock(return_value=RESULT)):
-                await run.evaluate(policy, seeds=[0])
-            files = list((self.path / "exports").glob("*.py"))
-            self.assertEqual(len(files), 1)
-            self.assertEqual(files[0].parent, self.path / "exports")
-            self.assertEqual(run.policies()[0].name, "../../outside")
+            with patch("rsikit.run.run_episode", AsyncMock(return_value=RESULT)):
+                await run.evaluate(policy)
+            (export,) = (self.path / "exports").glob("*.py")
+            self.assertEqual(export.parent, self.path / "exports")
+        with self.assertRaisesRegex(ValueError, "Solution"):
+            await generate(
+                "task",
+                provider=ScriptedProvider([json.dumps({**RESPONSE, "implementation": "pass"})]),
+            )
 
 
 if __name__ == "__main__":

@@ -1,19 +1,20 @@
 """Execute generated policies in a fresh restricted Docker container per episode."""
 
+import ast
 import asyncio
 import contextlib
+import hashlib
 import math
 from pathlib import Path
 from uuid import uuid4
 
-from rsikit.controller import Controller
 from rsikit.episode import InfrastructureError, PolicyError, PolicyTimeout, run_episode
 from rsikit.policy import Policy
 
 from .codec import MAX_MESSAGE, MAX_SOURCE, decode, dumps, encode, encode_space, loads
 
 
-class SandboxPolicy(Controller):
+class SandboxPolicy(Policy):
     """Persistent remote instance; candidate source is never executed on the host."""
 
     def __init__(
@@ -21,12 +22,13 @@ class SandboxPolicy(Controller):
         observation_space,
         action_space,
         *,
-        instructions,
-        source,
+        instructions="",
+        source=None,
         image="rsikit-sandbox:local",
         call_timeout=10.0,
     ):
         super().__init__(observation_space, action_space, instructions=instructions)
+        source = self._implementation if source is None else source
         if not math.isfinite(call_timeout) or call_timeout <= 0:
             raise InfrastructureError("call_timeout must be positive and finite")
         if len(source.encode()) > MAX_SOURCE:
@@ -36,8 +38,9 @@ class SandboxPolicy(Controller):
             dumps(self.space_definitions)
         except (TypeError, ValueError, RecursionError) as exc:
             raise InfrastructureError(f"Cannot encode policy spaces: {exc}") from exc
-        self.source, self.image, self.call_timeout = source, image, call_timeout
-        self.name = f"rsikit-{uuid4().hex}"
+        self._implementation = source
+        self.image, self.call_timeout = image, call_timeout
+        self.container_name = f"rsikit-{uuid4().hex}"
         self.process = None
         self.ready = False
 
@@ -53,7 +56,7 @@ class SandboxPolicy(Controller):
                 "never",
                 "-i",
                 "--name",
-                self.name,
+                self.container_name,
                 "--network",
                 "none",
                 "--read-only",
@@ -94,7 +97,7 @@ class SandboxPolicy(Controller):
         await self._request(
             {
                 "command": "start",
-                "source": self.source,
+                "source": self._implementation,
                 "observation_space": self.space_definitions[0],
                 "action_space": self.space_definitions[1],
                 "instructions": self.instructions,
@@ -177,14 +180,16 @@ class SandboxPolicy(Controller):
                 "docker",
                 "rm",
                 "-f",
-                self.name,
+                self.container_name,
                 stdout=asyncio.subprocess.DEVNULL,
                 stderr=asyncio.subprocess.DEVNULL,
             )
             await asyncio.wait_for(cleanup.wait(), 10)
             await asyncio.wait_for(process.wait(), 10)
         except (OSError, asyncio.TimeoutError) as exc:
-            raise InfrastructureError(f"Cannot remove sandbox {self.name}: {exc}") from exc
+            raise InfrastructureError(
+                f"Cannot remove sandbox {self.container_name}: {exc}"
+            ) from exc
         finally:
             for child in (cleanup, process):
                 if child is not None and child.returncode is None:
@@ -229,17 +234,19 @@ async def run_program(
     )
 
 
-async def run_policy(policy: Policy, make_env, **kwargs) -> tuple:
-    """Execute a generated Policy directly; its implementation never runs on the host."""
-    call_timeout = kwargs.pop("call_timeout", 10.0)
-
-    def make_controller(observation_space, action_space, *, instructions):
-        return SandboxPolicy(
-            observation_space,
-            action_space,
-            instructions=instructions,
-            source=policy._implementation,
-            call_timeout=call_timeout,
-        )
-
-    return await run_episode(make_env, make_controller, **kwargs)
+def _policy_class(name: str, implementation: str) -> type[Policy]:
+    """Load a Policy class without executing generated code on the host."""
+    tree = ast.parse(implementation)
+    if not name.strip():
+        raise ValueError("The generated policy needs a name")
+    if not any(isinstance(node, ast.ClassDef) and node.name == "Solution" for node in tree.body):
+        raise ValueError("The generated policy must define a Solution class")
+    return type(
+        "Solution",
+        (SandboxPolicy,),
+        {
+            "name": name,
+            "id": hashlib.sha256((name + "\0" + implementation).encode()).hexdigest(),
+            "_implementation": implementation,
+        },
+    )

@@ -1,36 +1,38 @@
-"""A generated policy value. Its executable implementation is private to RSIKit."""
+"""The executable policy contract; training is not part of this lifecycle."""
 
-import ast
-from uuid import uuid4
+from abc import ABC, abstractmethod
+from typing import Generic, TypeVar
 
-from pydantic import BaseModel, ConfigDict, Field, PrivateAttr
+import numpy as np
+from gymnasium import Space
 
-
-class Policy(BaseModel):
-    """Returned by generation; pass it directly to Run.evaluate()."""
-
-    model_config = ConfigDict(frozen=True, extra="forbid")
-    id: str = Field(default_factory=lambda: uuid4().hex)
-    name: str = Field(min_length=1)
-    summary: str = ""
-    _implementation: str = PrivateAttr(default="")
+Observation = TypeVar("Observation")
+Action = TypeVar("Action")
 
 
-class _PolicyResponse(BaseModel, extra="forbid"):
-    """Wire format between the coding model and the generation boundary."""
+class Policy(ABC, Generic[Observation, Action]):
+    """Choose actions using public task instructions and episode-local state."""
 
-    name: str = Field(min_length=1)
-    summary: str = ""
-    implementation: str = Field(min_length=1)
+    def __init__(
+        self,
+        observation_space: Space[Observation],
+        action_space: Space[Action],
+        *,
+        instructions: str = "",
+    ):
+        self.observation_space = observation_space
+        self.action_space = action_space
+        self.instructions = instructions
 
-    def policy(self) -> Policy:
-        tree = ast.parse(self.implementation)
-        if not self.name.strip():
-            raise ValueError("The generated policy needs a name")
-        if not any(
-            isinstance(node, ast.ClassDef) and node.name == "Solution" for node in tree.body
-        ):
-            raise ValueError("The generated policy must define a Solution class")
-        policy = Policy(name=self.name, summary=self.summary)
-        policy._implementation = self.implementation
-        return policy
+    async def reset(self, *, seed: int | None = None) -> None:
+        """Reset randomness; subclasses also clear their own episode memory."""
+        self.rng = np.random.default_rng(seed)
+        self.action_space.seed(seed)
+
+    @abstractmethod
+    async def act(self, observation: Observation) -> Action:
+        """Return an action without access to the environment."""
+        raise NotImplementedError
+
+    async def close(self) -> None:
+        """Release policy resources."""

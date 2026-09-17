@@ -2,7 +2,7 @@ Task:
 {{ instance.task }}
 
 Program interface:
-Return Python source defining a top-level Solution class inheriting rsikit.Controller.
+Return Python source defining a top-level Solution class inheriting rsikit.Policy.
 The constructor receives observation_space, action_space, and instructions.
 Implement async act(self, observation) returning a valid action. Optional async
 reset(self, *, seed=None) should call await super().reset(seed=seed) and clear

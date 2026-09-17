@@ -2,10 +2,10 @@
 
 import asyncio
 
-from rsikit.controller import Controller
+from rsikit.policy import Policy
 
 
-class Solution(Controller):
+class Solution(Policy):
     async def act(self, observation):
         return int(observation[2] + 0.5 * observation[3] > 0)
 

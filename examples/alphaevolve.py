@@ -11,9 +11,9 @@ from slick.providers import OpenAIAPI
 import rsikit.alphaevolve as alphaevolve
 from rsikit.alphaevolve import AlphaEvolve, evaluate_program
 
-INITIAL = """from rsikit import Controller
+INITIAL = """from rsikit import Policy
 
-class Solution(Controller):
+class Solution(Policy):
     async def act(self, observation):
         return 0
 """

@@ -1,6 +1,6 @@
 # AlphaEvolve
 
-`rsikit.alphaevolve` evolves Python `Solution(Controller)` classes with direct Slick
+`rsikit.alphaevolve` evolves Python `Solution(Policy)` classes with direct Slick
 provider calls and Pydantic response models. It adapts the local `slick-bits`
 reference implementation; that repository is neither imported nor installed.
 This is an implementation of the search approach, not a reproduction of

@@ -13,8 +13,8 @@ import gymnasium as gym
 import numpy as np
 from gymnasium import spaces
 
-from rsikit.controller import Controller
 from rsikit.episode import InfrastructureError, PolicyError, PolicyTimeout, run_episode
+from rsikit.policy import Policy
 from rsikit.sandbox import SandboxPolicy, run_program
 from rsikit.sandbox.codec import decode, decode_space, dumps, encode, encode_space, loads
 
@@ -22,9 +22,9 @@ INSTRUCTIONS = "Count from zero.\nPreserve café and π exactly."
 COUNTER_SOURCE = """
 import asyncio
 import os
-from rsikit import Controller
+from rsikit import Policy
 
-class Solution(Controller):
+class Solution(Policy):
     async def reset(self, *, seed=None):
         await super().reset(seed=seed)
         self.count = 0 if self.instructions == "Count from zero.\\nPreserve café and π exactly." else 5
@@ -57,7 +57,7 @@ class CounterEnv(gym.Env):
         return self.count, float(action + 1), self.count == 2, False, {}
 
 
-class CounterPolicy(Controller):
+class CounterPolicy(Policy):
     async def reset(self, *, seed=None):
         await super().reset(seed=seed)
         self.count = 0 if self.instructions == INSTRUCTIONS else 5
@@ -228,9 +228,8 @@ class SandboxEpisodeSmoke(unittest.IsolatedAsyncioTestCase):
             return json.dumps(
                 {
                     "name": name,
-                    "summary": "Generated test policy",
                     "implementation": (
-                        "from rsikit import Controller\nclass Solution(Controller):\n"
+                        "from rsikit import Policy\nclass Solution(Policy):\n"
                         f"    async def act(self, observation):\n        return {action}\n"
                     ),
                 }
@@ -256,12 +255,13 @@ class SandboxEpisodeSmoke(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(len(list((output / "exports").glob("*.py"))), 5)
             self.assertEqual(json.loads((output / "results.json").read_text()), result)
             self.assertEqual(result[2]["name"], "PD")
-            self.assertEqual(result[2]["mean_return"], 30)
-            self.assertIsNone(result[3]["mean_return"])
+            self.assertEqual(result[2]["mean_score"], 30)
+            self.assertIsNone(result[3]["mean_score"])
             with Run.open(output) as run:
                 self.assertEqual(len(run.policies()), 5)
-                self.assertEqual(len(run.executions()), 10)
-                self.assertEqual(len(await run.resume()), 10)
+                self.assertEqual(sum(len(run.scores(p)) for p in run.policies()), 10)
+                with self.assertRaises(PolicyError):
+                    await run.resume()
 
     async def test_run_records_real_video_artifact(self):
         import json
@@ -284,7 +284,7 @@ class SandboxEpisodeSmoke(unittest.IsolatedAsyncioTestCase):
                             {
                                 "name": "Steady",
                                 "implementation": (
-                                    "from rsikit import Controller\nclass Solution(Controller):\n"
+                                    "from rsikit import Policy\nclass Solution(Policy):\n"
                                     "    async def act(self, observation):\n"
                                     "        return int(observation[2] + 0.5 * observation[3] > 0)\n"
                                 ),
@@ -298,11 +298,10 @@ class SandboxEpisodeSmoke(unittest.IsolatedAsyncioTestCase):
             with Run.create(
                 name="video", path=output, environment="CartPole-v1", max_steps=5, record_video=True
             ) as run:
-                result = (await run.evaluate(policy, seeds=[1]))[0]
-                self.assertEqual(result.status, "completed")
-                self.assertEqual(result.reward, 5)
-                self.assertEqual(len(result.artifacts), 1)
-                video = output / result.artifacts[0]
+                self.assertEqual(await run.evaluate(policy, seeds=[1]), {1: 5.0})
+                videos = list((output / "videos" / policy.id / "1").glob("*.mp4"))
+                self.assertEqual(len(videos), 1)
+                video = videos[0]
                 self.assertGreater(video.stat().st_size, 100)
                 from moviepy import VideoFileClip
 
@@ -310,7 +309,8 @@ class SandboxEpisodeSmoke(unittest.IsolatedAsyncioTestCase):
                     self.assertGreater(clip.duration, 0)
                     self.assertEqual(clip.get_frame(0).shape[2], 3)
             with Run.open(output) as run:
-                self.assertEqual(run.executions()[0].artifacts, result.artifacts)
+                self.assertEqual(run.scores(run.policies()[0]), {1: 5.0})
+                self.assertTrue(video.exists())
 
     async def test_failure_deadline_and_cleanup(self):
         for body in ("raise RuntimeError('candidate failure')", "return object()", "os._exit(3)"):
@@ -336,7 +336,7 @@ class SandboxEpisodeSmoke(unittest.IsolatedAsyncioTestCase):
         result = await asyncio.create_subprocess_exec(
             "docker",
             "inspect",
-            instances[0].name,
+            instances[0].container_name,
             stdout=asyncio.subprocess.DEVNULL,
             stderr=asyncio.subprocess.DEVNULL,
         )

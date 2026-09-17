@@ -12,6 +12,7 @@ from slick.providers import OpenRouterAPI
 
 import rsikit.generation as generation
 from rsikit import Run, generate
+from rsikit.episode import PolicyError
 
 MODEL = "openai/gpt-oss-120b:nitro"
 ENVIRONMENT = "CartPole-v1"
@@ -42,31 +43,31 @@ async def run_demo(provider, output=None, *, seeds=(0, 1, 2, 3, 4), max_steps=50
                 task.render(approach=approach, max_steps=max_steps), provider=provider
             )
             print(f"[{index}/5] Evaluating {policy.name}...", flush=True)
-            await run.evaluate(policy, seeds=seeds)
+            try:
+                await run.evaluate(policy, seeds=seeds)
+            except PolicyError as exc:
+                print(f"{policy.name}: {exc}", flush=True)
         return write_report(run)
 
 
 def write_report(run):
     rows = []
     for policy in run.policies():
-        episodes = run.executions(policy)
-        complete = bool(episodes) and all(ep.status == "completed" for ep in episodes)
+        scores = run.scores(policy)
+        complete = bool(scores) and all(score is not None for score in scores.values())
         rows.append(
             {
                 "name": policy.name,
-                "id": policy.id,
-                "summary": policy.summary,
-                "episodes": [ep.model_dump(mode="json") for ep in episodes],
-                "mean_return": fmean(ep.reward for ep in episodes) if complete else None,
+                "scores": {str(seed): score for seed, score in scores.items()},
+                "mean_score": fmean(scores.values()) if complete else None,
             }
         )
     (run.path / "results.json").write_text(json.dumps(rows, indent=2), encoding="utf-8")
-    lines = ["| Policy | Mean return | Per-seed returns |", "| --- | ---: | --- |"]
+    lines = ["| Policy | Mean score | Per-seed scores |", "| --- | ---: | --- |"]
     for row in rows:
-        mean = "—" if row["mean_return"] is None else f"{row['mean_return']:.1f}"
+        mean = "—" if row["mean_score"] is None else f"{row['mean_score']:.1f}"
         values = ", ".join(
-            str(ep["reward"]) if ep["status"] == "completed" else ep["status"]
-            for ep in row["episodes"]
+            "unfinished" if score is None else str(score) for score in row["scores"].values()
         )
         lines.append(f"| {row['name'].replace('|', '/')} | {mean} | {values} |")
     (run.path / "report.md").write_text("\n".join(lines) + "\n", encoding="utf-8")

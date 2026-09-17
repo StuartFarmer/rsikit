@@ -17,9 +17,9 @@ from rsikit.alphaevolve.edits import Edit, Mutation, Program, apply_edits, check
 from tests.providers import ScriptedProvider
 
 ROOT = Path(alphaevolve.__file__).parent / "prompts"
-SOURCE = """from rsikit import Controller
+SOURCE = """from rsikit import Policy
 # EVOLVE-BLOCK-START
-class Solution(Controller):
+class Solution(Policy):
     async def act(self, observation):
         return 0
 # EVOLVE-BLOCK-END
@@ -125,10 +125,8 @@ class AlphaEvolveTests(unittest.IsolatedAsyncioTestCase):
                 rewrite(1),
                 rewrite(2),
                 rewrite(3),
-                Program(source=SOURCE.replace("class Solution(Controller):", "class Solution(:")),
-                Program(
-                    source=SOURCE.replace("class Solution(Controller):", "class Other(Controller):")
-                ),
+                Program(source=SOURCE.replace("class Solution(Policy):", "class Solution(:")),
+                Program(source=SOURCE.replace("class Solution(Policy):", "class Other(Policy):")),
             ]
         )
         agent = AlphaEvolve(
