@@ -3,9 +3,11 @@
 import asyncio
 import fcntl
 import re
+from collections.abc import Sequence
 from contextlib import aclosing
 from datetime import datetime, timezone
 from pathlib import Path
+from statistics import fmean
 from uuid import uuid4
 
 import gymnasium as gym
@@ -134,9 +136,15 @@ class Run:
             row = session.get(_StoredPolicy, policy.id)
             return {} if row is None else {int(seed): score for seed, score in row.scores.items()}
 
-    async def evaluate(self, *policies: type[Policy], seeds=(0,)) -> dict[str, dict[int, float]]:
-        """Evaluate a group, returning scores keyed by policy ID and seed."""
+    async def evaluate(self, policies: Sequence[type[Policy]], *, seeds=(0,)) -> dict[str, float]:
+        """Save and evaluate a batch, returning mean scores keyed by policy ID.
+
+        Each policy uses the same seeds, defaulting to one episode with seed 0.
+        Completed scores are reused. Individual episode scores remain in scores().
+        """
         seeds = tuple(dict.fromkeys(seeds))
+        if not seeds:
+            raise ValueError("Evaluation requires at least one seed")
         policies = tuple({policy.id: policy for policy in policies}.values())
         async with self._busy:
             if self._lock.closed:
@@ -170,7 +178,7 @@ class Run:
             result = {}
             for policy in policies:
                 scores = self.scores(policy)
-                result[policy.id] = {seed: scores[seed] for seed in seeds}
+                result[policy.id] = fmean(scores[seed] for seed in seeds)
             return result
 
     async def _execute(self, jobs):

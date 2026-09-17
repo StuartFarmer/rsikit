@@ -1,15 +1,6 @@
-"""AlphaEvolve search over Gymnasium policy programs using Slick and Pydantic."""
+"""AlphaEvolve generation and selection, independent of execution and storage."""
 
-from .agent import AlphaEvolve, Candidate, Config, Evaluation, EvaluationStage
+from .agent import AlphaEvolve, Config
 from .edits import InvalidCandidate
-from .evaluation import evaluate_program
 
-__all__ = [
-    "AlphaEvolve",
-    "Candidate",
-    "Config",
-    "Evaluation",
-    "EvaluationStage",
-    "InvalidCandidate",
-    "evaluate_program",
-]
+__all__ = ["AlphaEvolve", "Config", "InvalidCandidate"]

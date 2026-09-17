@@ -1,0 +1,23 @@
+Generate a policy for the following task. Choose its short descriptive name.
+
+{{ instance.task }}
+
+{{ instance.context }}
+
+Initial proposal {{ proposal }}: try a distinct approach to this task.
+
+Implement a complete Python module defining Solution(Policy), importing
+Policy from rsikit. Implement async act(self, observation) returning an action
+inside the environment's action space. The inherited constructor receives
+observation_space, action_space, and instructions. The inherited async reset(seed=...)
+seeds self.rng and self.action_space. Call await super().reset(seed=seed) if overriding
+reset, and clear any episode memory. Optional async close(self) releases resources.
+
+The worker provides Python, NumPy, Gymnasium, and rsikit.Policy. It has no
+network, credentials, or host files. Do not call an LLM, create an environment,
+or include an executable main block. The implementation must be Python code,
+without Markdown fences.
+
+# Output Format
+Return only JSON matching this schema:
+{{ schema | tojson }}

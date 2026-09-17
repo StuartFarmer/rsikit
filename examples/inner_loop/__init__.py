@@ -53,7 +53,7 @@ async def run_demo(
             policies.append(policy)
         print(f"Evaluating {len(policies)} policies, concurrency={concurrency}...", flush=True)
         try:
-            await run.evaluate(*policies, seeds=seeds)
+            await run.evaluate(policies, seeds=seeds)
         except PolicyError as exc:
             print(f"Policy evaluation failed: {exc}", flush=True)
         return write_report(run)

@@ -61,10 +61,10 @@ class RunTests(unittest.IsolatedAsyncioTestCase):
             self.assertIs(run.environment, self.env)
             self.assertIs(run.executor, self.executor)
             self.assertEqual(
-                await run.evaluate(self.policy, seeds=iter([0, 1, 0])),
-                {self.policy.id: {0: 7.0, 1: 7.0}},
+                await run.evaluate([self.policy], seeds=iter([0, 1, 0])),
+                {self.policy.id: 7.0},
             )
-            await run.evaluate(self.policy, seeds=[0, 1])
+            await run.evaluate([self.policy], seeds=[0, 1])
             self.assertEqual(self.sandbox.evaluate.await_count, 2)
             self.sandbox.start.assert_awaited_once_with(1)
             self.assertEqual(self.sandbox.evaluate.call_args.args[3], 4)
@@ -88,6 +88,23 @@ class RunTests(unittest.IsolatedAsyncioTestCase):
             )
         self.assertEqual(len(self.provider.calls), 1)
 
+    async def test_default_seed_means_and_empty_batch(self):
+        async def evaluate(implementation, environment, seed, call_timeout):
+            return seed * 2.0, {}
+
+        self.sandbox.evaluate.side_effect = evaluate
+        with self.create() as run:
+            self.assertEqual(await run.evaluate([]), {})
+            self.sandbox.start.assert_not_awaited()
+            self.assertEqual(await run.evaluate([self.policy]), {self.policy.id: 0.0})
+            self.assertEqual(
+                await run.evaluate([self.policy], seeds=(0, 1, 2)), {self.policy.id: 2.0}
+            )
+            self.assertEqual(run.scores(self.policy), {0: 0.0, 1: 2.0, 2: 4.0})
+            self.assertEqual(self.sandbox.evaluate.await_count, 3)
+            with self.assertRaisesRegex(ValueError, "at least one seed"):
+                await run.evaluate([self.policy], seeds=())
+
     async def test_interruption_and_resume_after_move(self):
         started = asyncio.Event()
 
@@ -99,7 +116,7 @@ class RunTests(unittest.IsolatedAsyncioTestCase):
 
         self.sandbox.evaluate.side_effect = blocked
         with self.create() as run:
-            task = asyncio.create_task(run.evaluate(self.policy, seeds=[0, 1, 2]))
+            task = asyncio.create_task(run.evaluate([self.policy], seeds=[0, 1, 2]))
             await started.wait()
             # Allow the completed seed's result to reach the persistence consumer.
             await asyncio.sleep(0)
@@ -126,7 +143,7 @@ class RunTests(unittest.IsolatedAsyncioTestCase):
         self.executor = Executor(sandbox=self.sandbox, concurrency=2)
         with self.create() as run:
             with self.assertRaisesRegex(PolicyError, "bad action"):
-                await run.evaluate(self.policy, seeds=[0, 1, 2])
+                await run.evaluate([self.policy], seeds=[0, 1, 2])
             self.assertEqual(run.scores(self.policy), {0: 0.0, 1: None, 2: 2.0})
             self.assertEqual(
                 (run.path / "artifacts" / self.policy.id / "2/nested/result.txt").read_bytes(), b"2"
@@ -160,12 +177,12 @@ class RunTests(unittest.IsolatedAsyncioTestCase):
         self.sandbox.evaluate.side_effect = evaluate
         self.executor = Executor(sandbox=self.sandbox, concurrency=2)
         with self.create() as run:
-            task = asyncio.create_task(run.evaluate(self.policy, other, seeds=[0, 1]))
+            task = asyncio.create_task(run.evaluate([self.policy, other], seeds=[0, 1]))
             await asyncio.wait_for(started.wait(), 2)
             self.assertEqual(calls, 2)
             release.set()
             result = await task
-            self.assertEqual(result, {self.policy.id: {0: 7.0, 1: 7.0}, other.id: {0: 7.0, 1: 7.0}})
+            self.assertEqual(result, {self.policy.id: 7.0, other.id: 7.0})
         self.assertEqual(peak, 2)
         self.sandbox.start.assert_awaited_once_with(2)
         self.sandbox.close.assert_awaited_once()
@@ -192,7 +209,7 @@ class RunTests(unittest.IsolatedAsyncioTestCase):
         self.sandbox.close.side_effect = close
         self.executor = Executor(sandbox=self.sandbox, concurrency=2)
         with self.create() as run:
-            task = asyncio.create_task(run.evaluate(self.policy, seeds=[0, 1, 2]))
+            task = asyncio.create_task(run.evaluate([self.policy], seeds=[0, 1, 2]))
             await asyncio.wait_for(started.wait(), 2)
             task.cancel()
             with self.assertRaises(asyncio.CancelledError):
@@ -205,7 +222,7 @@ class RunTests(unittest.IsolatedAsyncioTestCase):
             for outcome in [(float("nan"), {}), (1.0, {"../../../../outside": b"bad"})]:
                 self.sandbox.evaluate.return_value = outcome
                 with self.assertRaises(ValueError):
-                    await run.evaluate(self.policy)
+                    await run.evaluate([self.policy])
                 self.assertEqual(run.scores(self.policy), {0: None})
             self.sandbox.start.side_effect = InfrastructureError("start failed")
             with self.assertRaisesRegex(InfrastructureError, "start failed"):
@@ -237,10 +254,10 @@ class RunTests(unittest.IsolatedAsyncioTestCase):
         with self.create(export=False) as run:
             with self.assertRaises(BlockingIOError):
                 self.reopen()
-            await run.evaluate(self.policy)
+            await run.evaluate([self.policy])
             with patch.object(self.policy, "name", "changed"):
                 with self.assertRaisesRegex(ValueError, "cannot change"):
-                    await run.evaluate(self.policy)
+                    await run.evaluate([self.policy])
             self.assertFalse((self.path / "exports").exists())
         with self.assertRaisesRegex(RuntimeError, "closed"):
             await run.resume()
@@ -254,7 +271,7 @@ class RunTests(unittest.IsolatedAsyncioTestCase):
         }
         policy = await generate("task", provider=ScriptedProvider([json.dumps(response)]))
         with self.create() as run:
-            await run.evaluate(policy)
+            await run.evaluate([policy])
             (export,) = (self.path / "exports").glob("*.py")
             self.assertEqual(export.parent, self.path / "exports")
         with self.assertRaisesRegex(ValueError, "Solution"):

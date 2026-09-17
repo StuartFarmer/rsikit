@@ -4,9 +4,8 @@ Task: {{ instance.task }}
 Background and evaluator contract: {{ instance.context }}
 
 Evaluated program:
-{{ parent.content }}
-Metrics (maximized): {{ parent.metrics | tojson }}
-Feedback: {{ parent.feedback }}
+{{ parent.policy._implementation }}
+Score (maximized): {{ parent.score }}
 
 Existing search instructions, average positive offspring improvement, and uses:
 {{ ideas | tojson }}

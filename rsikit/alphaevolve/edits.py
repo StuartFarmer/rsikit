@@ -2,8 +2,9 @@
 
 import ast
 import re
+from typing import Annotated
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, StringConstraints
 
 MARKER = re.compile(r"^.*?EVOLVE-BLOCK-(START|END)[^\r\n]*(?:\r?\n|$)", re.MULTILINE)
 
@@ -14,11 +15,13 @@ class Edit(BaseModel, extra="forbid"):
 
 
 class Mutation(BaseModel, extra="forbid"):
+    name: Annotated[str, StringConstraints(strip_whitespace=True, min_length=1)]
     edits: list[Edit] = Field(min_length=1)
 
 
 class Program(BaseModel, extra="forbid"):
-    source: str = Field(min_length=1)
+    name: Annotated[str, StringConstraints(strip_whitespace=True, min_length=1)]
+    implementation: str = Field(min_length=1)
 
 
 class InvalidCandidate(ValueError):

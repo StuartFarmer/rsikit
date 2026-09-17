@@ -178,39 +178,49 @@ class SandboxEpisodeSmoke(unittest.IsolatedAsyncioTestCase):
         self.assertGreater(cart[4]["episode"]["l"], 1)
 
     async def test_alphaevolve_uses_native_environments_and_isolated_evaluation(self):
-        from functools import partial
-
+        import gymnasium as gym
         from slick import prompts
 
         import rsikit.alphaevolve as alphaevolve
         from examples import cartpole
-        from examples.alphaevolve import INITIAL
-        from rsikit.alphaevolve import AlphaEvolve, Config, evaluate_program
+        from rsikit import Executor, Run
+        from rsikit.alphaevolve import AlphaEvolve, Config
         from rsikit.alphaevolve.edits import Program
         from tests.providers import ScriptedProvider
 
-        provider = ScriptedProvider([Program(source=Path(cartpole.__file__).read_text())])
-        evaluate = partial(evaluate_program, make_env="CartPole-v1", seeds=(1, 2), max_steps=50)
-        with patch.object(prompts, "TEMPLATE_ROOT", Path(alphaevolve.__file__).parent / "prompts"):
-            agent = AlphaEvolve(
-                "Balance CartPole", provider, evaluate, config=Config(mode="rewrite", islands=1)
-            )
-            best = await agent.run(INITIAL, attempts=1, concurrency=1)
-        self.assertGreater(best.metrics["reward"], agent.programs[0].metrics["reward"])
-        self.assertEqual(best.metrics["reward"], 50)
-        self.assertIn('"seed": 2', best.feedback)
-        self.assertEqual(len(provider.calls), 1)
-        rejected = await evaluate(INITIAL.replace("return 0", "return 50"))
-        self.assertIn("PolicyError", rejected.error)
-        self.assertEqual(rejected.metrics, {})
+        initial = "from rsikit import Policy\nclass Solution(Policy):\n    async def act(self, observation):\n        return 0\n"
+        provider = ScriptedProvider(
+            [
+                Program(name="Left", implementation=initial),
+                Program(name="Balance", implementation=Path(cartpole.__file__).read_text()),
+            ]
+        )
         with (
-            patch(
-                "rsikit.alphaevolve.evaluation.run_program",
-                new=AsyncMock(side_effect=InfrastructureError("Docker unavailable")),
-            ),
-            self.assertRaisesRegex(InfrastructureError, "Docker unavailable"),
+            tempfile.TemporaryDirectory() as folder,
+            gym.make("CartPole-v1", max_episode_steps=50) as environment,
+            patch.object(prompts, "TEMPLATE_ROOT", Path(alphaevolve.__file__).parent / "prompts"),
+            Run.create(
+                name="evolution",
+                environment=environment,
+                path=Path(folder) / "run",
+                executor=Executor(concurrency=2),
+            ) as run,
         ):
-            await evaluate(INITIAL)
+            agent = AlphaEvolve(
+                "Balance CartPole", provider, config=Config(mode="rewrite", islands=1)
+            )
+            generation_scores = []
+            for _ in range(2):
+                policies = await agent.generate(n=1)
+                scores = await run.evaluate(policies, seeds=(1, 2))
+                agent.update(scores)
+                generation_scores.append(next(iter(scores.values())))
+            self.assertGreater(generation_scores[1], generation_scores[0])
+            self.assertEqual(generation_scores[1], 50)
+            self.assertEqual(agent.best.name, "Balance")
+            self.assertEqual(len(run.policies()), 2)
+            self.assertEqual(len(list((run.path / "exports").glob("*.py"))), 2)
+        self.assertEqual(len(provider.calls), 2)
 
     async def test_inner_loop_demo_passes_generated_policies_to_run(self):
         import contextlib
@@ -304,7 +314,7 @@ class SandboxEpisodeSmoke(unittest.IsolatedAsyncioTestCase):
                 episode_trigger=lambda _: True,
             )
             with env, Run.create(name="video", path=output, environment=env) as run:
-                self.assertEqual(await run.evaluate(policy, seeds=[1]), {policy.id: {1: 5.0}})
+                self.assertEqual(await run.evaluate([policy], seeds=[1]), {policy.id: 5.0})
                 videos = list((output / "artifacts" / policy.id / "1").rglob("*.mp4"))
                 self.assertEqual(len(videos), 1)
                 video = videos[0]
@@ -429,8 +439,8 @@ class SandboxEpisodeSmoke(unittest.IsolatedAsyncioTestCase):
                     executor=Executor(sandbox=sandbox, concurrency=2),
                 ) as run,
             ):
-                result = await run.evaluate(policy, seeds=[0, 1, 2, 3])
-                self.assertEqual(result, {policy.id: {0: 2.0, 1: 2.0, 2: 2.0, 3: 2.0}})
+                result = await run.evaluate([policy], seeds=[0, 1, 2, 3])
+                self.assertEqual(result, {policy.id: 2.0})
                 start.assert_awaited_once_with(2)
                 workers = [p.read_text().split(":") for p in run.path.rglob("worker.txt")]
                 self.assertEqual(len(workers), 4)
@@ -465,7 +475,7 @@ class SandboxEpisodeSmoke(unittest.IsolatedAsyncioTestCase):
             ) as run,
         ):
             with self.assertRaises(PolicyTimeout):
-                await run.evaluate(policy)
+                await run.evaluate([policy])
             self.assertEqual(run.scores(policy), {0: None})
             self.assertIsNone(sandbox.name)
 

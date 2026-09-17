@@ -10,13 +10,20 @@ from rsikit import DockerSandbox, Executor, Run
 executor = Executor(sandbox=DockerSandbox(), concurrency=4, call_timeout=10)
 with gym.make("CartPole-v1", max_episode_steps=500) as environment:
     with Run.create(name="comparison", environment=environment, executor=executor) as run:
-        scores = await run.evaluate(*policies, seeds=[0, 1, 2])
-        print(scores)  # {policy_id: {seed: score}}
+        scores = await run.evaluate(policies)
+        print(scores)  # {policy_id: score}
 ```
 
 Policies come directly from `await generate(task, provider=provider)`. Their names
 come from the model. Generation neither executes their implementations nor selects
-a sandbox. `Policy` remains the agent's reset/act/close interface.
+a sandbox. Generation writes nothing to disk; `evaluate` is the first place
+a policy is saved. `Policy` remains the agent's reset/act/close interface.
+
+By default, each policy gets one episode with seed 0. A seed controls the random
+starting conditions; giving every policy the same seeds makes comparisons fairer.
+Pass `seeds=[0, 1, 2]` to evaluate multiple starts; the returned score is their mean.
+The same seed also initializes policy randomness. `run.scores(policy)` exposes the
+individual episode scores. Keep the seed set fixed while comparing generations.
 
 ## Environment
 
