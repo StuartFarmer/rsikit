@@ -90,5 +90,5 @@ exceptions retain their original types. Cancellation propagates. Secondary
 cleanup failures are logged without replacing the original failure.
 
 Termination does not imply success: task rewards and info define that. Failed
-execution produces no normal episode result. Search, ranking, reflection,
-trajectory persistence, and cross-episode aggregation are outside this MVP.
+execution produces no normal episode result. Search and cross-episode aggregation live in the separate
+[AlphaEvolve module](ALPHAEVOLVE.md); the runner stores no trajectory.

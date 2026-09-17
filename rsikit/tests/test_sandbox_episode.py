@@ -7,7 +7,7 @@ import tempfile
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, patch
 
 import gymnasium as gym
 import numpy as np
@@ -176,6 +176,41 @@ class SandboxEpisodeSmoke(unittest.IsolatedAsyncioTestCase):
         )
         self.assertTrue(cart[2] or cart[3])
         self.assertGreater(cart[4]["episode"]["l"], 1)
+
+    async def test_alphaevolve_uses_native_environments_and_isolated_evaluation(self):
+        from functools import partial
+
+        from slick import prompts
+
+        import rsikit.alphaevolve as alphaevolve
+        from rsikit.alphaevolve import AlphaEvolve, Config, evaluate_program
+        from rsikit.alphaevolve.edits import Program
+        from rsikit.examples import cartpole
+        from rsikit.examples.alphaevolve import INITIAL
+        from rsikit.tests.providers import ScriptedProvider
+
+        provider = ScriptedProvider([Program(source=Path(cartpole.__file__).read_text())])
+        evaluate = partial(evaluate_program, make_env="CartPole-v1", seeds=(1, 2), max_steps=50)
+        with patch.object(prompts, "TEMPLATE_ROOT", Path(alphaevolve.__file__).parent / "prompts"):
+            agent = AlphaEvolve(
+                "Balance CartPole", provider, evaluate, config=Config(mode="rewrite", islands=1)
+            )
+            best = await agent.run(INITIAL, attempts=1, concurrency=1)
+        self.assertGreater(best.metrics["reward"], agent.programs[0].metrics["reward"])
+        self.assertEqual(best.metrics["reward"], 50)
+        self.assertIn('"seed": 2', best.feedback)
+        self.assertEqual(len(provider.calls), 1)
+        rejected = await evaluate(INITIAL.replace("return 0", "return 50"))
+        self.assertIn("PolicyError", rejected.error)
+        self.assertEqual(rejected.metrics, {})
+        with (
+            patch(
+                "rsikit.alphaevolve.evaluation.run_program",
+                new=AsyncMock(side_effect=InfrastructureError("Docker unavailable")),
+            ),
+            self.assertRaisesRegex(InfrastructureError, "Docker unavailable"),
+        ):
+            await evaluate(INITIAL)
 
     async def test_failure_deadline_and_cleanup(self):
         for body in ("raise RuntimeError('candidate failure')", "return object()", "os._exit(3)"):

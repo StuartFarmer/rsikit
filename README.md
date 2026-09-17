@@ -1,11 +1,12 @@
 # RSIKit
 
-A small inner loop for class-based policies in
+Evolve and evaluate class-based policies in
 [Gymnasium](https://gymnasium.farama.org/) environments.
 
 - `Policy`: task instructions, spaces, and async reset/act/close.
 - `run_episode`: run trusted policy classes in existing Gymnasium environments.
 - `run_program`: evaluate generated classes inside Docker.
+- `AlphaEvolve`: evolve programs using Slick, Pydantic, and Gymnasium feedback.
 
 ```python
 from rsikit import Policy, run_episode
@@ -33,7 +34,8 @@ uv pip install --python .venv/bin/python -e '.[dev]'
 .venv/bin/python -B -m rsikit.examples.cartpole
 ```
 
-Runtime dependencies are Gymnasium and NumPy. No sibling checkout is required.
+Runtime dependencies are Gymnasium, NumPy, Slick (`slick-ai`), and Pydantic.
+No sibling checkout or `slick-bits` dependency is required.
 
 ## Isolated programs
 
@@ -49,6 +51,20 @@ episode. The environment and scoring stay outside the restricted worker.
 See the [API guide](docs/INNER_LOOP.md) for task instructions, class contracts,
 results, and execution limits.
 
+## AlphaEvolve
+
+See the [AlphaEvolve guide](docs/ALPHAEVOLVE.md) for the Python API, search controls,
+and structured generation contracts. Run the CartPole example with an API model:
+
+```sh
+uv pip install --python .venv/bin/python -e '.[openai]'
+# Set OPENAI_API_KEY in your environment first; this command makes paid model calls.
+.venv/bin/python -B -m rsikit.examples.alphaevolve --model YOUR_MODEL --attempts 10
+```
+
+Build the Docker worker above before running the search. The best evaluated
+`Solution` is written to `runs/cartpole/solution.py`.
+
 ## Checks
 
 ```sh
@@ -58,6 +74,5 @@ results, and execution limits.
 ```
 
 Docker checks skip explicitly when Docker or the worker image is unavailable.
-The repository contains only the inner loop, circle-packing and CartPole examples,
-and their checks. Earlier research and optimizer implementations remain in Git
-history and on `codex/gymnasium-inner-loop`.
+The core remains a Gymnasium episode runner. AlphaEvolve is a separate module
+that generates policies and evaluates them through that runner.

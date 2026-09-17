@@ -1,0 +1,9 @@
+Improve the current Solution class by producing a complete replacement program.
+{% include "context.j2" %}
+
+Preserve the immutable skeleton byte for byte, including all marker lines.
+The source field must contain the full Python file, without Markdown fences.
+
+# Output Format
+Return only JSON matching this schema:
+{{ schema | tojson }}
