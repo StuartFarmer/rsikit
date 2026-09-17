@@ -1,5 +1,7 @@
 """The executable policy contract; training is not part of this lifecycle."""
 
+import ast
+import hashlib
 from abc import ABC, abstractmethod
 from typing import Generic, TypeVar
 
@@ -36,3 +38,21 @@ class Policy(ABC, Generic[Observation, Action]):
 
     async def close(self) -> None:
         """Release policy resources."""
+
+
+def _policy_class(name: str, implementation: str) -> type[Policy]:
+    """Declare a generated policy without loading its implementation or choosing an executor."""
+    tree = ast.parse(implementation)
+    if not name.strip():
+        raise ValueError("The generated policy needs a name")
+    if not any(isinstance(node, ast.ClassDef) and node.name == "Solution" for node in tree.body):
+        raise ValueError("The generated policy must define a Solution class")
+    return type(
+        "Solution",
+        (Policy,),
+        {
+            "name": name,
+            "id": hashlib.sha256((name + "\0" + implementation).encode()).hexdigest(),
+            "_implementation": implementation,
+        },
+    )

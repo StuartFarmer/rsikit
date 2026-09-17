@@ -11,7 +11,7 @@ from slick import prompts
 from slick.providers import OpenRouterAPI
 
 import rsikit.generation as generation
-from rsikit import Run, generate
+from rsikit import DockerExecutor, Run, generate
 from rsikit.episode import PolicyError
 
 MODEL = "openai/gpt-oss-120b:nitro"
@@ -25,7 +25,9 @@ APPROACHES = (
 )
 
 
-async def run_demo(provider, output=None, *, seeds=(0, 1, 2, 3, 4), max_steps=500, video=False):
+async def run_demo(
+    provider, output=None, *, seeds=(0, 1, 2, 3, 4), max_steps=500, video=False, concurrency=2
+):
     task = Environment(undefined=StrictUndefined).from_string(
         (Path(__file__).parent / "prompts/task.j2").read_text()
     )
@@ -35,18 +37,22 @@ async def run_demo(provider, output=None, *, seeds=(0, 1, 2, 3, 4), max_steps=50
         path=output,
         max_steps=max_steps,
         record_video=video,
+        executor=DockerExecutor(),
+        concurrency=concurrency,
     ) as run:
         print(f"Run: {run.path}", flush=True)
+        policies = []
         for index, approach in enumerate(APPROACHES, 1):
             print(f"[{index}/5] Generating {approach}...", flush=True)
             policy = await generate(
                 task.render(approach=approach, max_steps=max_steps), provider=provider
             )
-            print(f"[{index}/5] Evaluating {policy.name}...", flush=True)
-            try:
-                await run.evaluate(policy, seeds=seeds)
-            except PolicyError as exc:
-                print(f"{policy.name}: {exc}", flush=True)
+            policies.append(policy)
+        print(f"Evaluating {len(policies)} policies, concurrency={concurrency}...", flush=True)
+        try:
+            await run.evaluate(*policies, seeds=seeds)
+        except PolicyError as exc:
+            print(f"Policy evaluation failed: {exc}", flush=True)
         return write_report(run)
 
 
@@ -82,9 +88,10 @@ async def main():
     parser.add_argument("--output", type=Path)
     parser.add_argument("--resume", type=Path, help="Finish stored episodes; makes no model calls")
     parser.add_argument("--video", action="store_true")
+    parser.add_argument("--concurrency", type=int, default=2)
     args = parser.parse_args()
     if args.resume:
-        with Run.open(args.resume) as run:
+        with Run.open(args.resume, executor=DockerExecutor(), concurrency=args.concurrency) as run:
             await run.resume()
             write_report(run)
         return
@@ -93,5 +100,10 @@ async def main():
     prompts.TEMPLATE_ROOT = Path(generation.__file__).parent / "prompts"
     provider = OpenRouterAPI(model=MODEL, max_output_tokens=8192, timeout=120)
     await run_demo(
-        provider, args.output, seeds=args.seeds, max_steps=args.max_steps, video=args.video
+        provider,
+        args.output,
+        seeds=args.seeds,
+        max_steps=args.max_steps,
+        video=args.video,
+        concurrency=args.concurrency,
     )

@@ -1,9 +1,7 @@
 """Execute generated policies in a fresh restricted Docker container per episode."""
 
-import ast
 import asyncio
 import contextlib
-import hashlib
 import math
 from pathlib import Path
 from uuid import uuid4
@@ -23,12 +21,11 @@ class SandboxPolicy(Policy):
         action_space,
         *,
         instructions="",
-        source=None,
+        source,
         image="rsikit-sandbox:local",
         call_timeout=10.0,
     ):
         super().__init__(observation_space, action_space, instructions=instructions)
-        source = self._implementation if source is None else source
         if not math.isfinite(call_timeout) or call_timeout <= 0:
             raise InfrastructureError("call_timeout must be positive and finite")
         if len(source.encode()) > MAX_SOURCE:
@@ -231,22 +228,4 @@ async def run_program(
         policy_seed=policy_seed,
         max_steps=max_steps,
         instructions=instructions,
-    )
-
-
-def _policy_class(name: str, implementation: str) -> type[Policy]:
-    """Load a Policy class without executing generated code on the host."""
-    tree = ast.parse(implementation)
-    if not name.strip():
-        raise ValueError("The generated policy needs a name")
-    if not any(isinstance(node, ast.ClassDef) and node.name == "Solution" for node in tree.body):
-        raise ValueError("The generated policy must define a Solution class")
-    return type(
-        "Solution",
-        (SandboxPolicy,),
-        {
-            "name": name,
-            "id": hashlib.sha256((name + "\0" + implementation).encode()).hexdigest(),
-            "_implementation": implementation,
-        },
     )

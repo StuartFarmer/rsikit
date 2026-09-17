@@ -298,7 +298,7 @@ class SandboxEpisodeSmoke(unittest.IsolatedAsyncioTestCase):
             with Run.create(
                 name="video", path=output, environment="CartPole-v1", max_steps=5, record_video=True
             ) as run:
-                self.assertEqual(await run.evaluate(policy, seeds=[1]), {1: 5.0})
+                self.assertEqual(await run.evaluate(policy, seeds=[1]), {policy.id: {1: 5.0}})
                 videos = list((output / "videos" / policy.id / "1").glob("*.mp4"))
                 self.assertEqual(len(videos), 1)
                 video = videos[0]

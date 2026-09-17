@@ -2,19 +2,17 @@
 
 import asyncio
 import fcntl
+import math
 import re
 from datetime import datetime, timezone
-from functools import partial
 from pathlib import Path
 from uuid import uuid4
 
-import gymnasium as gym
 from sqlalchemy import JSON, Column
 from sqlmodel import Field, Session, SQLModel, create_engine, select
 
-from .episode import run_episode
-from .policy import Policy
-from .sandbox import _policy_class
+from .execution import DockerExecutor, Executor
+from .policy import Policy, _policy_class
 
 
 def _slug(name: str) -> str:
@@ -57,6 +55,8 @@ class Run:
         call_timeout: float = 10.0,
         export: bool = True,
         record_video: bool = False,
+        executor: Executor | None = None,
+        concurrency: int = 1,
     ) -> "Run":
         settings = _Settings(
             name=name,
@@ -75,16 +75,27 @@ class Run:
             else Path("runs") / f"{_slug(name)}-{stamp}-{uuid4().hex[:8]}"
         )
         directory.mkdir(parents=True, exist_ok=False)
-        return cls(directory, settings)
+        return cls(directory, settings, executor=executor, concurrency=concurrency)
 
     @classmethod
-    def open(cls, path: str | Path) -> "Run":
+    def open(
+        cls, path: str | Path, *, executor: Executor | None = None, concurrency: int = 1
+    ) -> "Run":
         directory = Path(path)
         if not (directory / "run.sqlite").is_file():
             raise FileNotFoundError(directory / "run.sqlite")
-        return cls(directory)
+        return cls(directory, executor=executor, concurrency=concurrency)
 
-    def __init__(self, path: Path, settings: _Settings | None = None):
+    def __init__(
+        self,
+        path: Path,
+        settings: _Settings | None = None,
+        *,
+        executor: Executor | None = None,
+        concurrency: int = 1,
+    ):
+        self.executor = DockerExecutor() if executor is None else executor
+        self._slots = asyncio.Semaphore(concurrency)
         self.path = path.resolve()
         self._lock = (self.path / ".lock").open("a")
         self._engine = None
@@ -143,62 +154,94 @@ class Run:
             row = session.get(_StoredPolicy, policy.id)
             return {} if row is None else {int(seed): score for seed, score in row.scores.items()}
 
-    async def evaluate(self, policy: type[Policy], *, seeds=(0,)) -> dict[int, float]:
+    async def evaluate(self, *policies: type[Policy], seeds=(0,)) -> dict[str, dict[int, float]]:
+        """Evaluate a group, returning scores keyed by policy ID and seed."""
         seeds = tuple(dict.fromkeys(seeds))
+        policies = tuple({policy.id: policy for policy in policies}.values())
         async with self._busy:
             if self._lock.closed:
                 raise RuntimeError("Run is closed")
             with Session(self._engine) as session:
-                stored = session.get(_StoredPolicy, policy.id)
-                if stored is None:
-                    stored = _StoredPolicy(
-                        id=policy.id, name=policy.name, implementation=policy._implementation
-                    )
-                elif (stored.name, stored.implementation) != (policy.name, policy._implementation):
-                    raise ValueError("A stored policy cannot change under the same ID")
-                stored.scores = {**dict.fromkeys(map(str, seeds)), **stored.scores}
-                session.add(stored)
-                # Save requested work before executing it; exceptions leave None scores.
+                for policy in policies:
+                    stored = session.get(_StoredPolicy, policy.id)
+                    if stored is None:
+                        stored = _StoredPolicy(
+                            id=policy.id, name=policy.name, implementation=policy._implementation
+                        )
+                    elif (stored.name, stored.implementation) != (
+                        policy.name,
+                        policy._implementation,
+                    ):
+                        raise ValueError("A stored policy cannot change under the same ID")
+                    stored.scores = {**dict.fromkeys(map(str, seeds)), **stored.scores}
+                    session.add(stored)
+                # Persist the whole group before dispatching any evaluation.
                 session.commit()
-                session.refresh(stored)
-                self._export(stored)
-                for seed in seeds:
-                    if stored.scores[str(seed)] is not None:
-                        continue
+                jobs = []
+                for policy in policies:
+                    stored = session.get(_StoredPolicy, policy.id)
+                    self._export(stored)
+                    jobs.extend(
+                        (stored.id, stored.implementation, seed)
+                        for seed in seeds
+                        if stored.scores[str(seed)] is None
+                    )
+            await self._execute(jobs)
+            result = {}
+            for policy in policies:
+                scores = self.scores(policy)
+                result[policy.id] = {seed: scores[seed] for seed in seeds}
+            return result
 
-                    def make_env():
-                        kwargs = dict(self._settings.environment_kwargs)
-                        if self._settings.record_video:
-                            kwargs["render_mode"] = "rgb_array"
-                        env = gym.make(self._settings.environment, **kwargs)
-                        if self._settings.record_video:
-                            try:
-                                env = gym.wrappers.RecordVideo(
-                                    env,
-                                    str(self.path / "videos" / policy.id / str(seed)),
-                                    episode_trigger=lambda _: True,
-                                )
-                            except BaseException:
-                                env.close()
-                                raise
-                        return env
-
-                    *_, info = await run_episode(
-                        make_env,
-                        partial(policy, call_timeout=self._settings.call_timeout),
-                        env_seed=seed,
-                        policy_seed=seed,
+    async def _execute(self, jobs):
+        async def evaluate(policy_id, implementation, seed):
+            async with self._slots:
+                score = float(
+                    await self.executor.evaluate(
+                        implementation,
+                        environment=self._settings.environment,
+                        seed=seed,
+                        environment_kwargs=dict(self._settings.environment_kwargs),
                         max_steps=self._settings.max_steps,
                         instructions=self._settings.instructions,
+                        call_timeout=self._settings.call_timeout,
+                        video_dir=(
+                            str(self.path / "videos" / policy_id / str(seed))
+                            if self._settings.record_video
+                            else None
+                        ),
                     )
-                    stored.scores = {**stored.scores, str(seed): float(info["episode"]["r"])}
+                )
+                if not math.isfinite(score):
+                    raise ValueError("Executor returned a non-finite score")
+                # Read the latest mapping so concurrent seeds keep each other's scores.
+                with Session(self._engine) as session:
+                    stored = session.get(_StoredPolicy, policy_id)
+                    stored.scores = {**stored.scores, str(seed): score}
                     session.add(stored)
                     session.commit()
-                return {seed: stored.scores[str(seed)] for seed in seeds}
+
+        tasks = [asyncio.create_task(evaluate(*job)) for job in jobs]
+        try:
+            outcomes = await asyncio.gather(*tasks, return_exceptions=True)
+        finally:
+            for task in tasks:
+                task.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
+        for outcome in outcomes:
+            if isinstance(outcome, BaseException):
+                raise outcome
 
     async def resume(self) -> None:
-        """Retry unfinished evaluations. Errors propagate; completed scores are reused."""
-        if self._lock.closed:
-            raise RuntimeError("Run is closed")
-        for policy in self.policies():
-            await self.evaluate(policy, seeds=self.scores(policy))
+        """Evaluate only missing scores with this run's executor."""
+        async with self._busy:
+            if self._lock.closed:
+                raise RuntimeError("Run is closed")
+            with Session(self._engine) as session:
+                jobs = [
+                    (row.id, row.implementation, int(seed))
+                    for row in session.exec(select(_StoredPolicy))
+                    for seed, score in row.scores.items()
+                    if score is None
+                ]
+            await self._execute(jobs)
