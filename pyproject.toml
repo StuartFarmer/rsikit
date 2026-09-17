@@ -8,14 +8,13 @@ version = "0.2.0"
 description = "Class-based policies and isolated Gymnasium evaluation for API-only agent research."
 readme = "README.md"
 requires-python = ">=3.10"
-dependencies = ["slick-ai>=0.3,<0.4", "pydantic>=2,<3", "gymnasium>=1.3,<2", "numpy>=1.24,<3"]
+dependencies = ["gymnasium>=1.3,<2", "numpy>=1.24,<3"]
 
 [project.optional-dependencies]
-packing = ["openai>=2,<3", "matplotlib>=3.8,<4", "pillow>=10"]
 dev = ["ruff>=0.4"]
 
 [tool.hatch.build.targets.wheel]
 packages = ["rsikit"]
 
 [tool.hatch.build.targets.sdist]
-include = ["rsikit/", "docs/", "outputs/", "README.md", "pyproject.toml", "ruff.toml", ".gitignore"]
+include = ["rsikit/", "docs/", "README.md", "pyproject.toml", "ruff.toml", ".gitignore"]

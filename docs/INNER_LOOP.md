@@ -39,13 +39,15 @@ from rsikit import run_episode
 from rsikit.envs import CirclePackingEnv
 from rsikit.examples.circle_packing.initial import Solution
 
-episode = asyncio.run(run_episode(
-    CirclePackingEnv,
-    Solution,
-    env_seed=1,
-    policy_seed=2,
-    max_steps=1,
-))
+episode = asyncio.run(
+    run_episode(
+        CirclePackingEnv,
+        Solution,
+        env_seed=1,
+        policy_seed=2,
+        max_steps=1,
+    )
+)
 print(episode.status, episode.return_, episode.length)
 ```
 
@@ -87,7 +89,7 @@ throughout an episode. An independent episode starts fresh.
 
 The image has no network, credentials, or host mounts. It runs non-root with a
 read-only filesystem and resource limits. Host deadlines stop blocked generated
-code. This is the existing research isolation boundary, not a hostile multi-tenant
+code. This is a research isolation boundary, not a hostile multi-tenant
 service. Local trusted policies have no hard execution deadline: blocking Python
 cannot be interrupted safely by an asyncio timeout.
 
@@ -122,6 +124,6 @@ without overwriting an earlier failure.
 
 The first tasks are one-step circle packing and native multi-step CartPole.
 Generation, adaptive search, model API gateways, persistent cross-episode memory,
-vectorization, and aggregate fitness are subsequent work. The old optimizer modules
-remain research code and are not part of the root public API. Their historical
-examples/tests have not been migrated to this interface.
+vectorization, and aggregate fitness are outside this core. The repository
+contains only the inner loop and its examples/tests. The worker image provides
+NumPy and Gymnasium; add other execution dependencies when a task requires them.

@@ -1,1 +1,1 @@
-"""RSIKit tests and their shared offline provider."""
+"""Checks for the policy and episode API."""

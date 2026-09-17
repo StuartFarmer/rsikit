@@ -1,7 +1,0 @@
-Pack exactly ten circles in the unit square, maximizing the sum of their radii.
-Implement pack_circles() returning a list of ten [x, y, radius] triples with
-finite numeric entries. Every radius must be positive. All circles must fit
-inside [0,1] x [0,1] without overlap. NumPy and SciPy are available in the
-execution sandbox. Preserve the function interface and the protected source
-outside evolution blocks. The fixed geometry evaluator determines validity and
-measures sum_radii; do not change or bypass that evaluator.

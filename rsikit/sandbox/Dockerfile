@@ -1,5 +1,5 @@
 FROM python:3.12-slim
-RUN pip install --no-cache-dir numpy==2.2.6 scipy==1.15.3 'gymnasium>=1.3,<2'
+RUN pip install --no-cache-dir numpy==2.2.6 'gymnasium>=1.3,<2'
 RUN mkdir -p /opt/worker/rsikit/sandbox && printf 'from .policy import Policy\n' > /opt/worker/rsikit/__init__.py && touch /opt/worker/rsikit/sandbox/__init__.py
 COPY rsikit/policy.py /opt/worker/rsikit/policy.py
 COPY rsikit/sandbox/worker.py rsikit/sandbox/codec.py /opt/worker/rsikit/sandbox/

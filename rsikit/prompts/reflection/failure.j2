@@ -1,8 +1,0 @@
-Suggest one concrete next change based on this rejected attempt's diagnostics.
-Distinguish the observed failure from an untested explanation. Do not change the
-task, evaluator or acceptance criteria. Return concise guidance, not source code.
-
-Task: {{ instance.task }}
-<parent>{{ parent.model_dump(mode="json") | tojson }}</parent>
-<rejected>{{ candidate.model_dump(mode="json") | tojson }}</rejected>
-Prior guidance: {{ instance.texts | tojson }}
