@@ -11,11 +11,11 @@ import gymnasium as gym
 from rich.console import Console
 from slick import prompts
 
+import alphaevolve
 import examples.alphaevolve as example
-import rsikit.alphaevolve as alphaevolve
+from alphaevolve.edits import Program
+from alphaevolve.improved import AlphaEvolve, Config
 from rsikit import Executor, Run
-from rsikit.alphaevolve import AlphaEvolve, Config
-from rsikit.alphaevolve.edits import Program
 from rsikit.episode import PolicyError
 from tests.providers import ScriptedProvider
 from tests.test_run import RESPONSE, FakeSandbox
@@ -67,7 +67,7 @@ class ProgressTests(unittest.IsolatedAsyncioTestCase):
         with (
             tempfile.TemporaryDirectory() as directory,
             gym.make("CartPole-v1", max_episode_steps=3) as env,
-            patch.object(prompts, "TEMPLATE_ROOT", Path(alphaevolve.__file__).parent / "prompts"),
+            patch.object(prompts, "TEMPLATE_ROOT", Path(alphaevolve.__file__).parent),
             Run.create(
                 name="progress",
                 path=Path(directory) / "run",

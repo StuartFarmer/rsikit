@@ -2,6 +2,7 @@
 
 import argparse
 import asyncio
+import json
 import logging
 import os
 from pathlib import Path
@@ -23,9 +24,9 @@ from rich.text import Text
 from slick import prompts
 from slick.providers import OpenRouterAPI
 
-import rsikit.alphaevolve as alphaevolve
+import alphaevolve
+from alphaevolve import improved, original
 from rsikit import Executor, Run
-from rsikit.alphaevolve import AlphaEvolve, Config
 from rsikit.episode import PolicyError
 
 TASKS = {
@@ -128,7 +129,8 @@ async def run_search(
     seeds = tuple(seeds)
     console = console or Console()
     logger = logging.getLogger("rsikit")
-    old_level, old_propagate = logger.level, logger.propagate
+    loggers = (logger, logging.getLogger("alphaevolve"))
+    old_settings = [(item.level, item.propagate) for item in loggers]
     with Progress(
         SpinnerColumn(),
         TextColumn("{task.description}"),
@@ -141,12 +143,14 @@ async def run_search(
         display = _ProgressHandler(progress)
         log = logging.FileHandler(run.path / "run.log", encoding="utf-8")
         log.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(name)s: %(message)s"))
-        logger.addHandler(display)
-        logger.addHandler(log)
-        logger.setLevel(logging.INFO)
-        logger.propagate = False
+        for item in loggers:
+            item.addHandler(display)
+            item.addHandler(log)
+            item.setLevel(logging.INFO)
+            item.propagate = False
         try:
             logger.info("Run: %s", run.path)
+            logger.info("Optimizer: %s", type(generator).__module__)
             for generation in range(generations):
                 logger.info("Generation %s/%s", generation + 1, generations)
                 policies = await generator.generate(
@@ -193,16 +197,19 @@ async def run_search(
             _show_scores(run.policies(), run, console)
             raise
         finally:
-            logger.removeHandler(display)
-            logger.removeHandler(log)
+            for item, (level, propagate) in zip(loggers, old_settings):
+                item.removeHandler(display)
+                item.removeHandler(log)
+                item.setLevel(level)
+                item.propagate = propagate
             display.close()
             log.close()
-            logger.setLevel(old_level)
-            logger.propagate = old_propagate
 
 
 async def main():
     parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--variant", choices=("original", "improved"), default="improved")
+    parser.add_argument("--search-seed", type=int, default=0, help="Optimizer sampling seed")
     parser.add_argument("--env", choices=TASKS, default="CartPole-v1")
     parser.add_argument("--model", default="openai/gpt-oss-120b:nitro")
     parser.add_argument("--generations", type=int, default=25)
@@ -226,22 +233,27 @@ async def main():
     if not os.environ.get("OPENROUTER_API_KEY"):
         parser.error("Set OPENROUTER_API_KEY before running this example")
 
-    prompts.TEMPLATE_ROOT = Path(alphaevolve.__file__).parent / "prompts"
+    prompts.TEMPLATE_ROOT = Path(alphaevolve.__file__).parent
+    variant = {"original": original, "improved": improved}[args.variant]
     executor = Executor(concurrency=args.concurrency)
     with (
         make_environment(args.env, max_steps=args.max_steps) as environment,
         Run.create(
-            name=f"{args.env.lower()}-evolution",
+            name=f"{args.env.lower()}-{args.variant}-evolution",
             environment=environment,
             executor=executor,
             path=args.output,
         ) as run,
     ):
-        generator = AlphaEvolve(
+        generator = variant.AlphaEvolve(
             task="Maximize cumulative episode reward in the described environment.",
             context=environment.instructions,
             provider=OpenRouterAPI(model=args.model, max_output_tokens=8192, timeout=120),
-            config=Config(max_repairs=args.max_repairs),
+            config=variant.Config(max_repairs=args.max_repairs),
+            seed=args.search_seed,
+        )
+        (run.path / "experiment.json").write_text(
+            json.dumps(vars(args), default=str, indent=2) + "\n", encoding="utf-8"
         )
         try:
             await run_search(

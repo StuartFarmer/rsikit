@@ -13,15 +13,15 @@ from pydantic import ValidationError
 from slick import prompts
 from slick.providers import ProviderError
 
-import rsikit.alphaevolve as alphaevolve
+import alphaevolve
+from alphaevolve.edits import Edit, Mutation, Program, apply_edits, check_rewrite
+from alphaevolve.improved import AlphaEvolve, Config, InvalidCandidate
+from alphaevolve.original.agent import Guidance
 from rsikit import Executor, Policy, Run
-from rsikit.alphaevolve import AlphaEvolve, Config, InvalidCandidate
-from rsikit.alphaevolve.agent import Guidance
-from rsikit.alphaevolve.edits import Edit, Mutation, Program, apply_edits, check_rewrite
 from tests.providers import ScriptedProvider
 from tests.test_run import FakeSandbox
 
-ROOT = Path(alphaevolve.__file__).parent / "prompts"
+ROOT = Path(alphaevolve.__file__).parent
 SOURCE = """from rsikit import Policy
 # EVOLVE-BLOCK-START
 class Solution(Policy):
@@ -263,7 +263,7 @@ class AlphaEvolveTests(unittest.IsolatedAsyncioTestCase):
 
         provider.acall = delayed
         agent = AlphaEvolve("task", provider)
-        with self.assertLogs("rsikit", level="INFO") as logs:
+        with self.assertLogs("alphaevolve", level="INFO") as logs:
             async with asyncio.timeout(2):
                 task = asyncio.create_task(agent.generate(n=3, concurrency=2))
                 try:
@@ -393,7 +393,7 @@ class AlphaEvolveTests(unittest.IsolatedAsyncioTestCase):
             self.assertIn("Solution", text)
         self.assertIn('"properties"', await AlphaEvolve.initialize.render(agent, 1))
         self.assertIn('"properties"', await AlphaEvolve.evolve_prompt.render(agent, parent, [], []))
-        for path in ROOT.glob("*.j2"):
+        for path in ROOT.rglob("*.j2"):
             self.assertEqual(
                 list(Environment().parse(path.read_text()).find_all((nodes.If, nodes.CondExpr))), []
             )

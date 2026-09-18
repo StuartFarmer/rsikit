@@ -13,17 +13,17 @@ from rich.console import Console
 from slick import prompts
 from slick.providers import ProviderError
 
-import rsikit.alphaevolve as alphaevolve
+import alphaevolve
+from alphaevolve.edits import Program
+from alphaevolve.improved import AlphaEvolve, Config
 from examples.alphaevolve import run_search
 from rsikit import Executor, Run
-from rsikit.alphaevolve import AlphaEvolve, Config
-from rsikit.alphaevolve.edits import Program
 from rsikit.episode import InfrastructureError, PolicyError
 from tests.providers import ScriptedProvider
 from tests.test_alphaevolve import SOURCE, program
 from tests.test_run import FakeSandbox
 
-ROOT = Path(alphaevolve.__file__).parent / "prompts"
+ROOT = Path(alphaevolve.__file__).parent
 
 
 class RepairTests(unittest.IsolatedAsyncioTestCase):

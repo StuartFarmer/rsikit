@@ -152,7 +152,13 @@ generations continue. A generation can return fewer policies than `--batch-size`
 Generation runs four proposals concurrently by default, including their repair calls.
 Use `--generation-concurrency` to change this; `--concurrency` controls sandbox
 evaluation separately. Set generation concurrency to 1 for sequential requests.
-Initial proposals compete on separate islands; the same program cannot found
+The optimizer lives outside the core in `alphaevolve/original/` and
+`alphaevolve/improved/`. Select `--variant original` for the local scalar-feedback
+baseline or `--variant improved` (default) for independent founding and per-seed
+feedback. Run names include the variant and `experiment.json` saves CLI settings.
+See [the comparison setup](docs/ALPHAEVOLVE.md#comparing-the-variants).
+
+In the improved variant, initial proposals compete on separate islands; the same program cannot found
 multiple islands just by changing its name. Mutation prompts include each parent's
 and inspiration policy's per-seed rewards. The CLI supplies this feedback from Run
 automatically; selection still ranks policies by mean reward.

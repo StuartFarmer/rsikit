@@ -186,11 +186,11 @@ class SandboxEpisodeSmoke(unittest.IsolatedAsyncioTestCase):
         from rich.console import Console
         from slick import prompts
 
-        import rsikit.alphaevolve as alphaevolve
+        import alphaevolve
+        from alphaevolve.edits import Program
+        from alphaevolve.improved import AlphaEvolve
         from examples.alphaevolve import make_environment, run_search
         from rsikit import Run
-        from rsikit.alphaevolve import AlphaEvolve
-        from rsikit.alphaevolve.edits import Program
         from tests.providers import ScriptedProvider
 
         if importlib.util.find_spec("Box2D") is None:
@@ -210,9 +210,7 @@ class SandboxEpisodeSmoke(unittest.IsolatedAsyncioTestCase):
                     Run.create(
                         name="box2d", path=Path(directory) / "run", environment=restored
                     ) as run,
-                    patch.object(
-                        prompts, "TEMPLATE_ROOT", Path(alphaevolve.__file__).parent / "prompts"
-                    ),
+                    patch.object(prompts, "TEMPLATE_ROOT", Path(alphaevolve.__file__).parent),
                 ):
                     self.assertEqual(restored.instructions, env.instructions)
                     self.assertEqual(restored.spec.max_episode_steps, 3)
@@ -255,12 +253,12 @@ class Solution(Policy):
         from rich.console import Console
         from slick import prompts
 
-        import rsikit.alphaevolve as alphaevolve
+        import alphaevolve
+        from alphaevolve.edits import Program
+        from alphaevolve.improved import AlphaEvolve, Config
         from examples import cartpole
         from examples.alphaevolve import run_search
         from rsikit import Executor, Run
-        from rsikit.alphaevolve import AlphaEvolve, Config
-        from rsikit.alphaevolve.edits import Program
         from tests.providers import ScriptedProvider
 
         initial = "from rsikit import Policy\nclass Solution(Policy):\n    async def act(self, observation):\n        return 0\n"
@@ -277,7 +275,7 @@ class Solution(Policy):
         with (
             tempfile.TemporaryDirectory() as folder,
             gym.make("CartPole-v1", max_episode_steps=50) as environment,
-            patch.object(prompts, "TEMPLATE_ROOT", Path(alphaevolve.__file__).parent / "prompts"),
+            patch.object(prompts, "TEMPLATE_ROOT", Path(alphaevolve.__file__).parent),
             Run.create(
                 name="evolution",
                 environment=environment,
@@ -314,11 +312,11 @@ class Solution(Policy):
         from rich.console import Console
         from slick import prompts
 
-        import rsikit.alphaevolve as alphaevolve
+        import alphaevolve
+        from alphaevolve.edits import Program
+        from alphaevolve.improved import AlphaEvolve
         from examples.alphaevolve import run_search
         from rsikit import Executor, Run
-        from rsikit.alphaevolve import AlphaEvolve
-        from rsikit.alphaevolve.edits import Program
         from tests.providers import ScriptedProvider
 
         broken = """from rsikit import Policy
@@ -345,7 +343,7 @@ class Solution(Policy):
         with (
             tempfile.TemporaryDirectory() as directory,
             gym.make("CartPole-v1", max_episode_steps=5) as env,
-            patch.object(prompts, "TEMPLATE_ROOT", Path(alphaevolve.__file__).parent / "prompts"),
+            patch.object(prompts, "TEMPLATE_ROOT", Path(alphaevolve.__file__).parent),
             Run.create(
                 name="healing", path=Path(directory) / "run", environment=env, executor=Executor()
             ) as run,

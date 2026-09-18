@@ -4,6 +4,53 @@ AlphaEvolve generates named `Policy` classes in memory. `Run` evaluates and stor
 them. Scores go back to AlphaEvolve to guide the next batch. Slick handles model
 calls and Pydantic validates generated responses; there is no slick-bits dependency.
 
+The optimizer lives in the top-level `alphaevolve/` package, alongside `rsikit/`.
+RSIKit owns policies, execution, environments, and run storage. The two optimizer
+variants use that same core:
+
+| Variant | Initial island population | Model feedback |
+| --- | --- | --- |
+| `alphaevolve.original` | Best initial policy can found every island | Scalar score |
+| `alphaevolve.improved` | Separate founders; identical implementations cannot found multiple islands | Scalar score and per-seed rewards |
+
+`original` preserves the local behavior and prompts from commit `5ba5685`.
+`improved` preserves the changes introduced in `8a6bc96` and remains the CLI default.
+Generation, repair budgets, scalar ranking, and evaluation are shared. Each variant
+owns its mutation, rewrite, and search-guidance prompts; initialization and repair
+prompts are identical and inherited from the original. Configure the common template
+root once, as below; selecting the class selects its prompts too.
+
+## Comparing the variants
+
+```bash
+.venv/bin/python -B -m examples.alphaevolve --variant original --env LunarLander-v3 --generations 10 --batch-size 25 --seeds 0 1 2 3 4 5 6 7 8 9 --search-seed 0
+.venv/bin/python -B -m examples.alphaevolve --variant improved --env LunarLander-v3 --generations 10 --batch-size 25 --seeds 0 1 2 3 4 5 6 7 8 9 --search-seed 0
+```
+
+Each command creates a separate Run. Its name includes the variant; `experiment.json`
+records CLI arguments, and `run.log` identifies the optimizer class. `--search-seed`
+controls optimizer sampling; `--seeds` controls evaluation episodes. Provider output
+is still stochastic, so repeat searches instead of treating one pair as conclusive.
+Use the same model, environment configuration, search seed sets, proposal budgets,
+and repair limits, then evaluate selected policies on held-out episode seeds.
+
+Both variants already use islands. The hypothesis being tested is whether
+**independent island founding plus per-seed feedback improves LLM-guided program
+search**, not whether introducing islands improves AlphaEvolve. `original` is our
+local baseline, not DeepMind's internal implementation. A comparison of these two
+variants measures their combined effect; attributing gains to either change needs
+islands-only and feedback-only ablations. No performance improvement is established
+by this code split. Equal proposal counts also do not guarantee equal model-token
+costs or successful evaluation counts; repairs and longer feedback affect those.
+
+## Python API
+
+The following uses the improved version. Import `AlphaEvolve` from
+`alphaevolve.original` to use the baseline with the same loop. Both accept
+`seed_scores`; the original keeps them as data but excludes them from model prompts.
+Unless stated otherwise, the founding and feedback behavior below describes the
+improved version.
+
 ```python
 from pathlib import Path
 
@@ -11,12 +58,12 @@ import gymnasium as gym
 from slick import prompts
 from slick.providers import OpenRouterAPI
 
-import rsikit.alphaevolve as alphaevolve
+import alphaevolve
 from rsikit import Executor, Run
-from rsikit.alphaevolve import AlphaEvolve
+from alphaevolve.improved import AlphaEvolve
 
 # Configure Slick once at application startup.
-prompts.TEMPLATE_ROOT = Path(alphaevolve.__file__).parent / "prompts"
+prompts.TEMPLATE_ROOT = Path(alphaevolve.__file__).parent
 generator = AlphaEvolve(
     task="Balance CartPole-v1 for as many steps as possible.",
     context=(
@@ -98,7 +145,8 @@ founding lineages but does not guarantee different behavior or algorithm familie
 Selection chooses an occupied island's parent;
 exploration can use another island's champion. Other distinct champions provide
 inspiration. The weaker half of islands is periodically reseeded from survivors,
-adapting FunSearch's reset policy (see NOTICE and LICENSE.funsearch). Resets wait
+adapting FunSearch's reset policy (see [NOTICE](../alphaevolve/NOTICE) and
+[LICENSE.funsearch](../alphaevolve/LICENSE.funsearch)). Resets wait
 until every island has a founder; subsequent reseeding can share champions.
 
 Exact mutations must match uniquely and stay inside optional EVOLVE-BLOCK regions.
@@ -216,5 +264,5 @@ score table and the best policy so far.
 The same log messages and failure tracebacks are saved in `run.log` inside the run
 directory. Failed policies retain unfinished scores, and successful evaluations
 remain saved. Every model repair is logged with its diagnostic and position in the repair budget.
-Library code uses Python's `logging` under `rsikit`; the example configures Rich
+Library code uses Python's `logging` under `rsikit` and `alphaevolve`; the example configures Rich
 and file handlers. Policy descriptions are stored in SQLite alongside names.

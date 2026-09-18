@@ -4,7 +4,7 @@ This is an independent implementation of the published AlphaEvolve algorithm,
 not Google DeepMind's internal agent. No AlphaEvolve agent source is published
 in the official accompanying repository.
 
-The weaker-half island reseeding policy in agent.py adapts
+The original island founding and weaker-half reseeding in original/agent.py adapt
 the algorithm in the official FunSearch implementation:
 https://github.com/google-deepmind/funsearch/blob/main/implementation/programs_database.py
 Copyright 2023 DeepMind Technologies Limited
@@ -21,5 +21,8 @@ They contain problem-specific results, not reusable agent code, and are not vend
 RSIKit adaptation: Python Solution classes, Pydantic JSON proposals instead of
 paper-format text diffs, syntax/interface checks, and isolated Gymnasium evaluation.
 Adapted from the local slick-bits implementation; no runtime dependency on slick-bits.
-RSIKit now assigns independent founders to islands instead of copying the best
-initial program to every island, and supplies per-seed rewards as prompt feedback.
+The original variant preserves local baseline behavior from commit 5ba5685.
+The improved variant preserves changes from commit 8a6bc96: independent island
+founders instead of copying the best initial program to every island, plus
+per-seed rewards as prompt feedback. Both are local adaptations; neither is
+Google DeepMind's internal AlphaEvolve agent.

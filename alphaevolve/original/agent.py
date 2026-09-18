@@ -1,6 +1,6 @@
 """Evolve Gymnasium policy classes using evaluated islands and Slick generation.
 
-The island reset policy adapts the official FunSearch program database;
+The island founding/reset policy adapts the official FunSearch program database;
 see NOTICE. AlphaEvolve's unpublished database details are explicit local choices.
 """
 
@@ -16,8 +16,9 @@ from pydantic import BaseModel, Field, ValidationError
 from slick import prompt
 from slick.providers import Provider, ProviderError
 
-from ..policy import Policy, _policy_class
-from .edits import (
+from rsikit.policy import Policy, _policy_class
+
+from ..edits import (
     InvalidCandidate,
     Mutation,
     Program,
@@ -111,12 +112,12 @@ class AlphaEvolve:
     def best(self) -> type[Policy] | None:
         return None if self._best is None else self._best.policy
 
-    @prompt(template="initialize.j2", output_type=Program)
+    @prompt(template="original/prompts/initialize.j2", output_type=Program)
     async def initialize(self, proposal: int, *, generated: Program) -> Program:
         """Create an initial named policy without a hand-written seed program."""
         return generated
 
-    @prompt(template="mutate.j2", output_type=Mutation)
+    @prompt(template="original/prompts/mutate.j2", output_type=Mutation)
     async def mutate(
         self,
         parent: _Candidate,
@@ -128,7 +129,7 @@ class AlphaEvolve:
     ) -> Mutation:
         return generated
 
-    @prompt(template="rewrite.j2", output_type=Program)
+    @prompt(template="original/prompts/rewrite.j2", output_type=Program)
     async def rewrite(
         self,
         parent: _Candidate,
@@ -140,7 +141,7 @@ class AlphaEvolve:
     ) -> Program:
         return generated
 
-    @prompt(template="repair.j2", output_type=Program)
+    @prompt(template="original/prompts/repair.j2", output_type=Program)
     async def fix(
         self, reference: str, failed: str, diagnostic: str, *, generated: Program
     ) -> Program:
@@ -216,7 +217,7 @@ class AlphaEvolve:
         logger.info("Repaired %s → %s — %s", policy.name, replacement.name, replacement.description)
         return replacement
 
-    @prompt(template="evolve_prompt.j2", output_type=Guidance)
+    @prompt(template="original/prompts/evolve_prompt.j2", output_type=Guidance)
     async def evolve_prompt(
         self,
         parent: _Candidate,
@@ -280,14 +281,7 @@ class AlphaEvolve:
                 child = _Candidate(record["policy"], score, details[policy_id])
                 parent, idea = record["parent"], record["idea"]
                 if parent is None:
-                    # Each founder competes only on its assigned island. Identical
-                    # programs must not found multiple islands under different names.
-                    if not any(
-                        island is not None
-                        and island.policy._implementation == child.policy._implementation
-                        for island in self.islands
-                    ):
-                        self._register(child, record["island"])
+                    self._register_founder(child, record["island"])
                 else:
                     self._register(child, record["island"])
                     improvement = (score - parent.score) / max(1.0, abs(parent.score))
@@ -325,9 +319,8 @@ class AlphaEvolve:
         self.attempts.append(record)
         try:
             parent = idea = None
-            empty = [i for i, island in enumerate(self.islands) if island is None]
-            if empty:
-                island_id = empty[(attempt_id - 1) % len(empty)]
+            island_id = self._founding_island(attempt_id)
+            if island_id is not None:
                 operation = self.initialize
                 arguments = (attempt_id,)
             else:
@@ -441,6 +434,13 @@ class AlphaEvolve:
             return self.rng.choice(self.prompt_ideas)
         return max(self.prompt_ideas, key=lambda idea: idea.score)
 
+    def _founding_island(self, attempt_id: int) -> int | None:
+        return 0 if self._best is None else None
+
+    def _register_founder(self, candidate: _Candidate, island_id: int) -> None:
+        for target in range(len(self.islands)):
+            self._register(candidate, target)
+
     def _register(self, candidate: _Candidate, island_id: int) -> None:
         incumbent = self.islands[island_id]
         if incumbent is None or candidate.score > incumbent.score:
@@ -450,8 +450,6 @@ class AlphaEvolve:
 
     def reset_islands(self) -> None:
         """Reseed the weaker half from surviving champions, as in FunSearch."""
-        if any(island is None for island in self.islands):
-            return  # Finish independent founding before copying any champions.
         ranked = list(range(len(self.islands)))
         self.rng.shuffle(ranked)
         ranked.sort(key=lambda i: self.islands[i].score)
