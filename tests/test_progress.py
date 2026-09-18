@@ -99,8 +99,7 @@ class ProgressTests(unittest.IsolatedAsyncioTestCase):
             finally:
                 generation_release.set()
                 release.set()
-                with self.assertRaises(PolicyError):
-                    await task
+                await task
             text = output.getvalue()
             self.assertIn("Second", text)
             self.assertIn("bad action", text)
@@ -109,7 +108,9 @@ class ProgressTests(unittest.IsolatedAsyncioTestCase):
             self.assertIn("score=7", saved)
             self.assertIn("bad action", saved)
             self.assertEqual(run.policies()[0].description, "Push left as a baseline.")
-            self.assertEqual(agent.completed, 0)
+            self.assertIn("Discarded Second", saved)
+            self.assertEqual(agent.completed, 1)
+            self.assertEqual(agent._pending, {})
 
 
 if __name__ == "__main__":

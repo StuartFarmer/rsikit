@@ -147,6 +147,8 @@ name and description as it is generated, then scores as evaluations finish.
 A score table closes each generation; `run.log` keeps messages and error details.
 Self-healing allows two model repairs per policy for malformed generation or sandbox
 policy failures (`--max-repairs` changes the limit). Successful scores are reused.
+An exhausted repair budget discards that policy; surviving policies and later
+generations continue. A generation can return fewer policies than `--batch-size`.
 Generation runs four proposals concurrently by default, including their repair calls.
 Use `--generation-concurrency` to change this; `--concurrency` controls sandbox
 evaluation separately. Set generation concurrency to 1 for sequential requests.

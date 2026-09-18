@@ -121,14 +121,11 @@ class AlphaEvolveTests(unittest.IsolatedAsyncioTestCase):
         agent = AlphaEvolve("task", provider, config=Config(islands=1, max_repairs=0))
         initial = await agent.generate()
         agent.update({initial[0].id: 0})
-        with self.assertRaises(ValidationError):
-            await agent.generate()
-        with self.assertRaises(InvalidCandidate):
-            await agent.generate()
+        self.assertEqual(await agent.generate(), [])
+        self.assertEqual(await agent.generate(), [])
         # Switch operation to test interface validation after a full rewrite.
         agent.config = Config(islands=1, mode="rewrite", max_repairs=0)
-        with self.assertRaises(InvalidCandidate):
-            await agent.generate()
+        self.assertEqual(await agent.generate(), [])
         child = (await agent.generate())[0]
         self.assertEqual(agent.best, initial[0])
         self.assertEqual(agent.completed, 1)
@@ -316,11 +313,11 @@ class AlphaEvolveTests(unittest.IsolatedAsyncioTestCase):
             ),
         )
         agent.config = Config(max_repairs=0)
-        with self.assertRaisesRegex(InvalidCandidate, "Unclosed evolution block"):
-            await agent.generate()
+        self.assertEqual(await agent.generate(), [])
+        self.assertIn("Unclosed evolution block", agent.attempts[-1]["error"])
         self.assertIsNone(agent.best)
         self.assertEqual(agent._pending, {})
-        self.assertEqual(agent.attempts[-1]["status"], "rejected")
+        self.assertEqual(agent.attempts[-1]["status"], "discarded")
         initial = (await agent.generate())[0]
         agent.update({initial.id: 0})
         child = (await agent.generate())[0]

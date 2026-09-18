@@ -8,6 +8,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 import gymnasium as gym
+from pydantic import ValidationError
 from rich.console import Console
 from slick import prompts
 from slick.providers import ProviderError
@@ -15,7 +16,7 @@ from slick.providers import ProviderError
 import rsikit.alphaevolve as alphaevolve
 from examples.alphaevolve import run_search
 from rsikit import Executor, Run
-from rsikit.alphaevolve import AlphaEvolve, Config, InvalidCandidate
+from rsikit.alphaevolve import AlphaEvolve, Config
 from rsikit.alphaevolve.edits import Program
 from rsikit.episode import InfrastructureError, PolicyError
 from tests.providers import ScriptedProvider
@@ -30,6 +31,102 @@ class RepairTests(unittest.IsolatedAsyncioTestCase):
         root = patch.object(prompts, "TEMPLATE_ROOT", ROOT)
         root.start()
         self.addCleanup(root.stop)
+
+    async def test_exhausted_proposal_does_not_cancel_concurrent_survivor(self):
+        broken = program(0).model_copy(update={"implementation": SOURCE + "}"})
+        provider = ScriptedProvider([broken, program(1), broken])
+        original = provider.acall
+        repaired, release = asyncio.Event(), asyncio.Event()
+        sibling_started = asyncio.Event()
+
+        async def delayed(*args, **kwargs):
+            response = await original(*args, **kwargs)
+            if len(provider.calls) == 1:
+                await sibling_started.wait()
+            elif len(provider.calls) == 2:
+                sibling_started.set()
+                await release.wait()
+            elif len(provider.calls) == 3:
+                repaired.set()
+            return response
+
+        provider.acall = delayed
+        agent = AlphaEvolve("task", provider, config=Config(max_repairs=1))
+        async with asyncio.timeout(2):
+            task = asyncio.create_task(agent.generate(n=2, concurrency=2))
+            try:
+                await repaired.wait()
+                await asyncio.sleep(0)
+                release.set()
+                policies = await task
+            finally:
+                task.cancel()
+                await asyncio.gather(task, return_exceptions=True)
+        self.assertEqual([p.name for p in policies], ["Policy 1"])
+        self.assertEqual((agent.generation_calls, agent.repair_calls), (2, 1))
+        self.assertEqual(agent.attempts[0]["status"], "discarded")
+        agent.update({policies[0].id: 7})
+        self.assertEqual(agent.completed, 1)
+        self.assertEqual(agent._pending, {})
+
+    async def test_search_continues_after_empty_generation_and_exhausted_runtime_repairs(self):
+        broken = program(0).model_copy(update={"implementation": SOURCE + "}"})
+        provider = ScriptedProvider(
+            [
+                broken,
+                broken,
+                broken,
+                broken,  # Both first-generation proposals die.
+                program(0),
+                program(9),
+                program(8),  # One survivor; runtime repair also fails.
+                program(1),
+                broken,
+                broken,  # Later generation still improves the survivor.
+            ]
+        )
+        agent = AlphaEvolve("task", provider, config=Config(max_repairs=1, mode="rewrite"))
+        sandbox = FakeSandbox()
+        checked = []
+
+        async def evaluate(implementation, environment, seed, call_timeout):
+            checked.append((implementation, seed))
+            if "return 9" in implementation or "return 8" in implementation:
+                if seed == 1:
+                    raise PolicyError("Action outside action_space")
+                return 100.0, {}  # A partial success must never enter selection.
+            return (8.0 if "return 1" in implementation else 7.0), {}
+
+        sandbox.evaluate.side_effect = evaluate
+        output = io.StringIO()
+        with (
+            tempfile.TemporaryDirectory() as directory,
+            gym.make("CartPole-v1", max_episode_steps=3) as env,
+            Run.create(
+                name="discard",
+                path=Path(directory) / "run",
+                environment=env,
+                executor=Executor(sandbox=sandbox, concurrency=2),
+            ) as run,
+        ):
+            await run_search(
+                agent,
+                run,
+                generations=3,
+                batch_size=2,
+                generation_concurrency=1,
+                seeds=[0, 1],
+                console=Console(file=output, width=140),
+            )
+            self.assertEqual(agent.completed, 2)
+            self.assertEqual(agent.best.name, "Policy 1")
+            self.assertEqual(agent._pending, {})
+            self.assertEqual((agent.generation_calls, agent.repair_calls), (6, 4))
+            self.assertEqual(len(checked), 8)
+            self.assertEqual(len(run.policies()), 4)
+            self.assertEqual(sum(row["status"] == "discarded" for row in agent.attempts), 4)
+            self.assertIn("No surviving policies", output.getvalue())
+            self.assertIn("Generation 3/3", (run.path / "run.log").read_text())
 
     async def test_repairs_syntax_and_schema_with_exact_budget(self):
         broken = Program(name="Broken", description="A baseline.", implementation=SOURCE + "}\n")
@@ -78,12 +175,18 @@ class RepairTests(unittest.IsolatedAsyncioTestCase):
         agent = AlphaEvolve(
             "task", ScriptedProvider([broken, broken]), config=Config(max_repairs=1)
         )
-        with self.assertRaisesRegex(InvalidCandidate, "exhausted after 1"):
-            await agent.generate()
+        self.assertEqual(await agent.generate(), [])
         self.assertEqual(agent.repair_calls, 1)
         self.assertEqual(agent._pending, {})
-        self.assertEqual(agent.attempts[-1]["status"], "rejected")
-        for error in [ProviderError("offline"), asyncio.CancelledError()]:
+        self.assertEqual(agent.attempts[-1]["status"], "discarded")
+        self.assertIn("exhausted after 1", agent.attempts[-1]["error"])
+        for error in [
+            ProviderError("offline"),
+            ValidationError.from_exception_data(
+                "Provider response", [{"type": "missing", "loc": ("response",), "input": {}}]
+            ),
+            asyncio.CancelledError(),
+        ]:
             provider = ScriptedProvider([broken, error])
             # ScriptedProvider raises Exception; cancellation is injected at the call boundary.
             if isinstance(error, asyncio.CancelledError):
@@ -147,8 +250,9 @@ class RepairTests(unittest.IsolatedAsyncioTestCase):
         provider = ScriptedProvider([broken, program(9)])
         agent = AlphaEvolve("task", provider, config=Config(max_repairs=1))
         policy = (await agent.generate())[0]
-        with self.assertRaisesRegex(InvalidCandidate, "exhausted after 1"):
-            await agent.repair(policy, "Action outside action_space")
+        self.assertIsNone(await agent.repair(policy, "Action outside action_space"))
+        self.assertEqual(agent._pending, {})
+        self.assertIn("exhausted after 1", agent.attempts[-1]["error"])
         self.assertEqual(len(provider.calls), 2)
         sandbox = FakeSandbox()
 

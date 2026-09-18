@@ -188,19 +188,26 @@ class AlphaEvolve:
                 call.update(valid=False, error=diagnostic)
         raise InvalidCandidate(f"Repair exhausted after {len(repairs)} repairs: {diagnostic}")
 
-    async def repair(self, policy: type[Policy], diagnostic: str) -> type[Policy]:
+    async def repair(self, policy: type[Policy], diagnostic: str) -> type[Policy] | None:
         """Repair an unevaluated policy after a sandbox failure, preserving its ancestry.
 
         The same budget covers generation and runtime repairs. The caller evaluates
         the returned replacement through Run; failed versions remain in storage.
+        Exhaustion discards pending copies of this policy and returns None.
         """
         records = self._pending[policy.id]
         record = max(records, key=lambda row: len(row.get("repairs", [])))
         parent = record["parent"]
         reference = policy._implementation if parent is None else parent.policy._implementation
-        replacement = await self._repair_valid(
-            record, reference, policy._implementation, diagnostic
-        )
+        try:
+            replacement = await self._repair_valid(
+                record, reference, policy._implementation, diagnostic
+            )
+        except InvalidCandidate as exc:
+            for row in self._pending.pop(policy.id):
+                row.update(status="discarded", error=str(exc))
+            logger.warning("Discarded %s: %s", policy.name, exc)
+            return None
         for row in records:
             row.update(policy=replacement, status="repaired")
         self._pending.pop(policy.id)
@@ -220,12 +227,13 @@ class AlphaEvolve:
         return generated.instruction
 
     async def generate(self, n: int = 1, *, concurrency: int = 4) -> list[type[Policy]]:
-        """Return n valid proposals, repairing rejected model output within the budget.
+        """Attempt n proposals and return survivors after bounded repair.
 
         Proposals are neither executed nor saved. Only a successfully returned
-        batch is eligible for update; rejected output stays in attempts.
+        batch is eligible for update; discarded output stays in attempts.
         Each concurrency slot includes its proposal's repairs. Results retain
-        proposal order; failure or cancellation cancels unfinished siblings.
+        proposal order. Invalid candidates do not cancel siblings or get replaced
+        with new proposals. Provider errors and cancellation still stop the batch.
         """
         logger.info(
             "Generating %s policies (concurrency=%s)",
@@ -246,6 +254,7 @@ class AlphaEvolve:
             for task in tasks:
                 task.cancel()
             await asyncio.gather(*tasks, return_exceptions=True)
+        records = [record for record in records if record is not None]
         for record in records:
             self._pending.setdefault(record["policy"].id, []).append(record)
         return [record["policy"] for record in records]
@@ -287,7 +296,7 @@ class AlphaEvolve:
         )
         return island_id, parent, inspirations
 
-    async def _propose(self) -> dict:
+    async def _propose(self) -> dict | None:
         attempt_id = len(self.attempts) + 1
         model_id = self.rng.choices(range(len(self.models)), [w for _, w in self.models])[0]
         provider = self.models[model_id][0]
@@ -338,7 +347,7 @@ class AlphaEvolve:
                 if isinstance(exc, ValidationError) and "raw" not in record:
                     raise
                 if self.config.max_repairs == 0:
-                    raise
+                    raise InvalidCandidate(str(exc)) from exc
                 policy = await self._repair_valid(
                     record,
                     reference,
@@ -355,8 +364,16 @@ class AlphaEvolve:
                 extra={"event": "policy_generated", "policy_id": policy.id},
             )
             return record
+        except InvalidCandidate as exc:
+            record.update(status="discarded", error=f"{type(exc).__name__}: {exc}")
+            logger.warning(
+                "Discarded proposal %s: %s",
+                attempt_id,
+                exc,
+                extra={"event": "proposal_discarded"},
+            )
+            return None
         except (
-            InvalidCandidate,
             ValidationError,
             ProviderError,
             TimeoutError,

@@ -98,7 +98,7 @@ class _ProgressHandler(RichHandler):
         if event == "generation_started":
             self.progress.update(self.evaluation, visible=False)
             self.progress.reset(self.generation, total=record.total, visible=True)
-        elif event == "policy_generated":
+        elif event in ("policy_generated", "proposal_discarded"):
             self.progress.advance(self.generation)
         elif event == "evaluation_started":
             self.progress.update(self.generation, visible=False)
@@ -151,12 +151,13 @@ async def run_search(
                 policies = await generator.generate(
                     n=batch_size, concurrency=generation_concurrency
                 )
-                while True:
+                scores = {}
+                while policies:
                     try:
                         scores = await run.evaluate(policies, seeds=seeds)
                         break
                     except PolicyError as exc:
-                        if not exc.failures or generator.config.max_repairs == 0:
+                        if not exc.failures:
                             raise
                         replacements = {}
                         for policy in policies:
@@ -164,10 +165,17 @@ async def run_search(
                                 replacements[policy.id] = await generator.repair(
                                     policy, exc.failures[policy.id]
                                 )
-                        policies = [replacements.get(policy.id, policy) for policy in policies]
+                        policies = [
+                            replacement
+                            for policy in policies
+                            if (replacement := replacements.get(policy.id, policy)) is not None
+                        ]
                 generator.update(scores)
                 _show_scores(policies, run, console)
-                logger.info("Best so far: %s", generator.best.name)
+                if not policies:
+                    logger.warning("No surviving policies in this generation; continuing")
+                if generator.best is not None:
+                    logger.info("Best so far: %s", generator.best.name)
                 progress.advance(overall)
         except Exception:
             logger.exception("Run failed; saved results and details are in %s", run.path)

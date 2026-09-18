@@ -37,7 +37,9 @@ with gym.make("CartPole-v1", max_episode_steps=500) as environment:
         print(generator.best.name)
 ```
 
-`n=10` means ten new proposals in that generation, not a fixed archive size.
+`n=10` means ten proposal attempts in that generation, not a fixed archive size.
+Unrepairable candidates are discarded, so the returned list can be shorter or empty.
+They are not replaced with extra generation calls.
 The first batch is generated from the task. Later batches mutate or rewrite evaluated
 parents. Names and one-sentence approach descriptions come from the model. Environment instructions are static inputs
 supplied by the executor when it creates a policy. The model does not generate or
@@ -49,8 +51,9 @@ updates; selection changes only when you call `update`.
 `generate(n=10, concurrency=4)` limits concurrent proposal chains, including their
 repair and optional guidance calls. Use `concurrency=1` for sequential generation.
 Names and descriptions are logged as proposals finish; the returned list preserves
-proposal order. On failure or cancellation, unfinished siblings are cancelled and
-awaited; a partial batch does not enter pending optimizer state. With optional meta
+proposal order among survivors. Invalid candidates are discarded without cancelling
+siblings. On provider failure or cancellation, unfinished siblings are cancelled and
+awaited; that interrupted batch does not enter pending optimizer state. With optional meta
 guidance enabled, response timing
 can affect which guidance later proposals use. Keep the generate/evaluate/update
 loop sequential so every generation uses the previous generation's measured scores.
@@ -109,9 +112,11 @@ is rejected. Successful generation never spends a repair call.
 `Config(max_repairs=2)` is the default. This is a **total per-proposal budget** across
 syntax/schema repairs and later runtime repairs, not a retry allowance per stage.
 `generation_calls` and `repair_calls` count them separately. `max_repairs=0` disables
-healing. Each model call uses the configured generation timeout. Exhaustion raises
-`InvalidCandidate` with the final diagnostic, retaining the repair attempts in
-`generator.attempts`. Provider errors, model-call timeouts, unexpected failures,
+healing: invalid candidates are discarded immediately. Each model call uses the
+configured generation timeout. Exhaustion discards only the affected candidate,
+retaining its diagnostic and repair attempts in `generator.attempts`. Generation
+returns the survivors; runtime `repair()` returns `None` and removes that policy
+from pending optimizer state. Provider errors, model-call timeouts, unexpected failures,
 and cancellation propagate without being treated as bad policy output.
 
 The CLI also repairs sandbox `PolicyError` failures, including constructor errors,
@@ -122,7 +127,8 @@ stop the run without model repairs. The example composes repair explicitly:
 
 ```python
 policies = await generator.generate(n=10)
-while True:
+scores = {}
+while policies:
     try:
         scores = await run.evaluate(policies)
         break
@@ -134,7 +140,9 @@ while True:
         }
         if not replacements:
             raise
-        policies = [replacements.get(p.id, p) for p in policies]
+        policies = [
+            replacement for p in policies if (replacement := replacements.get(p.id, p)) is not None
+        ]
 generator.update(scores)
 ```
 
@@ -142,7 +150,10 @@ generator.update(scores)
 it does not call a model. Repaired policies receive their own IDs and are saved
 on the next `evaluate`. Existing successful scores are reused. Failed versions stay
 in the run with unfinished scores; no low score is invented. Only the repaired,
-evaluated version enters the optimizer's archive. Run recovery retries stored
+evaluated version enters the optimizer's archive. Discarded policies never enter
+selection, even if some of their episodes succeeded. An empty generation leaves
+the archive unchanged and the CLI continues to the next generation.
+Run recovery retries stored
 versions; it does not silently rewrite them.
 
 Repair diagnostics and progress appear in the terminal and `run.log`. The full raw
