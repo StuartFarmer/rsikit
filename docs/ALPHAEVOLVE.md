@@ -33,15 +33,16 @@ with gym.make("CartPole-v1", max_episode_steps=500) as environment:
         for generation in range(25):
             policies = await generator.generate(n=10, concurrency=4)
             scores = await run.evaluate(policies)
-            generator.update(scores)
+            generator.update(scores, seed_scores={p.id: run.scores(p) for p in policies})
         print(generator.best.name)
 ```
 
 `n=10` means ten proposal attempts in that generation, not a fixed archive size.
 Unrepairable candidates are discarded, so the returned list can be shorter or empty.
 They are not replaced with extra generation calls.
-The first batch is generated from the task. Later batches mutate or rewrite evaluated
-parents. Names and one-sentence approach descriptions come from the model. Environment instructions are static inputs
+Founding proposals are generated from the task and distributed across empty islands.
+Once all islands have founders, later batches mutate or rewrite evaluated parents.
+Names and one-sentence approach descriptions come from the model. Environment instructions are static inputs
 supplied by the executor when it creates a policy. The model does not generate or
 configure them. Generated policies inherit the constructor and initialize their
 own state in `reset()`. Generation runs up to four proposals concurrently and does not execute
@@ -71,6 +72,13 @@ set throughout a search and separate held-out seeds when checking generalization
 The optimizer's constructor `seed` controls parent/model selection, separately from
 these environment and policy episode seeds.
 
+`update(scores, seed_scores={policy_id: {seed: reward}})` optionally retains per-seed
+results alongside each candidate's scalar score. The CLI supplies Run's existing
+scores for the current search seeds. Mutation, rewrite, and optional search-guidance
+prompts receive this evidence; inspiration policies include their per-seed results too.
+Only the scalar score controls selection. Passing `update(scores)` alone remains
+supported and supplies no per-seed detail. Keep held-out results out of this feedback.
+
 Pass one configured, serializable environment. The executor loads independent state
 for each evaluation process inside a shared Docker container. See [runs](RUNS.md)
 for recording, artifacts, lifecycle, and evaluation recovery.
@@ -82,10 +90,16 @@ reset interval (100 evaluated proposals), optional meta-prompt interval (0 means
 disabled), mutation mode (`"diff"` or `"rewrite"`), generation timeout, and `max_repairs` (2 model repair calls per proposal).
 
 The scalar-score archive keeps one champion per island, preserving incumbents on
-ties. Initial results can found every island. Selection chooses an island's parent;
+ties. Founding attempts are distributed round-robin across empty islands; each
+candidate competes only on its assigned island. Identical implementations cannot
+found multiple islands, even under different generated names. Failed or duplicate
+founders leave slots empty for initialization in later batches. This separates
+founding lineages but does not guarantee different behavior or algorithm families.
+Selection chooses an occupied island's parent;
 exploration can use another island's champion. Other distinct champions provide
 inspiration. The weaker half of islands is periodically reseeded from survivors,
-adapting FunSearch's reset policy (see NOTICE and LICENSE.funsearch).
+adapting FunSearch's reset policy (see NOTICE and LICENSE.funsearch). Resets wait
+until every island has a founder; subsequent reseeding can share champions.
 
 Exact mutations must match uniquely and stay inside optional EVOLVE-BLOCK regions.
 Rewrites preserve the immutable skeleton. Syntax and the top-level `Solution` class
@@ -143,7 +157,7 @@ while policies:
         policies = [
             replacement for p in policies if (replacement := replacements.get(p.id, p)) is not None
         ]
-generator.update(scores)
+generator.update(scores, seed_scores={p.id: run.scores(p) for p in policies})
 ```
 
 `PolicyError` is imported from `rsikit.episode`. Run performs evaluation and storage;

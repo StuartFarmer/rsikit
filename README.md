@@ -137,7 +137,7 @@ Build the Docker worker above before running the search. The example uses
 for generation in range(25):
     policies = await generator.generate(n=10, concurrency=4)
     scores = await run.evaluate(policies)
-    generator.update(scores)
+    generator.update(scores, seed_scores={p.id: run.scores(p) for p in policies})
 ```
 
 Generation writes nothing to disk. Run saves policies, scores, and artifacts during
@@ -152,6 +152,10 @@ generations continue. A generation can return fewer policies than `--batch-size`
 Generation runs four proposals concurrently by default, including their repair calls.
 Use `--generation-concurrency` to change this; `--concurrency` controls sandbox
 evaluation separately. Set generation concurrency to 1 for sequential requests.
+Initial proposals compete on separate islands; the same program cannot found
+multiple islands just by changing its name. Mutation prompts include each parent's
+and inspiration policy's per-seed rewards. The CLI supplies this feedback from Run
+automatically; selection still ranks policies by mean reward.
 
 For LunarLander (continuous controls with wind) and then BipedalWalker (normal terrain):
 

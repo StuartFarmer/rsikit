@@ -1,6 +1,6 @@
 """Evolve Gymnasium policy classes using evaluated islands and Slick generation.
 
-The island founding/reset policy adapts the official FunSearch program database;
+The island reset policy adapts the official FunSearch program database;
 see NOTICE. AlphaEvolve's unpublished database details are explicit local choices.
 """
 
@@ -9,7 +9,7 @@ import logging
 import math
 import random
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Literal
 
 from pydantic import BaseModel, Field, ValidationError
@@ -49,6 +49,7 @@ class _RecordedProvider:
 class _Candidate:
     policy: type[Policy]
     score: float
+    seed_scores: dict[int, float] = field(default_factory=dict)
 
 
 @dataclass
@@ -259,21 +260,34 @@ class AlphaEvolve:
             self._pending.setdefault(record["policy"].id, []).append(record)
         return [record["policy"] for record in records]
 
-    def update(self, scores: Mapping[str, float]) -> None:
-        """Accept scores keyed by generated policy ID; larger scores are better."""
+    def update(
+        self,
+        scores: Mapping[str, float],
+        *,
+        seed_scores: Mapping[str, Mapping[int, float]] | None = None,
+    ) -> None:
+        """Rank by scalar scores; retain optional per-seed rewards as model feedback."""
+        details = {policy_id: dict((seed_scores or {}).get(policy_id, {})) for policy_id in scores}
         # Validate the entire result before changing the archive or consuming pending work.
         for policy_id, score in scores.items():
             self._pending[policy_id]
             if not math.isfinite(score):
                 raise ValueError("Policy scores must be finite")
+            if any(not math.isfinite(value) for value in details[policy_id].values()):
+                raise ValueError("Per-seed scores must be finite")
         for policy_id, score in scores.items():
             for record in self._pending.pop(policy_id):
-                child = _Candidate(record["policy"], score)
+                child = _Candidate(record["policy"], score, details[policy_id])
                 parent, idea = record["parent"], record["idea"]
                 if parent is None:
-                    # Initial evaluated proposals can found every island.
-                    for island_id in range(len(self.islands)):
-                        self._register(child, island_id)
+                    # Each founder competes only on its assigned island. Identical
+                    # programs must not found multiple islands under different names.
+                    if not any(
+                        island is not None
+                        and island.policy._implementation == child.policy._implementation
+                        for island in self.islands
+                    ):
+                        self._register(child, record["island"])
                 else:
                     self._register(child, record["island"])
                     improvement = (score - parent.score) / max(1.0, abs(parent.score))
@@ -284,7 +298,9 @@ class AlphaEvolve:
                     self.reset_islands()
 
     def sample(self) -> tuple[int, _Candidate, list[_Candidate]]:
-        island_id = self.rng.randrange(len(self.islands))
+        island_id = self.rng.choice(
+            [i for i, island in enumerate(self.islands) if island is not None]
+        )
         parent = self.islands[island_id]
         pool = {p.policy.id: p for p in self.islands if p is not None}
         if self.rng.random() < self.config.exploration:
@@ -309,8 +325,9 @@ class AlphaEvolve:
         self.attempts.append(record)
         try:
             parent = idea = None
-            island_id = 0
-            if self._best is None:
+            empty = [i for i, island in enumerate(self.islands) if island is None]
+            if empty:
+                island_id = empty[(attempt_id - 1) % len(empty)]
                 operation = self.initialize
                 arguments = (attempt_id,)
             else:
@@ -433,6 +450,8 @@ class AlphaEvolve:
 
     def reset_islands(self) -> None:
         """Reseed the weaker half from surviving champions, as in FunSearch."""
+        if any(island is None for island in self.islands):
+            return  # Finish independent founding before copying any champions.
         ranked = list(range(len(self.islands)))
         self.rng.shuffle(ranked)
         ranked.sort(key=lambda i: self.islands[i].score)

@@ -45,21 +45,59 @@ class AlphaEvolveTests(unittest.IsolatedAsyncioTestCase):
         patcher.start()
         self.addCleanup(patcher.stop)
 
-    async def test_two_generations_persist_only_at_evaluation_and_update_selection(self):
-        provider = ScriptedProvider(
-            [
-                *(program(i) for i in range(10)),
-                *(
-                    Mutation(
-                        description="Test policy improvement.",
-                        name=f"Child {i}",
-                        edits=[Edit(search="return 9", replacement=f"return {i}")],
-                    )
-                    for i in range(10, 20)
-                ),
-            ]
+    async def test_independent_founders_and_seed_feedback_reach_prompts(self):
+        provider = ScriptedProvider([program(i) for i in range(9)])
+        agent = AlphaEvolve("task", provider, config=Config(mode="rewrite", reset_interval=0))
+        policies = await agent.generate(n=8)
+        scores = {p.id: float(i) for i, p in enumerate(policies)}
+        details = {p.id: {0: 100.0 + i, 1: -100.0 + i} for i, p in enumerate(policies)}
+        invalid = {**details, policies[-1].id: {0: math.nan}}
+        with self.assertRaises(ValueError):
+            agent.update(scores, seed_scores=invalid)
+        self.assertEqual(agent.completed, 0)
+        self.assertTrue(all(island is None for island in agent.islands))
+        agent.update(scores, seed_scores=details)
+        self.assertEqual(
+            [p.policy.name for p in agent.islands], [f"Policy {i}" for i in range(4, 8)]
         )
-        agent = AlphaEvolve("Improve score", provider)
+        self.assertEqual(agent.best, policies[7])
+        details[policies[4].id][0] = 999  # Retained evidence must be a snapshot.
+        parent, inspiration = agent.islands[:2]
+        self.assertEqual(parent.seed_scores, {0: 104.0, 1: -96.0})
+        for method in (AlphaEvolve.mutate, AlphaEvolve.rewrite):
+            prompt = await method.render(agent, parent, [inspiration], "", [])
+            self.assertIn('"1": -96.0', prompt)
+            self.assertIn('"1": -95.0', prompt)
+        prompt = await AlphaEvolve.evolve_prompt.render(agent, parent, [], [])
+        self.assertIn('"1": -96.0', prompt)
+        await agent.generate()
+        self.assertIn("Per-seed rewards", provider.calls[-1])
+
+    async def test_failed_and_duplicate_founders_leave_islands_open_for_new_programs(self):
+        broken = program(0).model_copy(update={"implementation": SOURCE + "}"})
+        renamed = program(0).model_copy(update={"name": "Same program, different name"})
+        provider = ScriptedProvider([program(0), renamed, broken, program(1), program(2)])
+        agent = AlphaEvolve(
+            "task", provider, config=Config(islands=3, max_repairs=0, reset_interval=0)
+        )
+        initial = await agent.generate(n=3)
+        agent.update({p.id: 0 for p in initial})
+        self.assertEqual(sum(island is not None for island in agent.islands), 1)
+        agent.reset_islands()
+        self.assertEqual(sum(island is not None for island in agent.islands), 1)
+        island, parent, _ = agent.sample()
+        self.assertIs(parent, agent.islands[island])
+        remaining = await agent.generate(n=2)
+        self.assertTrue(all("Initial proposal" in call for call in provider.calls))
+        agent.update({p.id: i + 1 for i, p in enumerate(remaining)})
+        self.assertEqual(len({island.policy.id for island in agent.islands}), 3)
+        agent.reset_islands()
+        self.assertEqual(len(agent.events), 1)
+        self.assertTrue(all(island is not None for island in agent.islands))
+
+    async def test_two_generations_persist_only_at_evaluation_and_update_selection(self):
+        provider = ScriptedProvider([program(i) for i in range(20)])
+        agent = AlphaEvolve("Improve score", provider, config=Config(mode="rewrite"))
         sandbox = FakeSandbox()
 
         async def evaluate(implementation, environment, seed, call_timeout):
@@ -96,7 +134,7 @@ class AlphaEvolveTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(len(list(run.path.rglob("result.txt"))), (generation + 1) * 10)
         self.assertEqual((agent.generation_calls, agent.completed), (20, 20))
         self.assertEqual(sandbox.start.await_count, 2)
-        self.assertTrue(all("Score: 9.0" in call for call in provider.calls[10:]))
+        self.assertGreater(len({row["parent"].policy.id for row in agent.attempts[10:]}), 1)
         with self.assertRaises(KeyError):
             agent.update(scores)
 
@@ -141,7 +179,7 @@ class AlphaEvolveTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(agent.best, child)
         self.assertEqual(await agent.generate(n=0), [])
 
-    async def test_ensemble_guidance_islands_and_ties(self):
+    async def test_ensemble_guidance_and_ties(self):
         unused = ScriptedProvider([])
         selected = ScriptedProvider(
             [
@@ -157,7 +195,7 @@ class AlphaEvolveTests(unittest.IsolatedAsyncioTestCase):
             "task",
             unused,
             ensemble=((unused, 0), (selected, 1)),
-            config=Config(mode="rewrite", meta_interval=2, reset_interval=2),
+            config=Config(islands=1, mode="rewrite", meta_interval=2, reset_interval=2),
         )
         for score in [0, 2, 2, 3]:
             policy = (await agent.generate())[0]
@@ -170,7 +208,7 @@ class AlphaEvolveTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("blank", agent.attempts[3]["meta_error"])
         self.assertIn("Try a new representation", selected.calls[2])
         self.assertGreater(agent.prompt_ideas[1].reward, 0)
-        self.assertEqual(len(agent.events), 4)
+        self.assertEqual(len(agent.events), 0)
         self.assertEqual(agent.best.name, "Policy 3")
 
     async def test_generation_errors_cancel_and_failed_batch_never_becomes_pending(self):
@@ -311,8 +349,8 @@ class AlphaEvolveTests(unittest.IsolatedAsyncioTestCase):
                     ),
                 ]
             ),
+            config=Config(islands=1, max_repairs=0),
         )
-        agent.config = Config(max_repairs=0)
         self.assertEqual(await agent.generate(), [])
         self.assertIn("Unclosed evolution block", agent.attempts[-1]["error"])
         self.assertIsNone(agent.best)

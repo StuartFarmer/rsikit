@@ -125,6 +125,7 @@ async def run_search(
     generator, run, *, generations, batch_size, generation_concurrency=4, seeds=(0,), console=None
 ):
     """Display completed policies immediately and keep the same messages in run.log."""
+    seeds = tuple(seeds)
     console = console or Console()
     logger = logging.getLogger("rsikit")
     old_level, old_propagate = logger.level, logger.propagate
@@ -170,7 +171,17 @@ async def run_search(
                             for policy in policies
                             if (replacement := replacements.get(policy.id, policy)) is not None
                         ]
-                generator.update(scores)
+                generator.update(
+                    scores,
+                    seed_scores={
+                        policy.id: {
+                            seed: score
+                            for seed, score in run.scores(policy).items()
+                            if seed in seeds
+                        }
+                        for policy in policies
+                    },
+                )
                 _show_scores(policies, run, console)
                 if not policies:
                     logger.warning("No surviving policies in this generation; continuing")

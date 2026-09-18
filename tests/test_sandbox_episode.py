@@ -246,6 +246,7 @@ class Solution(Policy):
                     self.assertEqual(set(scores), {0, 1})
                     self.assertTrue(all(math.isfinite(score) for score in scores.values()))
                     self.assertEqual(agent.completed, 1)
+                    self.assertEqual(agent._best.seed_scores, scores)
 
     async def test_alphaevolve_uses_native_environments_and_isolated_evaluation(self):
         import io
@@ -305,6 +306,7 @@ class Solution(Policy):
             self.assertEqual(len(run.policies()), 2)
             self.assertEqual(len(list((run.path / "exports").glob("*.py"))), 2)
         self.assertEqual(len(provider.calls), 2)
+        self.assertIn('Per-seed rewards: {"0":', provider.calls[1])
 
     async def test_repairs_syntax_and_constructor_failures_through_real_docker(self):
         import io

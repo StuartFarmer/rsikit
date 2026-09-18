@@ -6,6 +6,7 @@ Background and evaluator contract: {{ instance.context }}
 Evaluated program:
 {{ parent.policy._implementation }}
 Score (maximized): {{ parent.score }}
+Per-seed rewards: {{ parent.seed_scores | tojson }}
 
 Existing search instructions, average positive offspring improvement, and uses:
 {{ ideas | tojson }}

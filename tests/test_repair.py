@@ -85,7 +85,9 @@ class RepairTests(unittest.IsolatedAsyncioTestCase):
                 broken,  # Later generation still improves the survivor.
             ]
         )
-        agent = AlphaEvolve("task", provider, config=Config(max_repairs=1, mode="rewrite"))
+        agent = AlphaEvolve(
+            "task", provider, config=Config(islands=1, max_repairs=1, mode="rewrite")
+        )
         sandbox = FakeSandbox()
         checked = []
 
@@ -120,6 +122,8 @@ class RepairTests(unittest.IsolatedAsyncioTestCase):
             )
             self.assertEqual(agent.completed, 2)
             self.assertEqual(agent.best.name, "Policy 1")
+            self.assertEqual(agent.islands[0].seed_scores, {0: 8.0, 1: 8.0})
+            self.assertIn('Per-seed rewards: {"0": 7.0, "1": 7.0}', provider.calls[-2])
             self.assertEqual(agent._pending, {})
             self.assertEqual((agent.generation_calls, agent.repair_calls), (6, 4))
             self.assertEqual(len(checked), 8)
@@ -161,7 +165,7 @@ class RepairTests(unittest.IsolatedAsyncioTestCase):
                 program(2),
             ]
         )
-        agent = AlphaEvolve("task", provider, config=Config(mode="rewrite"))
+        agent = AlphaEvolve("task", provider, config=Config(islands=1, mode="rewrite"))
         initial = (await agent.generate())[0]
         agent.update({initial.id: 0})
         child = (await agent.generate())[0]
