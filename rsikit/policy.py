@@ -40,7 +40,7 @@ class Policy(ABC, Generic[Observation, Action]):
         """Release policy resources."""
 
 
-def _policy_class(name: str, implementation: str) -> type[Policy]:
+def _policy_class(name: str, implementation: str, description: str = "") -> type[Policy]:
     """Declare a generated policy without loading its implementation or choosing an executor."""
     tree = ast.parse(implementation)
     if not name.strip():
@@ -52,6 +52,7 @@ def _policy_class(name: str, implementation: str) -> type[Policy]:
         (Policy,),
         {
             "name": name,
+            "description": description,
             "id": hashlib.sha256((name + "\0" + implementation).encode()).hexdigest(),
             "_implementation": implementation,
         },

@@ -2,6 +2,7 @@
 
 import asyncio
 import fcntl
+import logging
 import re
 from collections.abc import Sequence
 from contextlib import aclosing
@@ -11,11 +12,13 @@ from statistics import fmean
 from uuid import uuid4
 
 import gymnasium as gym
-from sqlalchemy import JSON, Column
+from sqlalchemy import JSON, Column, inspect
 from sqlmodel import Field, Session, SQLModel, create_engine, select
 
 from .execution import Executor
 from .policy import Policy, _policy_class
+
+logger = logging.getLogger(__name__)
 
 
 def _slug(name: str) -> str:
@@ -32,6 +35,7 @@ class _StoredPolicy(SQLModel, table=True):
     __tablename__ = "policy"
     id: str = Field(primary_key=True)
     name: str
+    description: str = ""
     implementation: str
     scores: dict[str, float | None] = Field(default_factory=dict, sa_column=Column(JSON))
 
@@ -88,6 +92,13 @@ class Run:
                 SQLModel.metadata.create_all(
                     self._engine, tables=[_Settings.__table__, _StoredPolicy.__table__]
                 )
+            if "description" not in {
+                column["name"] for column in inspect(self._engine).get_columns("policy")
+            }:
+                with self._engine.begin() as connection:
+                    connection.exec_driver_sql(
+                        "ALTER TABLE policy ADD COLUMN description TEXT NOT NULL DEFAULT ''"
+                    )
             with Session(self._engine) as session:
                 if settings is not None:
                     session.add(settings)
@@ -127,7 +138,7 @@ class Run:
     def policies(self) -> list[type[Policy]]:
         with Session(self._engine) as session:
             return [
-                _policy_class(row.name, row.implementation)
+                _policy_class(row.name, row.implementation, row.description)
                 for row in session.exec(select(_StoredPolicy))
             ]
 
@@ -154,7 +165,10 @@ class Run:
                     stored = session.get(_StoredPolicy, policy.id)
                     if stored is None:
                         stored = _StoredPolicy(
-                            id=policy.id, name=policy.name, implementation=policy._implementation
+                            id=policy.id,
+                            name=policy.name,
+                            description=policy.description,
+                            implementation=policy._implementation,
                         )
                     elif (stored.name, stored.implementation) != (
                         policy.name,
@@ -174,7 +188,15 @@ class Run:
                         for seed in seeds
                         if stored.scores[str(seed)] is None
                     )
-            await self._execute(jobs)
+            try:
+                await self._execute(jobs)
+            except Exception:
+                unfinished = [
+                    p.name for p in policies if any(self.scores(p)[seed] is None for seed in seeds)
+                ]
+                if unfinished:
+                    logger.error("Unfinished policies: %s", ", ".join(unfinished))
+                raise
             result = {}
             for policy in policies:
                 scores = self.scores(policy)
@@ -183,6 +205,12 @@ class Run:
 
     async def _execute(self, jobs):
         requested = {(policy_id, seed) for policy_id, _, seed in jobs}
+        logger.info(
+            "Evaluating %s episodes (%s workers)",
+            len(jobs),
+            self.executor.concurrency,
+            extra={"event": "evaluation_started", "total": len(jobs)},
+        )
         async with aclosing(self.executor.evaluate(jobs, self.environment)) as results:
             async for policy_id, seed, result in results:
                 if (policy_id, seed) not in requested:
@@ -200,9 +228,17 @@ class Run:
                     temporary.replace(destination)
                 with Session(self._engine) as session:
                     stored = session.get(_StoredPolicy, policy_id)
+                    policy_name = stored.name
                     stored.scores = {**stored.scores, str(seed): result.score}
                     session.add(stored)
                     session.commit()
+                logger.info(
+                    "%s: score=%g (seed=%s)",
+                    policy_name,
+                    result.score,
+                    seed,
+                    extra={"event": "policy_evaluated", "policy_id": policy_id, "seed": seed},
+                )
                 requested.remove((policy_id, seed))
         if requested:
             raise RuntimeError("Executor finished without returning all requested results")

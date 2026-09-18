@@ -5,6 +5,7 @@ see NOTICE. AlphaEvolve's unpublished database details are explicit local choice
 """
 
 import asyncio
+import logging
 import math
 import random
 from collections.abc import Mapping, Sequence
@@ -24,6 +25,8 @@ from .edits import (
     check_program,
     check_rewrite,
 )
+
+logger = logging.getLogger(__name__)
 
 
 class Guidance(BaseModel, extra="forbid"):
@@ -152,6 +155,7 @@ class AlphaEvolve:
         Proposals are neither executed nor saved. Only a successfully returned
         batch is eligible for update; rejected output stays in attempts.
         """
+        logger.info("Generating %s policies", n, extra={"event": "generation_started", "total": n})
         records = []
         for _ in range(n):
             records.append(await self._propose())
@@ -224,6 +228,7 @@ class AlphaEvolve:
                 record["guidance"] = guidance
                 operation = {"diff": self.mutate, "rewrite": self.rewrite}[self.config.mode]
                 arguments = (parent, inspirations, guidance, failures)
+            logger.info("Requesting policy %s via %s", attempt_id, operation.__name__)
             self.generation_calls += 1
             proposal = await asyncio.wait_for(
                 operation(*arguments, provider=_RecordedProvider(provider, record, "raw")),
@@ -236,9 +241,15 @@ class AlphaEvolve:
             else:
                 content = check_rewrite(parent.policy._implementation, proposal.implementation)
             check_program(content)
-            policy = _policy_class(proposal.name, content)
+            policy = _policy_class(proposal.name, content, proposal.description)
             record.update(
                 status="generated", policy=policy, parent=parent, island=island_id, idea=idea
+            )
+            logger.info(
+                "Generated %s — %s",
+                policy.name,
+                policy.description,
+                extra={"event": "policy_generated", "policy_id": policy.id},
             )
             return record
         except (
@@ -249,6 +260,7 @@ class AlphaEvolve:
             asyncio.TimeoutError,
         ) as exc:
             record.update(status="rejected", error=f"{type(exc).__name__}: {exc}")
+            logger.error("Policy proposal %s failed: %s: %s", attempt_id, type(exc).__name__, exc)
             raise
         except asyncio.CancelledError:
             record["status"] = "cancelled"

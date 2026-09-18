@@ -2,16 +2,116 @@
 
 import argparse
 import asyncio
+import logging
 import os
 from pathlib import Path
+from statistics import fmean
 
 import gymnasium as gym
+from rich.console import Console
+from rich.logging import RichHandler
+from rich.progress import (
+    BarColumn,
+    MofNCompleteColumn,
+    Progress,
+    SpinnerColumn,
+    TextColumn,
+    TimeElapsedColumn,
+)
+from rich.table import Table
+from rich.text import Text
 from slick import prompts
 from slick.providers import OpenRouterAPI
 
 import rsikit.alphaevolve as alphaevolve
 from rsikit import Executor, Run
 from rsikit.alphaevolve import AlphaEvolve
+
+
+class _ProgressHandler(RichHandler):
+    def __init__(self, progress):
+        super().__init__(
+            console=progress.console,
+            show_path=False,
+            markup=False,
+            highlighter=None,
+            rich_tracebacks=True,
+            tracebacks_show_locals=False,
+        )
+        self.progress = progress
+        self.generation = progress.add_task("Generating policies", total=0, visible=False)
+        self.evaluation = progress.add_task("Evaluating policies", total=0, visible=False)
+
+    def emit(self, record):
+        event = getattr(record, "event", None)
+        if event == "generation_started":
+            self.progress.update(self.evaluation, visible=False)
+            self.progress.reset(self.generation, total=record.total, visible=True)
+        elif event == "policy_generated":
+            self.progress.advance(self.generation)
+        elif event == "evaluation_started":
+            self.progress.update(self.generation, visible=False)
+            self.progress.reset(self.evaluation, total=record.total, visible=True)
+        elif event in ("policy_evaluated", "evaluation_failed"):
+            self.progress.advance(self.evaluation)
+        super().emit(record)
+
+
+def _show_scores(policies, run, console):
+    table = Table("Policy", "Description", "Score")
+    for policy in policies:
+        values = list(run.scores(policy).values())
+        score = (
+            f"{fmean(values):.1f}"
+            if values and all(v is not None for v in values)
+            else "unfinished"
+        )
+        table.add_row(Text(policy.name), Text(policy.description), score)
+    console.print(table)
+
+
+async def run_search(generator, run, *, generations, batch_size, console=None):
+    """Display completed policies immediately and keep the same messages in run.log."""
+    console = console or Console()
+    logger = logging.getLogger("rsikit")
+    old_level, old_propagate = logger.level, logger.propagate
+    with Progress(
+        SpinnerColumn(),
+        TextColumn("{task.description}"),
+        BarColumn(),
+        MofNCompleteColumn(),
+        TimeElapsedColumn(),
+        console=console,
+    ) as progress:
+        overall = progress.add_task("Generations", total=generations)
+        display = _ProgressHandler(progress)
+        log = logging.FileHandler(run.path / "run.log", encoding="utf-8")
+        log.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(name)s: %(message)s"))
+        logger.addHandler(display)
+        logger.addHandler(log)
+        logger.setLevel(logging.INFO)
+        logger.propagate = False
+        try:
+            logger.info("Run: %s", run.path)
+            for generation in range(generations):
+                logger.info("Generation %s/%s", generation + 1, generations)
+                policies = await generator.generate(n=batch_size)
+                scores = await run.evaluate(policies)
+                generator.update(scores)
+                _show_scores(policies, run, console)
+                logger.info("Best so far: %s", generator.best.name)
+                progress.advance(overall)
+        except Exception:
+            logger.exception("Run failed; saved results and details are in %s", run.path)
+            _show_scores(run.policies(), run, console)
+            raise
+        finally:
+            logger.removeHandler(display)
+            logger.removeHandler(log)
+            display.close()
+            log.close()
+            logger.setLevel(old_level)
+            logger.propagate = old_propagate
 
 
 async def main():
@@ -43,17 +143,13 @@ async def main():
             name="cartpole-evolution", environment=environment, executor=executor, path=args.output
         ) as run,
     ):
-        print(f"Run: {run.path}", flush=True)
-        for generation in range(args.generations):
-            policies = await generator.generate(n=args.batch_size)
-            scores = await run.evaluate(policies)
-            generator.update(scores)
-            for policy in policies:
-                print(
-                    f"Generation {generation + 1}: {policy.name}: {scores[policy.id]:.1f}",
-                    flush=True,
-                )
-            print(f"Best so far: {generator.best.name}", flush=True)
+        try:
+            await run_search(
+                generator, run, generations=args.generations, batch_size=args.batch_size
+            )
+        except Exception:
+            # run_search has already displayed and saved the traceback.
+            raise SystemExit(1) from None
 
 
 if __name__ == "__main__":

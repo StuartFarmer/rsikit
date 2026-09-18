@@ -20,6 +20,7 @@ from tests.providers import ScriptedProvider
 
 RESPONSE = {
     "name": "Model chose this name",
+    "description": "Always push left to establish a baseline.",
     "implementation": "from rsikit import Policy\nclass Solution(Policy):\n    async def act(self, observation):\n        return 0\n",
 }
 
@@ -57,6 +58,7 @@ class RunTests(unittest.IsolatedAsyncioTestCase):
     async def test_policy_scores_exports_and_reuse(self):
         self.assertTrue(issubclass(self.policy, Policy))
         self.assertEqual(self.policy.name, RESPONSE["name"])
+        self.assertEqual(self.policy.description, RESPONSE["description"])
         with self.create() as run:
             self.assertIs(run.environment, self.env)
             self.assertIs(run.executor, self.executor)
@@ -75,6 +77,7 @@ class RunTests(unittest.IsolatedAsyncioTestCase):
             (restored,) = run.policies()
             await run.resume()
             self.assertEqual(restored.id, self.policy.id)
+            self.assertEqual(restored.description, RESPONSE["description"])
             self.assertEqual(run.scores(restored), {0: 7.0, 1: 7.0})
             self.assertTrue(export.exists())
         self.assertEqual(self.sandbox.start.await_count, 1)
@@ -84,9 +87,31 @@ class RunTests(unittest.IsolatedAsyncioTestCase):
             )
             self.assertEqual(
                 [r[1] for r in db.execute("PRAGMA table_info(policy)")],
-                ["id", "name", "implementation", "scores"],
+                ["id", "name", "description", "implementation", "scores"],
             )
         self.assertEqual(len(self.provider.calls), 1)
+
+    async def test_open_upgrades_existing_runs_without_descriptions(self):
+        self.path.mkdir()
+        with closing(sqlite3.connect(self.path / "run.sqlite")) as db:
+            db.executescript("""
+                CREATE TABLE settings (name TEXT PRIMARY KEY, export BOOLEAN NOT NULL);
+                INSERT INTO settings VALUES ('old run', 0);
+                CREATE TABLE policy (id TEXT PRIMARY KEY, name TEXT NOT NULL,
+                    implementation TEXT NOT NULL, scores JSON NOT NULL);
+            """)
+            db.execute(
+                "INSERT INTO policy VALUES (?, ?, ?, ?)",
+                (self.policy.id, self.policy.name, RESPONSE["implementation"], '{"0": 7.0}'),
+            )
+            db.commit()
+        with self.reopen() as run:
+            restored = run.policies()[0]
+            self.assertEqual(restored.description, "")
+            self.assertEqual(run.scores(restored), {0: 7.0})
+            self.assertEqual(await run.evaluate([restored]), {restored.id: 7.0})
+        with self.reopen() as run:
+            self.assertEqual(len(run.policies()), 1)
 
     async def test_default_seed_means_and_empty_batch(self):
         async def evaluate(implementation, environment, seed, call_timeout):

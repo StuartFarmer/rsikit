@@ -16,11 +16,13 @@ class Edit(BaseModel, extra="forbid"):
 
 class Mutation(BaseModel, extra="forbid"):
     name: Annotated[str, StringConstraints(strip_whitespace=True, min_length=1)]
+    description: Annotated[str, StringConstraints(strip_whitespace=True, min_length=1)]
     edits: list[Edit] = Field(min_length=1)
 
 
 class Program(BaseModel, extra="forbid"):
     name: Annotated[str, StringConstraints(strip_whitespace=True, min_length=1)]
+    description: Annotated[str, StringConstraints(strip_whitespace=True, min_length=1)]
     implementation: str = Field(min_length=1)
 
 

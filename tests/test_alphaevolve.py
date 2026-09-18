@@ -33,7 +33,9 @@ class Solution(Policy):
 
 def program(number):
     return Program(
-        name=f"Policy {number}", implementation=SOURCE.replace("return 0", f"return {number}")
+        description="Test policy approach.",
+        name=f"Policy {number}",
+        implementation=SOURCE.replace("return 0", f"return {number}"),
     )
 
 
@@ -49,6 +51,7 @@ class AlphaEvolveTests(unittest.IsolatedAsyncioTestCase):
                 *(program(i) for i in range(10)),
                 *(
                     Mutation(
+                        description="Test policy improvement.",
                         name=f"Child {i}",
                         edits=[Edit(search="return 9", replacement=f"return {i}")],
                     )
@@ -103,9 +106,15 @@ class AlphaEvolveTests(unittest.IsolatedAsyncioTestCase):
                 program(0),
                 "not json",
                 Mutation(
-                    name="Invalid", edits=[Edit(search="from rsikit", replacement="from other")]
+                    description="Test policy improvement.",
+                    name="Invalid",
+                    edits=[Edit(search="from rsikit", replacement="from other")],
                 ),
-                Program(name="Wrong interface", implementation="class Other: pass"),
+                Program(
+                    description="Test policy approach.",
+                    name="Wrong interface",
+                    implementation="class Other: pass",
+                ),
                 program(1),
             ]
         )
@@ -197,7 +206,9 @@ class AlphaEvolveTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_initial_generation_rejects_unbalanced_evolution_markers(self):
         invalid = Program(
-            name="Unclosed block", implementation=SOURCE.replace("# EVOLVE-BLOCK-END", "")
+            description="Test policy approach.",
+            name="Unclosed block",
+            implementation=SOURCE.replace("# EVOLVE-BLOCK-END", ""),
         )
         agent = AlphaEvolve(
             "task",
@@ -206,7 +217,9 @@ class AlphaEvolveTests(unittest.IsolatedAsyncioTestCase):
                     invalid,
                     program(0),
                     Mutation(
-                        name="Improved", edits=[Edit(search="return 0", replacement="return 1")]
+                        description="Test policy improvement.",
+                        name="Improved",
+                        edits=[Edit(search="return 0", replacement="return 1")],
                     ),
                 ]
             ),
@@ -241,7 +254,7 @@ class AlphaEvolveTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(ValidationError):
             Mutation.model_validate({"name": "Test", "edits": [{"search": "", "replacement": "x"}]})
         with self.assertRaises(ValidationError):
-            Program(name=" ", implementation=SOURCE)
+            Program(description="Test policy approach.", name=" ", implementation=SOURCE)
         agent = AlphaEvolve("task", ScriptedProvider([program(0)]))
         policy = (await agent.generate())[0]
         agent.update({policy.id: 1})

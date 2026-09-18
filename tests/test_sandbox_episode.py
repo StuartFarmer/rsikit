@@ -178,11 +178,15 @@ class SandboxEpisodeSmoke(unittest.IsolatedAsyncioTestCase):
         self.assertGreater(cart[4]["episode"]["l"], 1)
 
     async def test_alphaevolve_uses_native_environments_and_isolated_evaluation(self):
+        import io
+
         import gymnasium as gym
+        from rich.console import Console
         from slick import prompts
 
         import rsikit.alphaevolve as alphaevolve
         from examples import cartpole
+        from examples.alphaevolve import run_search
         from rsikit import Executor, Run
         from rsikit.alphaevolve import AlphaEvolve, Config
         from rsikit.alphaevolve.edits import Program
@@ -191,8 +195,12 @@ class SandboxEpisodeSmoke(unittest.IsolatedAsyncioTestCase):
         initial = "from rsikit import Policy\nclass Solution(Policy):\n    async def act(self, observation):\n        return 0\n"
         provider = ScriptedProvider(
             [
-                Program(name="Left", implementation=initial),
-                Program(name="Balance", implementation=Path(cartpole.__file__).read_text()),
+                Program(description="Test policy approach.", name="Left", implementation=initial),
+                Program(
+                    description="Test policy approach.",
+                    name="Balance",
+                    implementation=Path(cartpole.__file__).read_text(),
+                ),
             ]
         )
         with (
@@ -209,12 +217,18 @@ class SandboxEpisodeSmoke(unittest.IsolatedAsyncioTestCase):
             agent = AlphaEvolve(
                 "Balance CartPole", provider, config=Config(mode="rewrite", islands=1)
             )
-            generation_scores = []
-            for _ in range(2):
-                policies = await agent.generate(n=1)
-                scores = await run.evaluate(policies, seeds=(1, 2))
-                agent.update(scores)
-                generation_scores.append(next(iter(scores.values())))
+            output = io.StringIO()
+            await run_search(
+                agent,
+                run,
+                generations=2,
+                batch_size=1,
+                console=Console(file=output, width=120, force_terminal=False),
+            )
+            generation_scores = [run.scores(policy)[0] for policy in run.policies()]
+            self.assertIn("Generated Left", output.getvalue())
+            self.assertIn("score=50", output.getvalue())
+            self.assertIn("Best so far: Balance", (run.path / "run.log").read_text())
             self.assertGreater(generation_scores[1], generation_scores[0])
             self.assertEqual(generation_scores[1], 50)
             self.assertEqual(agent.best.name, "Balance")
@@ -238,6 +252,7 @@ class SandboxEpisodeSmoke(unittest.IsolatedAsyncioTestCase):
             return json.dumps(
                 {
                     "name": name,
+                    "description": "Test policy approach.",
                     "implementation": (
                         "from rsikit import Policy\nclass Solution(Policy):\n"
                         f"    async def act(self, observation):\n        return {action}\n"
@@ -296,6 +311,7 @@ class SandboxEpisodeSmoke(unittest.IsolatedAsyncioTestCase):
                         json.dumps(
                             {
                                 "name": "Steady",
+                                "description": "Balance using pole angle and velocity.",
                                 "implementation": (
                                     "from rsikit import Policy\nclass Solution(Policy):\n"
                                     "    async def act(self, observation):\n"
@@ -415,6 +431,7 @@ class SandboxEpisodeSmoke(unittest.IsolatedAsyncioTestCase):
         response = json.dumps(
             {
                 "name": "Single container",
+                "description": "Check environment instructions in an isolated worker.",
                 "implementation": (
                     "from rsikit import Policy\nclass Solution(Policy):\n"
                     "    async def act(self, observation):\n"

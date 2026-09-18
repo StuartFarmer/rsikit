@@ -55,17 +55,32 @@ class Executor:
 
             async def evaluate(policy_id, implementation, seed):
                 async with slots:
-                    score, artifacts = await self.sandbox.evaluate(
-                        implementation,
-                        definition,
-                        seed,
-                        self.call_timeout,
-                    )
-                    return policy_id, seed, Result(score=score, artifacts=artifacts)
+                    try:
+                        score, artifacts = await self.sandbox.evaluate(
+                            implementation,
+                            definition,
+                            seed,
+                            self.call_timeout,
+                        )
+                        return policy_id, seed, Result(score=score, artifacts=artifacts)
+                    except Exception as exc:
+                        logging.getLogger(__name__).error(
+                            "Policy %s failed (seed=%s): %s",
+                            policy_id[:12],
+                            seed,
+                            exc,
+                            extra={
+                                "event": "evaluation_failed",
+                                "policy_id": policy_id,
+                                "seed": seed,
+                            },
+                        )
+                        raise
 
             tasks = []
             error = None
             try:
+                logging.getLogger(__name__).info("Starting %s", type(self.sandbox).__name__)
                 starting = asyncio.create_task(self.sandbox.start(self.concurrency))
                 try:
                     await asyncio.shield(starting)
@@ -90,6 +105,7 @@ class Executor:
                 await asyncio.gather(*tasks, return_exceptions=True)
                 try:
                     await self.sandbox.close()
+                    logging.getLogger(__name__).info("Sandbox closed")
                 except Exception:
                     if primary is None:
                         raise

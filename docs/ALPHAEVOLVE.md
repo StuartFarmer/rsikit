@@ -39,7 +39,7 @@ with gym.make("CartPole-v1", max_episode_steps=500) as environment:
 
 `n=10` means ten new proposals in that generation, not a fixed archive size.
 The first batch is generated from the task. Later batches mutate or rewrite evaluated
-parents. Names come from the model. Environment instructions are static inputs
+parents. Names and one-sentence approach descriptions come from the model. Environment instructions are static inputs
 supplied by the executor when it creates a policy. The model does not generate or
 configure them. Generated policies inherit the constructor and initialize their
 own state in `reset()`. Generation is sequential and does not execute
@@ -122,3 +122,15 @@ The default makes 25 generations of 10 proposals using
 
 Run automatically exports every evaluated policy under `exports/` and stores scores
 in SQLite. No explicit policy-file writes are needed.
+
+The example shows Rich progress bars for generations, policy generation, and
+evaluation. Each completed model response immediately prints the policy name and
+description; each saved evaluation immediately prints its score. This is streaming
+completion feedback, not token-by-token model output. Each generation ends with a
+score table and the best policy so far.
+
+The same log messages and failure tracebacks are saved in `run.log` inside the run
+directory. Failed policies retain unfinished scores, and successful evaluations
+remain saved. Logging does not introduce retries or change failure handling.
+Library code uses Python's `logging` under `rsikit`; the example configures Rich
+and file handlers. Policy descriptions are stored in SQLite alongside names.

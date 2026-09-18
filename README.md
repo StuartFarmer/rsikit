@@ -51,7 +51,7 @@ uv pip install --python .venv/bin/python -e '.[dev]'
 .venv/bin/python -B -m examples.cartpole
 ```
 
-Runtime dependencies are Gymnasium, NumPy, Slick (`slick-ai`), Pydantic, SQLModel, and cloudpickle.
+Runtime dependencies are Gymnasium, NumPy, Slick (`slick-ai`), Pydantic, SQLModel, cloudpickle, and Rich.
 No sibling checkout or `slick-bits` dependency is required.
 
 ## Isolated programs
@@ -142,7 +142,9 @@ for generation in range(25):
 
 Generation writes nothing to disk. Run saves policies, scores, and artifacts during
 evaluation, and exports Python automatically. Ten means new proposals per batch;
-the optimizer's retained archive is separate.
+the optimizer's retained archive is separate. Rich progress shows each policy's
+name and description as it is generated, then scores as evaluations finish.
+A score table closes each generation; `run.log` keeps messages and error details.
 
 ## Checks
 

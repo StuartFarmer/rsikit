@@ -89,12 +89,14 @@ Each run directory contains `run.sqlite`, exported policies under `exports/`, an
 returned files under `artifacts/`. SQLite has two tables:
 
 - `settings`: name and Python-export preference.
-- `policy`: ID, generated name, implementation, and seed-to-score mapping.
+- `policy`: ID, generated name and description, implementation, and seed-to-score mapping.
 
 `Run.create(export=True)` remains the default. Missing Python exports are recreated
 when opening a run. `run.policies()` reloads definitions; `run.scores(policy)` returns
 stored scores. `None` means unfinished. Identical policies and seeds reuse scores.
-There are no episode metrics, optimizer checkpoints, or stored environment objects.
+Older databases receive an empty description column when opened; their policies
+and scores remain intact. There are no episode metrics, optimizer checkpoints, or
+stored environment objects.
 
 ```python
 with Run.open("runs/YOUR_RUN", environment=environment, executor=executor) as run:
