@@ -12,9 +12,11 @@ from pydantic import ValidationError
 from rich.console import Console
 from slick import prompts
 from slick.providers import ProviderError
+from sqlmodel import select
 
 import alphaevolve
 from alphaevolve.edits import Program
+from alphaevolve.history import Evaluation, Generation
 from alphaevolve.improved import AlphaEvolve, Config
 from examples.alphaevolve import run_search
 from rsikit import Executor, Run
@@ -131,6 +133,33 @@ class RepairTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(sum(row["status"] == "discarded" for row in agent.attempts), 4)
             self.assertIn("No surviving policies", output.getvalue())
             self.assertIn("Generation 3/3", (run.path / "run.log").read_text())
+            with run.session() as session:
+                history = session.exec(
+                    select(Evaluation).order_by(Evaluation.attempt, Evaluation.revision)
+                ).all()
+                generations = session.exec(select(Generation).order_by(Generation.number)).all()
+                self.assertEqual(len(history), 7)  # Six proposals; one runtime replacement.
+                self.assertEqual(
+                    [row.status for row in history],
+                    [
+                        "discarded",
+                        "discarded",
+                        "evaluated",
+                        "failed",
+                        "discarded",
+                        "evaluated",
+                        "discarded",
+                    ],
+                )
+                failed, repaired = history[3:5]
+                self.assertEqual((failed.attempt, failed.revision, repaired.revision), (4, 0, 1))
+                self.assertNotEqual(failed.policy_id, repaired.policy_id)
+                self.assertIn("Action outside action_space", failed.error)
+                self.assertEqual(repaired.repairs, 1)
+                self.assertIsNone(repaired.score)  # No aggregate from incomplete episodes.
+                self.assertTrue(all(row.complete for row in generations))
+                self.assertIsNone(generations[0].islands[0]["score"])
+                self.assertEqual([row.islands[0]["score"] for row in generations[1:]], [7.0, 8.0])
 
     async def test_repairs_syntax_and_schema_with_exact_budget(self):
         broken = Program(name="Broken", description="A baseline.", implementation=SOURCE + "}\n")

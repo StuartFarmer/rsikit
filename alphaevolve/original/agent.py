@@ -211,7 +211,7 @@ class AlphaEvolve:
             logger.warning("Discarded %s: %s", policy.name, exc)
             return None
         for row in records:
-            row.update(policy=replacement, status="repaired")
+            row.update(policy=replacement, status="repaired", revision=row.get("revision", 0) + 1)
         self._pending.pop(policy.id)
         self._pending.setdefault(replacement.id, []).extend(records)
         logger.info("Repaired %s → %s — %s", policy.name, replacement.name, replacement.description)
@@ -325,6 +325,8 @@ class AlphaEvolve:
                 arguments = (attempt_id,)
             else:
                 island_id, parent, inspirations = self.sample()
+            record.update(parent=parent, island=island_id)
+            if parent is not None:
                 idea = await self._choose_guidance(attempt_id, parent, failures, provider, record)
                 idea.uses += 1
                 variant = self.rng.choices(
@@ -459,5 +461,10 @@ class AlphaEvolve:
             founder = self.islands[donor]
             self.islands[island_id] = founder
             self.events.append(
-                {"completed": self.completed, "reset": island_id, "founder": founder.policy.id}
+                {
+                    "completed": self.completed,
+                    "reset": island_id,
+                    "donor": donor,
+                    "founder": founder.policy.id,
+                }
             )

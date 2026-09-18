@@ -43,6 +43,61 @@ islands-only and feedback-only ablations. No performance improvement is establis
 by this code split. Equal proposal counts also do not guarantee equal model-token
 costs or successful evaluation counts; repairs and longer feedback affect those.
 
+## Stored experiment history
+
+Both CLI variants save optimizer-owned records in the Run's existing `run.sqlite`:
+
+- `alphaevolve_evaluation`: generation, proposal attempt, policy revision, selected
+  island slot, policy ID, parent ID, status, aggregate score, repair count, and error.
+- `alphaevolve_generation`: optimizer variant, evaluation seeds, completion flag,
+  every island's champion ID and score, and reset events with donor island, target
+  island, founder policy, and the evaluated-attempt count at the reset.
+
+These SQLModel classes live in `alphaevolve/history.py`. The core only supplies
+`run.session(...)`; another optimizer can supply its own tables and fields.
+Individual episode scores remain in the existing `policy.scores` column. Join by
+policy ID instead of relying on generated names, which can repeat.
+
+The CLI commits proposal metadata before sandbox dispatch, failed outcomes before
+runtime repairs, replacements before their evaluation, and final results and island
+snapshots after each generation. A runtime replacement gets a new revision of the
+same attempt, preserving its failed predecessor. Syntax repairs before a valid
+policy exists count toward repairs but do not create extra policy revisions.
+Repair counts are cumulative within an attempt: take the latest revision per
+attempt when totaling repairs, rather than summing every revision's counter.
+Discarded proposals may have no policy ID or score; they are included in history.
+
+Provider failures and cancellation save the current generation as incomplete.
+A hard process kill can lose updates since the last committed boundary; it cannot
+create a completed-generation snapshot. Successfully saved episode scores remain
+available even when optimizer selection has not run. `complete` means the outer
+loop reached `update`, including generations with no surviving policies. Appending
+another `run_search` call starts after the last saved generation number. This does
+not restore optimizer state.
+
+For island curves, use generation snapshots: the original baseline broadcasts its
+initial proposals across all islands even though their proposal slot is 0. A slot
+also survives reseeding, so use reset events to distinguish island slots from
+uninterrupted lineages. The snapshots are taken after that generation's resets.
+
+For example, this query produces one row per island and completed generation:
+
+```sql
+SELECT g.number AS generation,
+       json_extract(i.value, '$.island') AS island,
+       json_extract(i.value, '$.policy_id') AS policy_id,
+       json_extract(i.value, '$.score') AS score
+FROM alphaevolve_generation AS g, json_each(g.islands) AS i
+WHERE g.complete = 1
+ORDER BY generation, island;
+```
+
+Use `Evaluation` and `Generation` with `sqlmodel.select`, or query SQLite directly
+after the run. Historical runs made before this change have no island history to
+backfill reliably. Calling `generate`/`update` directly still writes nothing; the
+example's outer loop owns history persistence. Token usage and model costs are not
+recorded by these tables.
+
 ## Python API
 
 The following uses the improved version. Import `AlphaEvolve` from

@@ -126,6 +126,17 @@ class Run:
             self._engine.dispose()
         self._lock.close()
 
+    def session(self, *models: type[SQLModel]) -> Session:
+        """Open a native SQLModel session, creating only the requested tables.
+
+        Callers own their record schemas and commit their transactions explicitly.
+        Use no model arguments to query tables that already exist.
+        """
+        if self._lock.closed:
+            raise RuntimeError("Run is closed")
+        SQLModel.metadata.create_all(self._engine, tables=[model.__table__ for model in models])
+        return Session(self._engine)
+
     def _export(self, policy: _StoredPolicy) -> None:
         if self._settings.export:
             destination = self.path / "exports" / f"{policy.id}_{_slug(policy.name)}.py"

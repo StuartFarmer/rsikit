@@ -12,6 +12,7 @@ from unittest.mock import AsyncMock, patch
 
 import gymnasium as gym
 from slick import prompts
+from sqlmodel import Field, SQLModel, select
 
 import rsikit.generation as generation
 from rsikit import Executor, Policy, Run, generate
@@ -54,6 +55,34 @@ class RunTests(unittest.IsolatedAsyncioTestCase):
 
     def reopen(self, path=None):
         return Run.open(path or self.path, environment=self.env, executor=self.executor)
+
+    async def test_optimizer_owned_models_share_the_database_and_native_transactions(self):
+        class CustomEvaluation(SQLModel, table=True):
+            __tablename__ = "test_custom_evaluation"
+            policy_id: str = Field(primary_key=True)
+            score: float
+            label: str
+
+        with self.create() as run:
+            with closing(sqlite3.connect(self.path / "run.sqlite")) as db:
+                names = {
+                    row[0]
+                    for row in db.execute("SELECT name FROM sqlite_master WHERE type='table'")
+                }
+                self.assertNotIn("test_custom_evaluation", names)
+            with run.session(CustomEvaluation) as session:
+                session.add(CustomEvaluation(policy_id=self.policy.id, score=7, label="baseline"))
+                session.commit()
+            with run.session() as session:
+                session.add(CustomEvaluation(policy_id="uncommitted", score=0, label="ignored"))
+        with self.reopen() as run, run.session() as session:
+            rows = session.exec(select(CustomEvaluation)).all()
+            self.assertEqual(
+                [(row.policy_id, row.score, row.label) for row in rows],
+                [(self.policy.id, 7, "baseline")],
+            )
+        with self.assertRaisesRegex(RuntimeError, "closed"):
+            run.session(CustomEvaluation)
 
     async def test_policy_scores_exports_and_reuse(self):
         self.assertTrue(issubclass(self.policy, Policy))

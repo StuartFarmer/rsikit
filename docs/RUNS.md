@@ -98,7 +98,7 @@ results. The command prints MP4 paths under the new Run's `artifacts/` directory
 ## Storage and resume
 
 Each run directory contains `run.sqlite`, exported policies under `exports/`, and
-returned files under `artifacts/`. SQLite has two tables:
+returned files under `artifacts/`. SQLite starts with two core tables:
 
 - `settings`: name and Python-export preference.
 - `policy`: ID, generated name and description, implementation, and seed-to-score mapping.
@@ -121,3 +121,40 @@ its artifacts are saved as they arrive. Resume retries unfinished evaluations,
 including failed ones. It does not regenerate policies or restore mid-episode state.
 One process may own a run directory at a time (macOS/Linux file lock). Close it before
 moving or copying the directory.
+
+
+## Optimizer-defined records
+
+An optimizer can define ordinary `SQLModel` table classes and save them into the
+same database. `Run.session(*models)` creates only the named tables and returns a
+native SQLModel `Session`. The caller commits writes; leaving the session without
+committing rolls back its uncommitted work. Calling `run.session()` opens existing
+tables for queries. Sessions must close before the Run closes.
+
+```python
+from sqlmodel import Field, SQLModel, select
+
+
+class SearchEvaluation(SQLModel, table=True):
+    __tablename__ = "search_evaluation"
+    attempt: int = Field(primary_key=True)
+    policy_id: str
+    score: float
+    strategy: str
+
+
+with run.session(SearchEvaluation) as session:
+    session.add(SearchEvaluation(attempt=1, policy_id=policy.id, score=score, strategy="mutate"))
+    session.commit()
+
+with run.session() as session:
+    evaluations = session.exec(select(SearchEvaluation).order_by(SearchEvaluation.attempt)).all()
+```
+
+Schemas belong to the optimizer, including table names, fields, and any future
+schema migrations. RSIKit does not interpret them. Keep optimizer table names
+separate from the core `settings` and `policy` tables. This is native SQLModel
+storage, not an optimizer checkpoint or an additional execution abstraction.
+
+The AlphaEvolve CLI saves its own evaluation and generation records automatically;
+see [experiment history](ALPHAEVOLVE.md#stored-experiment-history).

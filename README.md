@@ -157,6 +157,8 @@ The optimizer lives outside the core in `alphaevolve/original/` and
 baseline or `--variant improved` (default) for independent founding and per-seed
 feedback. Run names include the variant and `experiment.json` saves CLI settings.
 See [the comparison setup](docs/ALPHAEVOLVE.md#comparing-the-variants).
+The CLI also saves per-proposal outcomes, ancestry, repair versions, and per-generation
+island champions and resets in SQLite. See [the history schema and island-curve query](docs/ALPHAEVOLVE.md#stored-experiment-history).
 
 In the improved variant, initial proposals compete on separate islands; the same program cannot found
 multiple islands just by changing its name. Mutation prompts include each parent's

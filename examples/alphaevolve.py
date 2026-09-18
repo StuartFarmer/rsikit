@@ -23,9 +23,11 @@ from rich.table import Table
 from rich.text import Text
 from slick import prompts
 from slick.providers import OpenRouterAPI
+from sqlmodel import func, select
 
 import alphaevolve
 from alphaevolve import improved, original
+from alphaevolve.history import Evaluation, Generation, save_history
 from rsikit import Executor, Run
 from rsikit.episode import PolicyError
 
@@ -128,6 +130,8 @@ async def run_search(
     """Display completed policies immediately and keep the same messages in run.log."""
     seeds = tuple(seeds)
     console = console or Console()
+    with run.session(Evaluation, Generation) as session:
+        first_generation = (session.exec(select(func.max(Generation.number))).one() or 0) + 1
     logger = logging.getLogger("rsikit")
     loggers = (logger, logging.getLogger("alphaevolve"))
     old_settings = [(item.level, item.propagate) for item in loggers]
@@ -151,41 +155,57 @@ async def run_search(
         try:
             logger.info("Run: %s", run.path)
             logger.info("Optimizer: %s", type(generator).__module__)
-            for generation in range(generations):
-                logger.info("Generation %s/%s", generation + 1, generations)
-                policies = await generator.generate(
-                    n=batch_size, concurrency=generation_concurrency
+            for offset in range(generations):
+                generation = first_generation + offset
+                logger.info("Generation %s/%s", offset + 1, generations)
+                history = dict(
+                    generation=generation,
+                    attempt_start=len(generator.attempts),
+                    event_start=len(generator.events),
+                    seeds=seeds,
                 )
-                scores = {}
-                while policies:
-                    try:
-                        scores = await run.evaluate(policies, seeds=seeds)
-                        break
-                    except PolicyError as exc:
-                        if not exc.failures:
-                            raise
-                        replacements = {}
-                        for policy in policies:
-                            if policy.id in exc.failures and policy.id not in replacements:
-                                replacements[policy.id] = await generator.repair(
-                                    policy, exc.failures[policy.id]
-                                )
-                        policies = [
-                            replacement
+                complete, failures = False, {}
+                try:
+                    policies = await generator.generate(
+                        n=batch_size, concurrency=generation_concurrency
+                    )
+                    scores = {}
+                    while policies:
+                        save_history(run, generator, **history, failures=failures)
+                        try:
+                            scores = await run.evaluate(policies, seeds=seeds)
+                            failures = {}
+                            break
+                        except PolicyError as exc:
+                            if not exc.failures:
+                                raise
+                            failures = exc.failures
+                            save_history(run, generator, **history, failures=failures)
+                            replacements = {}
+                            for policy in policies:
+                                if policy.id in exc.failures and policy.id not in replacements:
+                                    replacements[policy.id] = await generator.repair(
+                                        policy, exc.failures[policy.id]
+                                    )
+                            policies = [
+                                replacement
+                                for policy in policies
+                                if (replacement := replacements.get(policy.id, policy)) is not None
+                            ]
+                    generator.update(
+                        scores,
+                        seed_scores={
+                            policy.id: {
+                                seed: score
+                                for seed, score in run.scores(policy).items()
+                                if seed in seeds
+                            }
                             for policy in policies
-                            if (replacement := replacements.get(policy.id, policy)) is not None
-                        ]
-                generator.update(
-                    scores,
-                    seed_scores={
-                        policy.id: {
-                            seed: score
-                            for seed, score in run.scores(policy).items()
-                            if seed in seeds
-                        }
-                        for policy in policies
-                    },
-                )
+                        },
+                    )
+                    complete = True
+                finally:
+                    save_history(run, generator, **history, complete=complete, failures=failures)
                 _show_scores(policies, run, console)
                 if not policies:
                     logger.warning("No surviving policies in this generation; continuing")
