@@ -195,6 +195,33 @@ class AlphaEvolveTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(agent.attempts[-1]["status"], "rejected")
         self.assertEqual(agent._pending, {})
 
+    async def test_initial_generation_rejects_unbalanced_evolution_markers(self):
+        invalid = Program(
+            name="Unclosed block", implementation=SOURCE.replace("# EVOLVE-BLOCK-END", "")
+        )
+        agent = AlphaEvolve(
+            "task",
+            ScriptedProvider(
+                [
+                    invalid,
+                    program(0),
+                    Mutation(
+                        name="Improved", edits=[Edit(search="return 0", replacement="return 1")]
+                    ),
+                ]
+            ),
+        )
+        with self.assertRaisesRegex(InvalidCandidate, "Unclosed evolution block"):
+            await agent.generate()
+        self.assertIsNone(agent.best)
+        self.assertEqual(agent._pending, {})
+        self.assertEqual(agent.attempts[-1]["status"], "rejected")
+        initial = (await agent.generate())[0]
+        agent.update({initial.id: 0})
+        child = (await agent.generate())[0]
+        agent.update({child.id: 1})
+        self.assertEqual(agent.best, child)
+
     async def test_typed_edit_boundaries_and_prompt_contracts(self):
         edits = [
             Edit(search="return 0", replacement="return 1"),

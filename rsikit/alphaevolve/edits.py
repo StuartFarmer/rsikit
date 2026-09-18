@@ -78,7 +78,8 @@ def apply_edits(parent: str, edits: list[Edit]) -> str:
 
 
 def check_program(source: str) -> None:
-    """Check syntax and the exported class without importing candidate code."""
+    """Check syntax, edit boundaries, and the exported class without importing code."""
+    evolution_regions(source)
     try:
         tree = ast.parse(source)
     except (SyntaxError, ValueError) as exc:
