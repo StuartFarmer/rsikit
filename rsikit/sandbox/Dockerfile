@@ -1,6 +1,7 @@
 ARG PYTHON_VERSION=3.14
 FROM python:${PYTHON_VERSION}-slim
-RUN pip install --no-cache-dir 'numpy>=2.2,<3' 'gymnasium[classic-control]>=1.3,<2' 'cloudpickle>=3.1,<4' 'moviepy>=2,<3'
+RUN apt-get update && apt-get install -y --no-install-recommends g++ swig && rm -rf /var/lib/apt/lists/*
+RUN pip install --no-cache-dir 'numpy>=2.2,<3' 'gymnasium[classic-control]>=1.3,<2' 'box2d-py==2.3.8' 'cloudpickle>=3.1,<4' 'moviepy>=2,<3'
 RUN mkdir -p /opt/worker/rsikit/sandbox && printf 'from .policy import Policy\n' > /opt/worker/rsikit/__init__.py && touch /opt/worker/rsikit/sandbox/__init__.py
 COPY rsikit/policy.py /opt/worker/rsikit/policy.py
 COPY rsikit/episode.py /opt/worker/rsikit/episode.py

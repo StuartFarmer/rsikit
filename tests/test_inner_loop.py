@@ -90,6 +90,10 @@ class InnerLoopTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(truncated)
         self.assertFalse(terminated)
         self.assertEqual(info["episode"]["l"], 1)
+        wrapped = gym.Wrapper(CounterEnv())
+        wrapped.instructions = "Wrapper-owned instructions"
+        await run_episode(lambda: wrapped, factory)
+        self.assertEqual(captured[-1].seen_instructions, wrapped.instructions)
 
     async def test_policy_environment_and_cleanup_failures(self):
         class Invalid(CounterPolicy):

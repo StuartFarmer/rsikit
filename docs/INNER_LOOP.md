@@ -47,7 +47,8 @@ clear policy memory. Close is an empty hook by default.
 
 Spaces describe valid values. Instructions can explain the goal and observation
 fields to a policy using an LLM API. Pass `instructions="..."` to the runner, or
-set `instructions` on a custom environment. If neither is present, text defaults
+set `instructions` on an environment or Gymnasium wrapper. The outermost wrapper
+with that attribute takes precedence. If neither is present, text defaults
 to `""`. An explicit argument overrides the environment, including empty text.
 
 Only copied observations reach `act`; diagnostic `info` stays with the caller.

@@ -170,6 +170,15 @@ The default makes 25 generations of 10 proposals using
 `--generation-concurrency` controls concurrent proposals (default 4).
 `--concurrency` separately controls sandbox evaluations (default 4).
 
+Select a harder environment with `--env LunarLander-v3` (continuous actions and
+wind) or `--env BipedalWalker-v3` (normal terrain). Install `.[openrouter,box2d]`
+using uv and rebuild the Docker image first; see [setup commands](../README.md#alphaevolve).
+Native episode limits apply unless `--max-steps` is supplied. `--seeds 0 1 2`
+averages each policy over three episodes; the default remains seed 0.
+These CLI tasks put their description and actual space definitions on a Gymnasium
+wrapper's `instructions` attribute. AlphaEvolve receives that text as context, and
+the executor supplies the same text to the policy. The generator never invents it.
+
 Run automatically exports every evaluated policy under `exports/` and stores scores
 in SQLite. No explicit policy-file writes are needed.
 

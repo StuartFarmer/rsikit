@@ -48,12 +48,14 @@ async def run_episode(
         if max_steps is not None:
             env = gym.wrappers.TimeLimit(env, max_episode_steps=max_steps)
         env = gym.wrappers.RecordEpisodeStatistics(env, buffer_length=1)
+        if instructions is None:
+            instructions = (
+                env.get_wrapper_attr("instructions") if env.has_wrapper_attr("instructions") else ""
+            )
         policy = make_policy(
             deepcopy(env.observation_space),
             deepcopy(env.action_space),
-            instructions=(
-                getattr(env.unwrapped, "instructions", "") if instructions is None else instructions
-            ),
+            instructions=instructions,
         )
         observation, _ = env.reset(seed=env_seed)
         await policy.reset(seed=policy_seed)

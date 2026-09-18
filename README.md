@@ -151,6 +151,23 @@ Generation runs four proposals concurrently by default, including their repair c
 Use `--generation-concurrency` to change this; `--concurrency` controls sandbox
 evaluation separately. Set generation concurrency to 1 for sequential requests.
 
+For LunarLander (continuous controls with wind) and then BipedalWalker (normal terrain):
+
+```sh
+uv pip install --python .venv/bin/python -e '.[openrouter,box2d]'
+docker build -t rsikit-sandbox:local -f rsikit/sandbox/Dockerfile .
+.venv/bin/python -B -m examples.alphaevolve --env LunarLander-v3 --seeds 0 1 2
+.venv/bin/python -B -m examples.alphaevolve --env BipedalWalker-v3 --seeds 0 1 2
+```
+
+Both default to 25 generations of 10 policies. Each command creates a separate run.
+The native time limits apply (1,000 steps for LunarLander, 1,600 for BipedalWalker);
+`--max-steps` overrides them. `--seeds` evaluates every policy on the same starting
+conditions and returns their mean score. The environment wrapper owns observation,
+action, reward, and termination instructions, used by both generation and execution.
+The `box2d` extra builds `box2d-py` for Python 3.14; uv supplies SWIG during the build.
+A C++ compiler is required (on macOS, Xcode Command Line Tools).
+
 ## Checks
 
 ```sh

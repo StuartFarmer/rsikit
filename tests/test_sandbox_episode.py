@@ -177,6 +177,76 @@ class SandboxEpisodeSmoke(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(cart[2] or cart[3])
         self.assertGreater(cart[4]["episode"]["l"], 1)
 
+    async def test_box2d_examples_preserve_instructions_and_evaluate_multiple_seeds(self):
+        import importlib.util
+        import io
+        import math
+
+        import cloudpickle
+        from rich.console import Console
+        from slick import prompts
+
+        import rsikit.alphaevolve as alphaevolve
+        from examples.alphaevolve import make_environment, run_search
+        from rsikit import Run
+        from rsikit.alphaevolve import AlphaEvolve
+        from rsikit.alphaevolve.edits import Program
+        from tests.providers import ScriptedProvider
+
+        if importlib.util.find_spec("Box2D") is None:
+            self.skipTest("Install the box2d extra to test Box2D environments")
+        for name, limit, actions in (("LunarLander-v3", 1000, 2), ("BipedalWalker-v3", 1600, 4)):
+            with self.subTest(environment=name):
+                with make_environment(name) as native:
+                    self.assertEqual(native.spec.max_episode_steps, limit)
+                    if name == "LunarLander-v3":
+                        self.assertTrue(
+                            native.unwrapped.continuous and native.unwrapped.enable_wind
+                        )
+                with (
+                    tempfile.TemporaryDirectory() as directory,
+                    make_environment(name, max_steps=3) as env,
+                    cloudpickle.loads(cloudpickle.dumps(env)) as restored,
+                    Run.create(
+                        name="box2d", path=Path(directory) / "run", environment=restored
+                    ) as run,
+                    patch.object(
+                        prompts, "TEMPLATE_ROOT", Path(alphaevolve.__file__).parent / "prompts"
+                    ),
+                ):
+                    self.assertEqual(restored.instructions, env.instructions)
+                    self.assertEqual(restored.spec.max_episode_steps, 3)
+                    provider = ScriptedProvider(
+                        [
+                            Program(
+                                name="Random motors",
+                                description="Exercise continuous actions and environment instructions.",
+                                implementation=f"""from rsikit import Policy
+class Solution(Policy):
+    async def act(self, observation):
+        assert {name!r} in self.instructions
+        assert "truncated after 3 steps" in self.instructions
+        assert self.action_space.shape == ({actions},)
+        return self.action_space.sample()
+""",
+                            )
+                        ]
+                    )
+                    agent = AlphaEvolve("Maximize reward", provider, context=restored.instructions)
+                    await run_search(
+                        agent,
+                        run,
+                        generations=1,
+                        batch_size=1,
+                        seeds=[0, 1],
+                        console=Console(file=io.StringIO()),
+                    )
+                    self.assertIn(restored.instructions, provider.calls[0])
+                    scores = run.scores(agent.best)
+                    self.assertEqual(set(scores), {0, 1})
+                    self.assertTrue(all(math.isfinite(score) for score in scores.values()))
+                    self.assertEqual(agent.completed, 1)
+
     async def test_alphaevolve_uses_native_environments_and_isolated_evaluation(self):
         import io
 
