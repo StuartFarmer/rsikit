@@ -47,7 +47,7 @@ def save_history(
 ) -> None:
     """Commit the current batch and archive together, retaining old repair versions."""
     failures = failures or {}
-    with run.session(Evaluation, Generation) as session:
+    with run.database(Evaluation, Generation) as db:
         for record in generator.attempts[attempt_start:]:
             policy, parent = record.get("policy"), record.get("parent")
             policy_id = None if policy is None else policy.id
@@ -55,7 +55,7 @@ def save_history(
             status = record["status"]
             if diagnostic and status != "discarded":
                 status = "failed"
-            session.merge(
+            db.merge(
                 Evaluation(
                     generation=generation,
                     attempt=record["id"],
@@ -69,7 +69,7 @@ def save_history(
                     error=record.get("error") or diagnostic,
                 )
             )
-        session.merge(
+        db.merge(
             Generation(
                 number=generation,
                 optimizer=type(generator).__module__,
@@ -86,4 +86,4 @@ def save_history(
                 resets=generator.events[event_start:],
             )
         )
-        session.commit()
+        db.commit()

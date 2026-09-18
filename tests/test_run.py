@@ -70,19 +70,19 @@ class RunTests(unittest.IsolatedAsyncioTestCase):
                     for row in db.execute("SELECT name FROM sqlite_master WHERE type='table'")
                 }
                 self.assertNotIn("test_custom_evaluation", names)
-            with run.session(CustomEvaluation) as session:
+            with run.database(CustomEvaluation) as session:
                 session.add(CustomEvaluation(policy_id=self.policy.id, score=7, label="baseline"))
                 session.commit()
-            with run.session() as session:
+            with run.database() as session:
                 session.add(CustomEvaluation(policy_id="uncommitted", score=0, label="ignored"))
-        with self.reopen() as run, run.session() as session:
+        with self.reopen() as run, run.database() as session:
             rows = session.exec(select(CustomEvaluation)).all()
             self.assertEqual(
                 [(row.policy_id, row.score, row.label) for row in rows],
                 [(self.policy.id, 7, "baseline")],
             )
         with self.assertRaisesRegex(RuntimeError, "closed"):
-            run.session(CustomEvaluation)
+            run.database(CustomEvaluation)
 
     async def test_policy_scores_exports_and_reuse(self):
         self.assertTrue(issubclass(self.policy, Policy))

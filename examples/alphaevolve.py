@@ -130,8 +130,8 @@ async def run_search(
     """Display completed policies immediately and keep the same messages in run.log."""
     seeds = tuple(seeds)
     console = console or Console()
-    with run.session(Evaluation, Generation) as session:
-        first_generation = (session.exec(select(func.max(Generation.number))).one() or 0) + 1
+    with run.database(Evaluation, Generation) as db:
+        first_generation = (db.exec(select(func.max(Generation.number))).one() or 0) + 1
     logger = logging.getLogger("rsikit")
     loggers = (logger, logging.getLogger("alphaevolve"))
     old_settings = [(item.level, item.propagate) for item in loggers]

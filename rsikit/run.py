@@ -126,10 +126,11 @@ class Run:
             self._engine.dispose()
         self._lock.close()
 
-    def session(self, *models: type[SQLModel]) -> Session:
-        """Open a native SQLModel session, creating only the requested tables.
+    def database(self, *models: type[SQLModel]) -> Session:
+        """Open this Run's SQLite database, creating only the requested tables.
 
-        Callers own their record schemas and commit their transactions explicitly.
+        Returns a native SQLModel Session. Callers own their record schemas
+        and commit their transactions explicitly.
         Use no model arguments to query tables that already exist.
         """
         if self._lock.closed:

@@ -63,9 +63,9 @@ class HistoryTests(unittest.IsolatedAsyncioTestCase):
                         seeds=(0, 1),
                         console=Console(file=io.StringIO()),
                     )
-                with Run.open(path, environment=env) as run, run.session() as session:
-                    generations = session.exec(select(Generation).order_by(Generation.number)).all()
-                    evaluations = session.exec(
+                with Run.open(path, environment=env) as run, run.database() as db:
+                    generations = db.exec(select(Generation).order_by(Generation.number)).all()
+                    evaluations = db.exec(
                         select(Evaluation).order_by(Evaluation.generation, Evaluation.attempt)
                     ).all()
                     self.assertEqual([row.number for row in generations], [1, 2, 3])
@@ -129,12 +129,12 @@ class HistoryTests(unittest.IsolatedAsyncioTestCase):
                         task.cancel()
                     with self.assertRaises(asyncio.CancelledError if cancelled else ProviderError):
                         await task
-                with Run.open(path, environment=env) as run, run.session() as session:
-                    rows = session.exec(select(Generation).order_by(Generation.number)).all()
+                with Run.open(path, environment=env) as run, run.database() as db:
+                    rows = db.exec(select(Generation).order_by(Generation.number)).all()
                     self.assertFalse(rows[-1].complete)
                     if not cancelled:
                         self.assertTrue(rows[0].complete)
-                    evaluation = session.exec(
+                    evaluation = db.exec(
                         select(Evaluation).where(Evaluation.generation == rows[-1].number)
                     ).one()
                     self.assertEqual(evaluation.status, "generated" if cancelled else "rejected")

@@ -126,9 +126,9 @@ moving or copying the directory.
 ## Optimizer-defined records
 
 An optimizer can define ordinary `SQLModel` table classes and save them into the
-same database. `Run.session(*models)` creates only the named tables and returns a
-native SQLModel `Session`. The caller commits writes; leaving the session without
-committing rolls back its uncommitted work. Calling `run.session()` opens existing
+same database. `Run.database(*models)` opens this Run's SQLite database, creates only the named
+tables, and returns a native SQLModel `Session`. The caller commits writes; leaving the session without
+committing rolls back its uncommitted work. Calling `run.database()` opens existing
 tables for queries. Sessions must close before the Run closes.
 
 ```python
@@ -143,12 +143,12 @@ class SearchEvaluation(SQLModel, table=True):
     strategy: str
 
 
-with run.session(SearchEvaluation) as session:
-    session.add(SearchEvaluation(attempt=1, policy_id=policy.id, score=score, strategy="mutate"))
-    session.commit()
+with run.database(SearchEvaluation) as db:
+    db.add(SearchEvaluation(attempt=1, policy_id=policy.id, score=score, strategy="mutate"))
+    db.commit()
 
-with run.session() as session:
-    evaluations = session.exec(select(SearchEvaluation).order_by(SearchEvaluation.attempt)).all()
+with run.database() as db:
+    evaluations = db.exec(select(SearchEvaluation).order_by(SearchEvaluation.attempt)).all()
 ```
 
 Schemas belong to the optimizer, including table names, fields, and any future

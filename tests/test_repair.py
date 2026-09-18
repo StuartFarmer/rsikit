@@ -133,7 +133,7 @@ class RepairTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(sum(row["status"] == "discarded" for row in agent.attempts), 4)
             self.assertIn("No surviving policies", output.getvalue())
             self.assertIn("Generation 3/3", (run.path / "run.log").read_text())
-            with run.session() as session:
+            with run.database() as session:
                 history = session.exec(
                     select(Evaluation).order_by(Evaluation.attempt, Evaluation.revision)
                 ).all()
