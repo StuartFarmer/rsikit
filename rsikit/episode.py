@@ -15,7 +15,11 @@ class InfrastructureError(RuntimeError):
 
 
 class PolicyError(RuntimeError):
-    """A generated policy failed or returned an invalid action."""
+    """A generated policy failed; batch failures map policy IDs to diagnostics."""
+
+    def __init__(self, message: str):
+        super().__init__(message)
+        self.failures: dict[str, str] = {}
 
 
 class PolicyTimeout(PolicyError):

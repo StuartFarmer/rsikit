@@ -10,6 +10,7 @@ import cloudpickle
 import gymnasium as gym
 from pydantic import BaseModel, Field, FiniteFloat
 
+from .episode import PolicyError
 from .sandbox.docker import DockerSandbox
 
 
@@ -75,10 +76,14 @@ class Executor:
                                 "seed": seed,
                             },
                         )
+                        if isinstance(exc, PolicyError):
+                            return policy_id, seed, exc
                         raise
 
             tasks = []
             error = None
+            policy_error = None
+            failures = {}
             try:
                 logging.getLogger(__name__).info("Starting %s", type(self.sandbox).__name__)
                 starting = asyncio.create_task(self.sandbox.start(self.concurrency))
@@ -95,9 +100,20 @@ class Executor:
                         if error is None:
                             error = exc
                     else:
-                        yield completed
+                        policy_id, seed, result = completed
+                        if isinstance(result, PolicyError):
+                            policy_error = policy_error or result
+                            diagnostic = f"seed={seed}: {type(result).__name__}: {result}"
+                            failures[policy_id] = "\n".join(
+                                filter(None, [failures.get(policy_id), diagnostic])
+                            )
+                        else:
+                            yield completed
                 if error is not None:
                     raise error
+                if policy_error is not None:
+                    policy_error.failures = failures
+                    raise policy_error
             finally:
                 primary = sys.exc_info()[1]
                 for task in tasks:

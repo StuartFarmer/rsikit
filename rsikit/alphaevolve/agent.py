@@ -71,13 +71,14 @@ class Config:
     meta_interval: int = 0
     mode: Literal["diff", "rewrite"] = "diff"
     generation_timeout: float | None = None
+    max_repairs: int = 2
 
 
 class AlphaEvolve:
     """Generate policies in memory; update selection from Run's measured scores.
 
     Configure Slick's template root once before use. A batch sees only previous
-    updates. Generation is sequential, with no hidden retries or evaluation.
+    updates. Generation is sequential, with bounded diagnostic-driven repair and no evaluation.
     """
 
     def __init__(
@@ -103,7 +104,7 @@ class AlphaEvolve:
         # ponytail: in-memory attempt history; bound it if searches exceed RAM.
         self.attempts: list[dict] = []
         self.events: list[dict] = []
-        self.generation_calls = self.meta_calls = self.completed = 0
+        self.generation_calls = self.repair_calls = self.meta_calls = self.completed = 0
 
     @property
     def best(self) -> type[Policy] | None:
@@ -138,6 +139,75 @@ class AlphaEvolve:
     ) -> Program:
         return generated
 
+    @prompt(template="repair.j2", output_type=Program)
+    async def fix(
+        self, reference: str, failed: str, diagnostic: str, *, generated: Program
+    ) -> Program:
+        """Repair a full policy from validation or sandbox diagnostics."""
+        return generated
+
+    async def _repair_valid(self, record, reference, failed, diagnostic) -> type[Policy]:
+        # Adapt main's check/repair/recheck loop; count all repairs for this proposal.
+        repairs = record.setdefault("repairs", [])
+        provider = self.models[record["model"]][0]
+        while len(repairs) < self.config.max_repairs:
+            call = {"input": failed, "diagnostic": diagnostic}
+            repairs.append(call)
+            self.repair_calls += 1
+            logger.warning(
+                "Repairing proposal %s (%s/%s): %s",
+                record["id"],
+                len(repairs),
+                self.config.max_repairs,
+                diagnostic,
+            )
+            try:
+                proposal = await asyncio.wait_for(
+                    self.fix(
+                        reference,
+                        failed,
+                        diagnostic,
+                        provider=_RecordedProvider(provider, call, "raw"),
+                    ),
+                    self.config.generation_timeout,
+                )
+                content = proposal.implementation
+                call["implementation"] = content
+                if content == failed:
+                    raise InvalidCandidate("Repair returned the unchanged implementation")
+                if reference:
+                    check_rewrite(reference, content)
+                check_program(content)
+                call["valid"] = True
+                return _policy_class(proposal.name, content, proposal.description)
+            except (InvalidCandidate, ValidationError) as exc:
+                if isinstance(exc, ValidationError) and "raw" not in call:
+                    raise  # Provider-side failures do not establish invalid model output.
+                failed = call.get("implementation", call.get("raw", failed))
+                diagnostic = f"{type(exc).__name__}: {exc}"
+                call.update(valid=False, error=diagnostic)
+        raise InvalidCandidate(f"Repair exhausted after {len(repairs)} repairs: {diagnostic}")
+
+    async def repair(self, policy: type[Policy], diagnostic: str) -> type[Policy]:
+        """Repair an unevaluated policy after a sandbox failure, preserving its ancestry.
+
+        The same budget covers generation and runtime repairs. The caller evaluates
+        the returned replacement through Run; failed versions remain in storage.
+        """
+        records = self._pending[policy.id]
+        record = max(records, key=lambda row: len(row.get("repairs", [])))
+        parent = record["parent"]
+        reference = policy._implementation if parent is None else parent.policy._implementation
+        replacement = await self._repair_valid(
+            record, reference, policy._implementation, diagnostic
+        )
+        for row in records:
+            row.update(policy=replacement, status="repaired")
+        self._pending.pop(policy.id)
+        self._pending.setdefault(replacement.id, []).extend(records)
+        logger.info("Repaired %s → %s — %s", policy.name, replacement.name, replacement.description)
+        return replacement
+
     @prompt(template="evolve_prompt.j2", output_type=Guidance)
     async def evolve_prompt(
         self,
@@ -150,7 +220,7 @@ class AlphaEvolve:
         return generated.instruction
 
     async def generate(self, n: int = 1) -> list[type[Policy]]:
-        """Return n new proposals. Failure aborts the batch; no automatic retries.
+        """Return n valid proposals, repairing rejected model output within the budget.
 
         Proposals are neither executed nor saved. Only a successfully returned
         batch is eligible for update; rejected output stays in attempts.
@@ -230,18 +300,34 @@ class AlphaEvolve:
                 arguments = (parent, inspirations, guidance, failures)
             logger.info("Requesting policy %s via %s", attempt_id, operation.__name__)
             self.generation_calls += 1
-            proposal = await asyncio.wait_for(
-                operation(*arguments, provider=_RecordedProvider(provider, record, "raw")),
-                self.config.generation_timeout,
-            )
-            if parent is None:
-                content = proposal.implementation
-            elif self.config.mode == "diff":
-                content = apply_edits(parent.policy._implementation, proposal.edits)
-            else:
-                content = check_rewrite(parent.policy._implementation, proposal.implementation)
-            check_program(content)
-            policy = _policy_class(proposal.name, content, proposal.description)
+            reference = "" if parent is None else parent.policy._implementation
+            try:
+                proposal = await asyncio.wait_for(
+                    operation(*arguments, provider=_RecordedProvider(provider, record, "raw")),
+                    self.config.generation_timeout,
+                )
+                if parent is None:
+                    content = proposal.implementation
+                elif self.config.mode == "diff":
+                    content = apply_edits(reference, proposal.edits)
+                else:
+                    content = proposal.implementation
+                    record["content"] = content
+                    check_rewrite(reference, content)
+                record["content"] = content
+                check_program(content)
+                policy = _policy_class(proposal.name, content, proposal.description)
+            except (InvalidCandidate, ValidationError) as exc:
+                if isinstance(exc, ValidationError) and "raw" not in record:
+                    raise
+                if self.config.max_repairs == 0:
+                    raise
+                policy = await self._repair_valid(
+                    record,
+                    reference,
+                    record.get("content", record.get("raw", "")),
+                    f"{type(exc).__name__}: {exc}",
+                )
             record.update(
                 status="generated", policy=policy, parent=parent, island=island_id, idea=idea
             )

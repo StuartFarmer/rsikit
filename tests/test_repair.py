@@ -1,0 +1,171 @@
+"""Diagnostic-driven repair before generation returns and after sandbox failures."""
+
+import asyncio
+import io
+import tempfile
+import unittest
+from pathlib import Path
+from unittest.mock import patch
+
+import gymnasium as gym
+from rich.console import Console
+from slick import prompts
+from slick.providers import ProviderError
+
+import rsikit.alphaevolve as alphaevolve
+from examples.alphaevolve import run_search
+from rsikit import Executor, Run
+from rsikit.alphaevolve import AlphaEvolve, Config, InvalidCandidate
+from rsikit.alphaevolve.edits import Program
+from rsikit.episode import InfrastructureError, PolicyError
+from tests.providers import ScriptedProvider
+from tests.test_alphaevolve import SOURCE, program
+from tests.test_run import FakeSandbox
+
+ROOT = Path(alphaevolve.__file__).parent / "prompts"
+
+
+class RepairTests(unittest.IsolatedAsyncioTestCase):
+    def setUp(self):
+        root = patch.object(prompts, "TEMPLATE_ROOT", ROOT)
+        root.start()
+        self.addCleanup(root.stop)
+
+    async def test_repairs_syntax_and_schema_with_exact_budget(self):
+        broken = Program(name="Broken", description="A baseline.", implementation=SOURCE + "}\n")
+        provider = ScriptedProvider([broken, "not json", program(0), program(1)])
+        agent = AlphaEvolve("task", provider)
+        policies = await agent.generate(n=2)
+        self.assertEqual([p.name for p in policies], ["Policy 0", "Policy 1"])
+        self.assertEqual((agent.generation_calls, agent.repair_calls), (2, 2))
+        self.assertIn("unmatched", provider.calls[1])
+        self.assertIn("}\n", provider.calls[1])
+        self.assertIn("not json", provider.calls[2])
+        self.assertEqual(len(agent.attempts[0]["repairs"]), 2)
+        self.assertIsNone(agent.best)
+        agent.update({p.id: 1 for p in policies})
+        self.assertEqual(agent.completed, 2)
+
+    async def test_repair_preserves_original_parent_boundaries(self):
+        escaped = program(1).model_copy(
+            update={
+                "implementation": program(1).implementation.replace("from rsikit", "from elsewhere")
+            }
+        )
+        provider = ScriptedProvider(
+            [
+                program(0),
+                escaped,
+                escaped.model_copy(
+                    update={
+                        "implementation": escaped.implementation.replace("return 1", "return 2")
+                    }
+                ),
+                program(2),
+            ]
+        )
+        agent = AlphaEvolve("task", provider, config=Config(mode="rewrite"))
+        initial = (await agent.generate())[0]
+        agent.update({initial.id: 0})
+        child = (await agent.generate())[0]
+        self.assertEqual(child._implementation, program(2).implementation)
+        self.assertIn(SOURCE, provider.calls[-1])
+        self.assertIn("immutable", provider.calls[-1])
+        self.assertEqual(agent.repair_calls, 2)
+
+    async def test_exhaustion_and_infrastructure_never_create_pending_policy(self):
+        broken = Program(name="Broken", description="Broken Python.", implementation=SOURCE + "}")
+        agent = AlphaEvolve(
+            "task", ScriptedProvider([broken, broken]), config=Config(max_repairs=1)
+        )
+        with self.assertRaisesRegex(InvalidCandidate, "exhausted after 1"):
+            await agent.generate()
+        self.assertEqual(agent.repair_calls, 1)
+        self.assertEqual(agent._pending, {})
+        self.assertEqual(agent.attempts[-1]["status"], "rejected")
+        for error in [ProviderError("offline"), asyncio.CancelledError()]:
+            provider = ScriptedProvider([broken, error])
+            # ScriptedProvider raises Exception; cancellation is injected at the call boundary.
+            if isinstance(error, asyncio.CancelledError):
+                original = provider.acall
+
+                async def cancel(context, **kwargs):
+                    if provider.calls:
+                        raise asyncio.CancelledError()
+                    return await original(context, **kwargs)
+
+                provider.acall = cancel
+            agent = AlphaEvolve("task", provider)
+            with self.assertRaises(type(error)):
+                await agent.generate()
+            self.assertEqual(agent._pending, {})
+            self.assertEqual(agent.repair_calls, 1)
+
+    async def test_runtime_repair_reuses_successful_scores_and_original_budget(self):
+        provider = ScriptedProvider([program(0), program(9), program(1)])
+        agent = AlphaEvolve("task", provider)
+        sandbox = FakeSandbox()
+        checked = []
+
+        async def evaluate(implementation, environment, seed, call_timeout):
+            checked.append(implementation)
+            if "return 9" in implementation:
+                raise PolicyError("Action outside action_space")
+            return 7.0, {}
+
+        sandbox.evaluate.side_effect = evaluate
+        with (
+            tempfile.TemporaryDirectory() as directory,
+            gym.make("CartPole-v1", max_episode_steps=3) as env,
+            Run.create(
+                name="repair",
+                path=Path(directory) / "run",
+                environment=env,
+                executor=Executor(sandbox=sandbox, concurrency=2),
+            ) as run,
+        ):
+            output = io.StringIO()
+            await run_search(
+                agent,
+                run,
+                generations=1,
+                batch_size=2,
+                console=Console(file=output, force_terminal=False, width=140),
+            )
+            self.assertEqual(checked.count(SOURCE), 1)
+            self.assertEqual(len(checked), 3)
+            self.assertEqual(len(run.policies()), 3)
+            self.assertEqual(len(list((run.path / "exports").glob("*.py"))), 3)
+            self.assertEqual(agent.completed, 2)
+            self.assertEqual(agent.repair_calls, 1)
+            self.assertIn("Action outside action_space", provider.calls[-1])
+            self.assertIn("Repairing", output.getvalue())
+            self.assertEqual(agent._pending, {})
+
+    async def test_syntax_and_runtime_share_budget_and_infrastructure_takes_priority(self):
+        broken = Program(name="Broken", description="Broken Python.", implementation=SOURCE + "}")
+        provider = ScriptedProvider([broken, program(9)])
+        agent = AlphaEvolve("task", provider, config=Config(max_repairs=1))
+        policy = (await agent.generate())[0]
+        with self.assertRaisesRegex(InvalidCandidate, "exhausted after 1"):
+            await agent.repair(policy, "Action outside action_space")
+        self.assertEqual(len(provider.calls), 2)
+        sandbox = FakeSandbox()
+
+        async def evaluate(implementation, environment, seed, call_timeout):
+            if seed == 0:
+                raise PolicyError("bad policy")
+            await asyncio.sleep(0)
+            raise InfrastructureError("Docker stopped")
+
+        sandbox.evaluate.side_effect = evaluate
+        with gym.make("CartPole-v1") as env:
+            with self.assertRaisesRegex(InfrastructureError, "Docker stopped"):
+                async for _ in Executor(sandbox=sandbox, concurrency=2).evaluate(
+                    [(policy.id, policy._implementation, seed) for seed in (0, 1)], env
+                ):
+                    pass
+
+
+if __name__ == "__main__":
+    unittest.main()

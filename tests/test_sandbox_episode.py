@@ -236,6 +236,68 @@ class SandboxEpisodeSmoke(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(len(list((run.path / "exports").glob("*.py"))), 2)
         self.assertEqual(len(provider.calls), 2)
 
+    async def test_repairs_syntax_and_constructor_failures_through_real_docker(self):
+        import io
+
+        from rich.console import Console
+        from slick import prompts
+
+        import rsikit.alphaevolve as alphaevolve
+        from examples.alphaevolve import run_search
+        from rsikit import Executor, Run
+        from rsikit.alphaevolve import AlphaEvolve
+        from rsikit.alphaevolve.edits import Program
+        from tests.providers import ScriptedProvider
+
+        broken = """from rsikit import Policy
+class Solution(Policy):
+    def __init__(self, observation_space, action_space, instructions):
+        super().__init__(observation_space, action_space, instructions)
+    async def act(self, observation):
+        return 0
+"""
+        fixed = """from rsikit import Policy
+class Solution(Policy):
+    async def act(self, observation):
+        return 0
+"""
+        provider = ScriptedProvider(
+            [
+                Program(name="Malformed", description="Baseline.", implementation=broken + "}"),
+                Program(name="Constructor error", description="Baseline.", implementation=broken),
+                Program(
+                    name="Repaired", description="Inherit the constructor.", implementation=fixed
+                ),
+            ]
+        )
+        with (
+            tempfile.TemporaryDirectory() as directory,
+            gym.make("CartPole-v1", max_episode_steps=5) as env,
+            patch.object(prompts, "TEMPLATE_ROOT", Path(alphaevolve.__file__).parent / "prompts"),
+            Run.create(
+                name="healing", path=Path(directory) / "run", environment=env, executor=Executor()
+            ) as run,
+        ):
+            generator = AlphaEvolve("Balance CartPole", provider)
+            output = io.StringIO()
+            await run_search(
+                generator,
+                run,
+                generations=1,
+                batch_size=1,
+                console=Console(file=output, force_terminal=False, width=120),
+            )
+            self.assertEqual(generator.repair_calls, 2)
+            self.assertEqual(generator.completed, 1)
+            self.assertEqual(generator.best.name, "Repaired")
+            self.assertEqual(run.scores(generator.best), {0: 5.0})
+            failed, repaired = run.policies()
+            self.assertEqual(run.scores(failed), {0: None})
+            self.assertEqual(repaired.id, generator.best.id)
+            self.assertIn("unmatched", provider.calls[1])
+            self.assertIn("positional arguments", provider.calls[2])
+            self.assertIn("Repairing proposal 1 (2/2)", (run.path / "run.log").read_text())
+
     async def test_inner_loop_demo_passes_generated_policies_to_run(self):
         import contextlib
         import io

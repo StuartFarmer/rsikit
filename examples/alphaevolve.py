@@ -25,7 +25,8 @@ from slick.providers import OpenRouterAPI
 
 import rsikit.alphaevolve as alphaevolve
 from rsikit import Executor, Run
-from rsikit.alphaevolve import AlphaEvolve
+from rsikit.alphaevolve import AlphaEvolve, Config
+from rsikit.episode import PolicyError
 
 
 class _ProgressHandler(RichHandler):
@@ -96,7 +97,20 @@ async def run_search(generator, run, *, generations, batch_size, console=None):
             for generation in range(generations):
                 logger.info("Generation %s/%s", generation + 1, generations)
                 policies = await generator.generate(n=batch_size)
-                scores = await run.evaluate(policies)
+                while True:
+                    try:
+                        scores = await run.evaluate(policies)
+                        break
+                    except PolicyError as exc:
+                        if not exc.failures or generator.config.max_repairs == 0:
+                            raise
+                        replacements = {}
+                        for policy in policies:
+                            if policy.id in exc.failures and policy.id not in replacements:
+                                replacements[policy.id] = await generator.repair(
+                                    policy, exc.failures[policy.id]
+                                )
+                        policies = [replacements.get(policy.id, policy) for policy in policies]
                 generator.update(scores)
                 _show_scores(policies, run, console)
                 logger.info("Best so far: %s", generator.best.name)
@@ -119,6 +133,7 @@ async def main():
     parser.add_argument("--model", default="openai/gpt-oss-120b:nitro")
     parser.add_argument("--generations", type=int, default=25)
     parser.add_argument("--batch-size", type=int, default=10)
+    parser.add_argument("--max-repairs", type=int, default=2)
     parser.add_argument("--concurrency", type=int, default=4)
     parser.add_argument("--max-steps", type=int, default=500)
     parser.add_argument("--output", type=Path)
@@ -135,6 +150,7 @@ async def main():
             f"Each surviving step earns 1 reward, up to {args.max_steps} steps."
         ),
         provider=OpenRouterAPI(model=args.model, max_output_tokens=8192, timeout=120),
+        config=Config(max_repairs=args.max_repairs),
     )
     executor = Executor(concurrency=args.concurrency)
     with (

@@ -145,6 +145,8 @@ evaluation, and exports Python automatically. Ten means new proposals per batch;
 the optimizer's retained archive is separate. Rich progress shows each policy's
 name and description as it is generated, then scores as evaluations finish.
 A score table closes each generation; `run.log` keeps messages and error details.
+Self-healing allows two model repairs per policy for malformed generation or sandbox
+policy failures (`--max-repairs` changes the limit). Successful scores are reused.
 
 ## Checks
 

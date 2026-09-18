@@ -14,7 +14,7 @@ from slick import prompts
 import examples.alphaevolve as example
 import rsikit.alphaevolve as alphaevolve
 from rsikit import Executor, Run
-from rsikit.alphaevolve import AlphaEvolve
+from rsikit.alphaevolve import AlphaEvolve, Config
 from rsikit.alphaevolve.edits import Program
 from rsikit.episode import PolicyError
 from tests.providers import ScriptedProvider
@@ -73,7 +73,7 @@ class ProgressTests(unittest.IsolatedAsyncioTestCase):
                 executor=Executor(sandbox=sandbox, concurrency=2),
             ) as run,
         ):
-            agent = AlphaEvolve("task", provider)
+            agent = AlphaEvolve("task", provider, config=Config(max_repairs=0))
             task = asyncio.create_task(
                 example.run_search(agent, run, generations=1, batch_size=2, console=console)
             )
