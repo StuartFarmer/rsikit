@@ -9,6 +9,7 @@ Evolve and evaluate class-based policies in
 - `Executor`: owns concurrency and timeouts, using a configurable sandbox.
 - `DockerSandbox`: runs a batch inside one container with independent evaluation processes.
 - `AlphaEvolve`: evolutionary search using Slick and Gymnasium feedback.
+- `ShinkaEvolve`: island archives, adaptive model selection, and diff/rewrite/crossover search.
 
 ```python
 from pathlib import Path
@@ -195,6 +196,23 @@ path. Open an MP4 with your video player (`open /path/to/video.mp4` on macOS).
 Ranking uses original mean scores and excludes policies with unfinished evaluations.
 Replay scores are stored separately, so previously cached scores cannot skip recording.
 
+## ShinkaEvolve
+
+The previous `main` implementation is now available in `shinkaevolve/`, using the
+same environments, Docker executor, Run storage, and video replay:
+
+```sh
+.venv/bin/python -B -m examples.shinkaevolve --env LunarLander-v3 --generations 10 --batch-size 25 --seeds 0 1 2 3 4
+.venv/bin/python -B -m examples.shinkaevolve --env BipedalWalker-v3 --generations 10 --batch-size 25 --seeds 0 1 2 3 4
+```
+
+Use the OpenRouter/Box2D setup above. The default model is
+`openai/gpt-oss-120b:nitro`; repeat `--model MODEL` for adaptive allocation across
+an ensemble. The CLI saves proposal ancestry, repair revisions, full island
+populations, migration, reflection, and model allocation history in SQLite.
+See [the ShinkaEvolve guide](docs/SHINKAEVOLVE.md) for mechanisms, optional novelty
+checks, the Python API, and analysis queries.
+
 ## Checks
 
 ```sh
@@ -208,5 +226,5 @@ Host and sandbox Python minor versions must match. The Dockerfile defaults to Py
 
 Docker checks skip explicitly when Docker or the worker image is unavailable.
 Examples and tests live at the repository root and are excluded from the library
-wheel (included in the source distribution). The core remains a Gymnasium episode runner. AlphaEvolve is a separate module
-that generates policies and updates its selection from Run's returned scores.
+wheel (included in the source distribution). The core remains a Gymnasium episode runner. AlphaEvolve and ShinkaEvolve are separate
+modules that generate policies and update selection from Run's returned scores.

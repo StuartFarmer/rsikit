@@ -246,6 +246,91 @@ class Solution(Policy):
                     self.assertEqual(agent.completed, 1)
                     self.assertEqual(agent._best.seed_scores, scores)
 
+    async def test_shinkaevolve_runs_all_presets_and_persists_islands(self):
+        import io
+        import math
+
+        from rich.console import Console
+        from slick import prompts
+        from sqlmodel import select
+
+        import shinkaevolve
+        from alphaevolve.edits import Program
+        from examples.alphaevolve import make_environment
+        from examples.shinkaevolve import run_search
+        from rsikit import Executor, Run
+        from shinkaevolve import Config, Evaluation, Generation, ShinkaEvolve
+        from tests.providers import ScriptedProvider
+
+        try:
+            import Box2D  # noqa: F401
+        except ImportError:
+            self.skipTest("Install the box2d extra to test Box2D environments")
+        implementation = """from rsikit import Policy
+class Solution(Policy):
+    async def act(self, observation):
+        return self.action_space.sample()
+"""
+        for name in ("CartPole-v1", "LunarLander-v3", "BipedalWalker-v3"):
+            with (
+                self.subTest(environment=name),
+                tempfile.TemporaryDirectory() as directory,
+                make_environment(name, max_steps=3) as environment,
+                patch.object(
+                    prompts, "TEMPLATE_ROOT", Path(shinkaevolve.__file__).parent / "prompts"
+                ),
+                Run.create(
+                    name="shinka-smoke",
+                    path=Path(directory) / "run",
+                    environment=environment,
+                    executor=Executor(concurrency=2),
+                ) as run,
+            ):
+                provider = ScriptedProvider(
+                    [
+                        Program(
+                            name="RandomPolicy",
+                            description="Sample a valid action.",
+                            implementation=implementation,
+                        ),
+                        Program(
+                            name="RandomPolicyV2",
+                            description="Sample another valid action.",
+                            implementation=implementation + "\n# second generation\n",
+                        ),
+                    ]
+                )
+                agent = ShinkaEvolve(
+                    "task",
+                    provider,
+                    context=environment.instructions,
+                    config=Config(islands=1, meta_interval=0, patch_types=(("full", 1),)),
+                )
+                await run_search(
+                    agent,
+                    run,
+                    generations=2,
+                    batch_size=1,
+                    seeds=(0, 1),
+                    console=Console(file=io.StringIO()),
+                )
+                self.assertEqual(len(run.policies()), 2)
+                self.assertTrue(
+                    all(
+                        math.isfinite(value)
+                        for policy in run.policies()
+                        for value in run.scores(policy).values()
+                    )
+                )
+                self.assertIn(name, provider.calls[0])
+                with run.database() as db:
+                    self.assertEqual(len(db.exec(select(Evaluation)).all()), 2)
+                    generations = db.exec(select(Generation)).all()
+                    self.assertTrue(
+                        all(row.complete and row.seeds == [0, 1] for row in generations)
+                    )
+                    self.assertEqual(len(generations[-1].islands[0]), 2)
+
     async def test_alphaevolve_uses_native_environments_and_isolated_evaluation(self):
         import io
 

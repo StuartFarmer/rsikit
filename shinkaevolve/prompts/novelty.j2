@@ -1,0 +1,13 @@
+Decide whether the proposed source is meaningfully different from its nearest
+archived program. Accept changes in algorithm, computation, or behavior; reject
+cosmetic renaming, formatting, and equivalent rewrites. Similar embeddings alone
+do not establish redundancy. Do not claim unmeasured performance improvements.
+
+Task: {{ instance.task }}
+Cosine similarity: {{ similarity }}
+<archived>{{ nearest.implementation }}</archived>
+<proposed>{{ implementation }}</proposed>
+
+# Output Format
+Return only JSON matching this schema, with a reason for the decision:
+{{ schema | tojson }}

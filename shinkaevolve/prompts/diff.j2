@@ -1,0 +1,11 @@
+Improve the first parent's program with targeted algorithmic changes informed by
+measured feedback and island inspirations. Correct errors from earlier proposals.
+{% include "context.j2" %}
+
+Choose a short name and a one-sentence description. Return exact edits. Each search
+must occur exactly once and fit inside one mutable region. Preserve indentation
+and newlines. Edits apply sequentially to the result of previous edits.
+
+# Output Format
+Return only JSON matching this schema, without Markdown fences:
+{{ schema | tojson }}

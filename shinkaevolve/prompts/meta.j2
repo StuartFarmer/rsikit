@@ -1,0 +1,17 @@
+Update the meta-scratchpad from these recent measured programs and failed attempts.
+Identify successful strategies, failure causes, and useful next experiments.
+Preserve still-useful earlier insights. Do not claim that untested ideas work.
+
+Task: {{ instance.task }}
+Objective: maximize mean cumulative episode reward.
+The evidence includes the initial program and parents of recent attempts, so
+compare each child's measurement against its parent and the initial baseline.
+Previous recommendations: {{ previous | tojson }}
+{% for candidate in recent %}
+{{ candidate | tojson }}
+{% endfor %}
+
+Return at most {{ instance.config.max_recommendations }} nonblank recommendations.
+# Output Format
+Return only JSON matching this schema:
+{{ schema | tojson }}
