@@ -83,6 +83,18 @@ bytes. Run saves them under `artifacts/<policy-id>/<seed>/`. It performs no rend
 Returned results contain only a score and artifact bytes; transport is limited to
 64 MiB per evaluation. Larger artifacts need a streaming transport later.
 
+For the AlphaEvolve example, record the best saved policies after closing the search:
+
+```sh
+.venv/bin/python -B -m examples.replay runs/YOUR_RUN --env LunarLander-v3 --top 3 --seeds 0 1 2
+```
+
+Specify the original environment and any original `--max-steps` override. Replay
+selects policies by mean stored score, excluding incomplete evaluations. It uses
+a fresh Run so cached scores do not suppress recording or change the original
+results. The command prints MP4 paths under the new Run's `artifacts/` directory.
+`--output` chooses a new directory. No model calls are made.
+
 ## Storage and resume
 
 Each run directory contains `run.sqlite`, exported policies under `exports/`, and

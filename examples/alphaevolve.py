@@ -65,12 +65,12 @@ TASKS = {
 }
 
 
-def make_environment(name, *, max_steps=None):
+def make_environment(name, *, max_steps=None, render_mode=None):
     options = {"continuous": True, "enable_wind": True} if name == "LunarLander-v3" else {}
     if max_steps is not None:
         options["max_episode_steps"] = max_steps
     # Keep instructions on a wrapper: Box2D's EzPickle reconstructs the base env.
-    env = gym.Wrapper(gym.make(name, **options))
+    env = gym.Wrapper(gym.make(name, render_mode=render_mode, **options))
     env.instructions = (
         f"{name}: {TASKS[name]}\n"
         f"Observation space: {env.observation_space}\nAction space: {env.action_space}\n"

@@ -479,6 +479,65 @@ class Solution(Policy):
                 self.assertEqual(run.scores(run.policies()[0]), {1: 5.0})
                 self.assertTrue(video.exists())
 
+    async def test_replay_records_best_completed_policy_without_changing_original_scores(self):
+        import io
+        from importlib.util import find_spec
+
+        from rich.console import Console
+
+        from examples.replay import record_best
+        from rsikit import Executor, Run
+        from rsikit.policy import _policy_class
+        from tests.test_run import RESPONSE, FakeSandbox
+
+        if find_spec("moviepy") is None or find_spec("pygame") is None:
+            self.skipTest("Install .[video] for video checks")
+        policies = [
+            _policy_class(name, RESPONSE["implementation"]) for name in ("Low", "Best", "Failed")
+        ]
+        sandbox = FakeSandbox()
+        sandbox.evaluate.side_effect = [(2.0, {}), (30.0, {}), PolicyError("bad policy")]
+        with tempfile.TemporaryDirectory() as directory:
+            original = Path(directory) / "original"
+            output = Path(directory) / "replay"
+            with (
+                gym.make("CartPole-v1", max_episode_steps=3) as env,
+                Run.create(
+                    name="search",
+                    path=original,
+                    environment=env,
+                    executor=Executor(sandbox=sandbox),
+                ) as source,
+            ):
+                with self.assertRaises(PolicyError):
+                    await source.evaluate(policies)
+            env = gym.wrappers.RecordVideo(
+                gym.make("CartPole-v1", max_episode_steps=3, render_mode="rgb_array"),
+                str(Path(directory) / "recordings"),
+                episode_trigger=lambda _: True,
+                disable_logger=True,
+            )
+            with env:
+                path = await record_best(
+                    original,
+                    env,
+                    top=1,
+                    seeds=[0],
+                    output=output,
+                    console=Console(file=io.StringIO()),
+                )
+            with (
+                gym.make("CartPole-v1", max_episode_steps=3) as env,
+                Run.open(original, environment=env) as source,
+                Run.open(path, environment=env) as replay,
+            ):
+                self.assertEqual([source.scores(p)[0] for p in policies], [2.0, 30.0, None])
+                self.assertEqual([p.id for p in replay.policies()], [policies[1].id])
+                self.assertEqual(replay.scores(policies[1]), {0: 3.0})
+                videos = list((path / "artifacts" / policies[1].id / "0").rglob("*.mp4"))
+                self.assertEqual(len(videos), 1)
+                self.assertGreater(videos[0].stat().st_size, 100)
+
     async def test_failure_deadline_and_cleanup(self):
         for body in ("raise RuntimeError('candidate failure')", "return object()", "os._exit(3)"):
             with self.assertRaises(PolicyError):

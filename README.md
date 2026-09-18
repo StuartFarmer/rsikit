@@ -168,6 +168,19 @@ action, reward, and termination instructions, used by both generation and execut
 The `box2d` extra builds `box2d-py` for Python 3.14; uv supplies SWIG during the build.
 A C++ compiler is required (on macOS, Xcode Command Line Tools).
 
+After a search finishes, record the three highest-scoring saved policies:
+
+```sh
+.venv/bin/python -B -m examples.replay runs/YOUR_RUN --env LunarLander-v3 --top 3 --seeds 0 1 2
+```
+
+Use `--env BipedalWalker-v3` for a walker run. Match any original `--max-steps`
+override. No API key or generation is needed. Gymnasium records fresh episodes in
+Docker; a separate video Run saves their scores and MP4 files and prints each file's
+path. Open an MP4 with your video player (`open /path/to/video.mp4` on macOS).
+Ranking uses original mean scores and excludes policies with unfinished evaluations.
+Replay scores are stored separately, so previously cached scores cannot skip recording.
+
 ## Checks
 
 ```sh
