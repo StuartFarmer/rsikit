@@ -39,7 +39,10 @@ with gym.make("CartPole-v1", max_episode_steps=500) as environment:
 
 `n=10` means ten new proposals in that generation, not a fixed archive size.
 The first batch is generated from the task. Later batches mutate or rewrite evaluated
-parents. Names come from the model. Generation is sequential and does not execute
+parents. Names come from the model. Environment instructions are static inputs
+supplied by the executor when it creates a policy. The model does not generate or
+configure them. Generated policies inherit the constructor and initialize their
+own state in `reset()`. Generation is sequential and does not execute
 policies, create files, or access Run. Every proposal in a batch sees the previous
 updates; selection changes only when you call `update`.
 

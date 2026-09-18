@@ -3,10 +3,13 @@ Task:
 
 Program interface:
 Return Python source defining a top-level Solution class inheriting rsikit.Policy.
-The constructor receives observation_space, action_space, and instructions.
-Implement async act(self, observation) returning a valid action. Optional async
-reset(self, *, seed=None) should call await super().reset(seed=seed) and clear
-policy state. Optional async close(self) releases resources.
+Inherit Policy.__init__; do not define an __init__ method. The executor supplies
+the environment's observation/action spaces and static instructions. Read them
+through self.observation_space, self.action_space, and self.instructions. Do not
+generate, replace, or assign these instructions.
+Implement async act(self, observation) returning a valid action. Initialize and
+clear policy-owned state in async reset(self, *, seed=None), calling
+await super().reset(seed=seed) first. Optional async close(self) releases resources.
 The policy cannot access the environment or its reward calculation. Its state
 persists for one episode. The standard Docker worker provides Python, NumPy,
 and Gymnasium, with no network or host files. Do not add an executable main block.

@@ -8,10 +8,14 @@ Initial proposal {{ proposal }}: try a distinct approach to this task.
 
 Implement a complete Python module defining Solution(Policy), importing
 Policy from rsikit. Implement async act(self, observation) returning an action
-inside the environment's action space. The inherited constructor receives
-observation_space, action_space, and instructions. The inherited async reset(seed=...)
-seeds self.rng and self.action_space. Call await super().reset(seed=seed) if overriding
-reset, and clear any episode memory. Optional async close(self) releases resources.
+inside the environment's action space. Inherit Policy.__init__; do not define an
+__init__ method. The executor supplies the environment's observation/action spaces
+and static instructions. Read them through self.observation_space, self.action_space,
+and self.instructions. Do not generate, replace, or assign these instructions.
+
+Initialize and clear policy-owned state in async reset(self, *, seed=None), calling
+await super().reset(seed=seed) first. The inherited reset seeds self.rng and
+self.action_space. Optional async close(self) releases resources.
 
 The worker provides Python, NumPy, Gymnasium, and rsikit.Policy. It has no
 network, credentials, or host files. Do not call an LLM, create an environment,
