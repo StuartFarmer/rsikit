@@ -41,14 +41,16 @@ class ProgressTests(unittest.IsolatedAsyncioTestCase):
         )
         acall = provider.acall
         calls = 0
+        generation_started, generation_release = asyncio.Event(), asyncio.Event()
 
         async def generate(*args, **kwargs):
             nonlocal calls
             calls += 1
+            response = await acall(*args, **kwargs)
             if calls == 2:
-                self.assertIn("First [bold]", output.getvalue())
-                self.assertIn("Push left as a baseline.", output.getvalue())
-            return await acall(*args, **kwargs)
+                generation_started.set()
+                await generation_release.wait()
+            return response
 
         provider.acall = generate
         sandbox = FakeSandbox()
@@ -78,6 +80,15 @@ class ProgressTests(unittest.IsolatedAsyncioTestCase):
                 example.run_search(agent, run, generations=1, batch_size=2, console=console)
             )
             try:
+                await asyncio.wait_for(generation_started.wait(), 2)
+                for _ in range(100):
+                    if "Push left as a baseline." in output.getvalue():
+                        break
+                    await asyncio.sleep(0.01)
+                self.assertIn("First [bold]", output.getvalue())
+                self.assertIn("Push left as a baseline.", output.getvalue())
+                self.assertFalse(task.done())
+                generation_release.set()
                 await asyncio.wait_for(second_started.wait(), 2)
                 for _ in range(100):
                     if "score=7" in output.getvalue():
@@ -86,6 +97,7 @@ class ProgressTests(unittest.IsolatedAsyncioTestCase):
                 self.assertIn("score=7", output.getvalue())
                 self.assertFalse(task.done())
             finally:
+                generation_release.set()
                 release.set()
                 with self.assertRaises(PolicyError):
                     await task

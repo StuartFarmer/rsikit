@@ -78,7 +78,7 @@ class AlphaEvolve:
     """Generate policies in memory; update selection from Run's measured scores.
 
     Configure Slick's template root once before use. A batch sees only previous
-    updates. Generation is sequential, with bounded diagnostic-driven repair and no evaluation.
+    updates. Proposals run concurrently, with bounded repair and no evaluation.
     """
 
     def __init__(
@@ -219,16 +219,33 @@ class AlphaEvolve:
     ) -> str:
         return generated.instruction
 
-    async def generate(self, n: int = 1) -> list[type[Policy]]:
+    async def generate(self, n: int = 1, *, concurrency: int = 4) -> list[type[Policy]]:
         """Return n valid proposals, repairing rejected model output within the budget.
 
         Proposals are neither executed nor saved. Only a successfully returned
         batch is eligible for update; rejected output stays in attempts.
+        Each concurrency slot includes its proposal's repairs. Results retain
+        proposal order; failure or cancellation cancels unfinished siblings.
         """
-        logger.info("Generating %s policies", n, extra={"event": "generation_started", "total": n})
-        records = []
-        for _ in range(n):
-            records.append(await self._propose())
+        logger.info(
+            "Generating %s policies (concurrency=%s)",
+            n,
+            concurrency,
+            extra={"event": "generation_started", "total": n},
+        )
+        slots = asyncio.Semaphore(concurrency)
+
+        async def propose():
+            async with slots:
+                return await self._propose()
+
+        tasks = [asyncio.create_task(propose()) for _ in range(n)]
+        try:
+            records = await asyncio.gather(*tasks)
+        finally:
+            for task in tasks:
+                task.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
         for record in records:
             self._pending.setdefault(record["policy"].id, []).append(record)
         return [record["policy"] for record in records]

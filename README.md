@@ -135,7 +135,7 @@ Build the Docker worker above before running the search. The example uses
 
 ```python
 for generation in range(25):
-    policies = await generator.generate(n=10)
+    policies = await generator.generate(n=10, concurrency=4)
     scores = await run.evaluate(policies)
     generator.update(scores)
 ```
@@ -147,6 +147,9 @@ name and description as it is generated, then scores as evaluations finish.
 A score table closes each generation; `run.log` keeps messages and error details.
 Self-healing allows two model repairs per policy for malformed generation or sandbox
 policy failures (`--max-repairs` changes the limit). Successful scores are reused.
+Generation runs four proposals concurrently by default, including their repair calls.
+Use `--generation-concurrency` to change this; `--concurrency` controls sandbox
+evaluation separately. Set generation concurrency to 1 for sequential requests.
 
 ## Checks
 

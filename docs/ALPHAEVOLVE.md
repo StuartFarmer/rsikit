@@ -31,7 +31,7 @@ executor = Executor(concurrency=4)
 with gym.make("CartPole-v1", max_episode_steps=500) as environment:
     with Run.create(name="cartpole", environment=environment, executor=executor) as run:
         for generation in range(25):
-            policies = await generator.generate(n=10)
+            policies = await generator.generate(n=10, concurrency=4)
             scores = await run.evaluate(policies)
             generator.update(scores)
         print(generator.best.name)
@@ -42,9 +42,18 @@ The first batch is generated from the task. Later batches mutate or rewrite eval
 parents. Names and one-sentence approach descriptions come from the model. Environment instructions are static inputs
 supplied by the executor when it creates a policy. The model does not generate or
 configure them. Generated policies inherit the constructor and initialize their
-own state in `reset()`. Generation is sequential and does not execute
+own state in `reset()`. Generation runs up to four proposals concurrently and does not execute
 policies, create files, or access Run. Every proposal in a batch sees the previous
 updates; selection changes only when you call `update`.
+
+`generate(n=10, concurrency=4)` limits concurrent proposal chains, including their
+repair and optional guidance calls. Use `concurrency=1` for sequential generation.
+Names and descriptions are logged as proposals finish; the returned list preserves
+proposal order. On failure or cancellation, unfinished siblings are cancelled and
+awaited; a partial batch does not enter pending optimizer state. With optional meta
+guidance enabled, response timing
+can affect which guidance later proposals use. Keep the generate/evaluate/update
+loop sequential so every generation uses the previous generation's measured scores.
 
 `evaluate` is the first persistence boundary: it stores and exports the requested
 policies before dispatch so interruptions can be resumed, then saves scores and
@@ -157,6 +166,9 @@ The default makes 25 generations of 10 proposals using
 ```sh
 .venv/bin/python -B -m examples.alphaevolve --generations 2 --batch-size 3 --max-steps 100
 ```
+
+`--generation-concurrency` controls concurrent proposals (default 4).
+`--concurrency` separately controls sandbox evaluations (default 4).
 
 Run automatically exports every evaluated policy under `exports/` and stores scores
 in SQLite. No explicit policy-file writes are needed.

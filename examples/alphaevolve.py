@@ -71,7 +71,9 @@ def _show_scores(policies, run, console):
     console.print(table)
 
 
-async def run_search(generator, run, *, generations, batch_size, console=None):
+async def run_search(
+    generator, run, *, generations, batch_size, generation_concurrency=4, console=None
+):
     """Display completed policies immediately and keep the same messages in run.log."""
     console = console or Console()
     logger = logging.getLogger("rsikit")
@@ -96,7 +98,9 @@ async def run_search(generator, run, *, generations, batch_size, console=None):
             logger.info("Run: %s", run.path)
             for generation in range(generations):
                 logger.info("Generation %s/%s", generation + 1, generations)
-                policies = await generator.generate(n=batch_size)
+                policies = await generator.generate(
+                    n=batch_size, concurrency=generation_concurrency
+                )
                 while True:
                     try:
                         scores = await run.evaluate(policies)
@@ -134,7 +138,15 @@ async def main():
     parser.add_argument("--generations", type=int, default=25)
     parser.add_argument("--batch-size", type=int, default=10)
     parser.add_argument("--max-repairs", type=int, default=2)
-    parser.add_argument("--concurrency", type=int, default=4)
+    parser.add_argument(
+        "--generation-concurrency",
+        type=int,
+        default=4,
+        help="Concurrent policy proposals (default: 4)",
+    )
+    parser.add_argument(
+        "--concurrency", type=int, default=4, help="Concurrent sandbox evaluations (default: 4)"
+    )
     parser.add_argument("--max-steps", type=int, default=500)
     parser.add_argument("--output", type=Path)
     args = parser.parse_args()
@@ -161,7 +173,11 @@ async def main():
     ):
         try:
             await run_search(
-                generator, run, generations=args.generations, batch_size=args.batch_size
+                generator,
+                run,
+                generations=args.generations,
+                batch_size=args.batch_size,
+                generation_concurrency=args.generation_concurrency,
             )
         except Exception:
             # run_search has already displayed and saved the traceback.

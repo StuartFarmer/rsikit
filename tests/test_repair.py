@@ -35,7 +35,7 @@ class RepairTests(unittest.IsolatedAsyncioTestCase):
         broken = Program(name="Broken", description="A baseline.", implementation=SOURCE + "}\n")
         provider = ScriptedProvider([broken, "not json", program(0), program(1)])
         agent = AlphaEvolve("task", provider)
-        policies = await agent.generate(n=2)
+        policies = await agent.generate(n=2, concurrency=1)
         self.assertEqual([p.name for p in policies], ["Policy 0", "Policy 1"])
         self.assertEqual((agent.generation_calls, agent.repair_calls), (2, 2))
         self.assertIn("unmatched", provider.calls[1])

@@ -204,6 +204,97 @@ class AlphaEvolveTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(agent.attempts[-1]["status"], "rejected")
         self.assertEqual(agent._pending, {})
 
+    async def test_concurrent_generation_bounds_calls_and_keeps_repairs_with_proposal(self):
+        broken = program(0).model_copy(update={"implementation": SOURCE + "}"})
+        provider = ScriptedProvider([broken, program(1), program(2), program(0)])
+        acall = provider.acall
+        started = [asyncio.Event() for _ in range(4)]
+        release = [asyncio.Event() for _ in range(4)]
+        active = peak = calls = 0
+
+        async def delayed(*args, **kwargs):
+            nonlocal active, peak, calls
+            index = calls
+            calls += 1
+            response = await acall(*args, **kwargs)
+            active += 1
+            peak = max(peak, active)
+            started[index].set()
+            try:
+                await release[index].wait()
+                return response
+            finally:
+                active -= 1
+
+        provider.acall = delayed
+        agent = AlphaEvolve("task", provider)
+        with self.assertLogs("rsikit", level="INFO") as logs:
+            async with asyncio.timeout(2):
+                task = asyncio.create_task(agent.generate(n=3, concurrency=2))
+                try:
+                    await started[1].wait()
+                    self.assertFalse(started[2].is_set())
+                    release[1].set()
+                    await started[2].wait()
+                    self.assertTrue(any("Policy 1" in line for line in logs.output))
+                    self.assertEqual(agent._pending, {})
+                    release[0].set()
+                    await started[3].wait()  # First proposal repairs while third generates.
+                    release[3].set()
+                    release[2].set()
+                    policies = await task
+                finally:
+                    task.cancel()
+                    await asyncio.gather(task, return_exceptions=True)
+        self.assertEqual([p.name for p in policies], ["Policy 0", "Policy 1", "Policy 2"])
+        self.assertEqual((peak, active, agent.generation_calls, agent.repair_calls), (2, 0, 3, 1))
+        self.assertEqual([len(row.get("repairs", [])) for row in agent.attempts], [1, 0, 0])
+        self.assertEqual(len(agent._pending), 3)
+
+    async def test_concurrent_failure_and_cancellation_reap_siblings(self):
+        for cancel in (False, True):
+            with self.subTest(cancel=cancel):
+                provider = ScriptedProvider([])
+                started, fail = asyncio.Event(), asyncio.Event()
+                calls = active = 0
+
+                async def blocked(*args, **kwargs):
+                    nonlocal active, calls
+                    calls += 1
+                    index = calls
+                    active += 1
+                    if calls == 2:
+                        started.set()
+                    try:
+                        if index == 1:
+                            await fail.wait()
+                            raise ProviderError("offline")
+                        await asyncio.Event().wait()
+                    finally:
+                        active -= 1
+
+                provider.acall = blocked
+                agent = AlphaEvolve("task", provider)
+                async with asyncio.timeout(2):
+                    task = asyncio.create_task(agent.generate(n=5, concurrency=2))
+                    try:
+                        await started.wait()
+                        if cancel:
+                            task.cancel()
+                        else:
+                            fail.set()
+                        with self.assertRaises(asyncio.CancelledError if cancel else ProviderError):
+                            await task
+                    finally:
+                        task.cancel()
+                        await asyncio.gather(task, return_exceptions=True)
+                self.assertEqual(active, 0)
+                self.assertEqual(agent._pending, {})
+                self.assertTrue(all(row["status"] != "generating" for row in agent.attempts))
+                finished_calls = calls
+                await asyncio.sleep(0)
+                self.assertEqual(calls, finished_calls)
+
     async def test_initial_generation_rejects_unbalanced_evolution_markers(self):
         invalid = Program(
             description="Test policy approach.",
