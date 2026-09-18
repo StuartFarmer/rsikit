@@ -23,11 +23,12 @@ from rich.table import Table
 from rich.text import Text
 from slick import prompts
 from slick.providers import OpenRouterAPI
+from sqlalchemy import inspect
 from sqlmodel import func, select
 
 import alphaevolve
 from alphaevolve import improved, original
-from alphaevolve.history import Evaluation, Generation, save_history
+from alphaevolve.history import Generation, history_records
 from rsikit import Executor, Run
 from rsikit.episode import PolicyError
 
@@ -130,8 +131,10 @@ async def run_search(
     """Display completed policies immediately and keep the same messages in run.log."""
     seeds = tuple(seeds)
     console = console or Console()
-    with run.database(Evaluation, Generation) as db:
-        first_generation = (db.exec(select(func.max(Generation.number))).one() or 0) + 1
+    first_generation = 1
+    with run.database() as db:
+        if inspect(db.bind).has_table(Generation.__tablename__):
+            first_generation = (db.exec(select(func.max(Generation.number))).one() or 0) + 1
     logger = logging.getLogger("rsikit")
     loggers = (logger, logging.getLogger("alphaevolve"))
     old_settings = [(item.level, item.propagate) for item in loggers]
@@ -171,7 +174,7 @@ async def run_search(
                     )
                     scores = {}
                     while policies:
-                        save_history(run, generator, **history, failures=failures)
+                        run.save(*history_records(generator, **history, failures=failures))
                         try:
                             scores = await run.evaluate(policies, seeds=seeds)
                             failures = {}
@@ -180,7 +183,7 @@ async def run_search(
                             if not exc.failures:
                                 raise
                             failures = exc.failures
-                            save_history(run, generator, **history, failures=failures)
+                            run.save(*history_records(generator, **history, failures=failures))
                             replacements = {}
                             for policy in policies:
                                 if policy.id in exc.failures and policy.id not in replacements:
@@ -205,7 +208,9 @@ async def run_search(
                     )
                     complete = True
                 finally:
-                    save_history(run, generator, **history, complete=complete, failures=failures)
+                    run.save(
+                        *history_records(generator, **history, complete=complete, failures=failures)
+                    )
                 _show_scores(policies, run, console)
                 if not policies:
                     logger.warning("No surviving policies in this generation; continuing")

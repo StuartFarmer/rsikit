@@ -126,16 +126,29 @@ class Run:
             self._engine.dispose()
         self._lock.close()
 
-    def database(self, *models: type[SQLModel]) -> Session:
-        """Open this Run's SQLite database, creating only the requested tables.
+    def save(self, *records: SQLModel) -> None:
+        """Save typed records together, inferring and creating their tables.
 
-        Returns a native SQLModel Session. Callers own their record schemas
-        and commit their transactions explicitly.
-        Use no model arguments to query tables that already exist.
+        Primary keys identify records to update. Database-generated primary keys
+        are copied back onto the supplied objects after a successful commit.
         """
         if self._lock.closed:
             raise RuntimeError("Run is closed")
-        SQLModel.metadata.create_all(self._engine, tables=[model.__table__ for model in models])
+        tables = list(dict.fromkeys(record.__table__ for record in records))
+        SQLModel.metadata.create_all(self._engine, tables=tables)
+        with Session(self._engine, expire_on_commit=False) as db:
+            saved = [db.merge(record) for record in records]
+            db.commit()
+            for record, stored in zip(records, saved):
+                mapper = inspect(record).mapper
+                for column in mapper.primary_key:
+                    key = mapper.get_property_by_column(column).key
+                    setattr(record, key, getattr(stored, key))
+
+    def database(self) -> Session:
+        """Open a native SQLModel session for queries against this Run's SQLite database."""
+        if self._lock.closed:
+            raise RuntimeError("Run is closed")
         return Session(self._engine)
 
     def _export(self, policy: _StoredPolicy) -> None:

@@ -125,11 +125,12 @@ moving or copying the directory.
 
 ## Optimizer-defined records
 
-An optimizer can define ordinary `SQLModel` table classes and save them into the
-same database. `Run.database(*models)` opens this Run's SQLite database, creates only the named
-tables, and returns a native SQLModel `Session`. The caller commits writes; leaving the session without
-committing rolls back its uncommitted work. Calling `run.database()` opens existing
-tables for queries. Sessions must close before the Run closes.
+An optimizer defines ordinary `SQLModel` table classes. Pass instances directly to
+`run.save(record)` or save a group with `run.save(*records)`. Run infers the tables
+from the records, creates missing tables, and commits the group in one transaction.
+Saving an existing primary key updates that record. Generated primary keys are
+copied back to the supplied objects, so saving the same object again updates it.
+If a write fails, the group's record changes are rolled back.
 
 ```python
 from sqlmodel import Field, SQLModel, select
@@ -143,13 +144,17 @@ class SearchEvaluation(SQLModel, table=True):
     strategy: str
 
 
-with run.database(SearchEvaluation) as db:
-    db.add(SearchEvaluation(attempt=1, policy_id=policy.id, score=score, strategy="mutate"))
-    db.commit()
+evaluation = SearchEvaluation(attempt=1, policy_id=policy.id, score=score, strategy="mutate")
+run.save(evaluation)
 
+# Native SQLModel queries remain available for analysis.
 with run.database() as db:
     evaluations = db.exec(select(SearchEvaluation).order_by(SearchEvaluation.attempt)).all()
 ```
+
+`run.database()` opens a native SQLModel session for querying existing tables. It
+takes no model arguments and does not create tables. Close query sessions before
+closing the Run.
 
 Schemas belong to the optimizer, including table names, fields, and any future
 schema migrations. RSIKit does not interpret them. Keep optimizer table names

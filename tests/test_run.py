@@ -12,6 +12,7 @@ from unittest.mock import AsyncMock, patch
 
 import gymnasium as gym
 from slick import prompts
+from sqlalchemy.exc import IntegrityError
 from sqlmodel import Field, SQLModel, select
 
 import rsikit.generation as generation
@@ -56,13 +57,19 @@ class RunTests(unittest.IsolatedAsyncioTestCase):
     def reopen(self, path=None):
         return Run.open(path or self.path, environment=self.env, executor=self.executor)
 
-    async def test_optimizer_owned_models_share_the_database_and_native_transactions(self):
+    async def test_save_infers_tables_upserts_and_commits_atomically(self):
         class CustomEvaluation(SQLModel, table=True):
             __tablename__ = "test_custom_evaluation"
-            policy_id: str = Field(primary_key=True)
+            id: int | None = Field(default=None, primary_key=True)
+            policy_id: str
             score: float
+
+        class Marker(SQLModel, table=True):
+            __tablename__ = "test_marker"
+            name: str = Field(primary_key=True)
             label: str
 
+        evaluation = CustomEvaluation(policy_id=self.policy.id, score=7)
         with self.create() as run:
             with closing(sqlite3.connect(self.path / "run.sqlite")) as db:
                 names = {
@@ -70,19 +77,25 @@ class RunTests(unittest.IsolatedAsyncioTestCase):
                     for row in db.execute("SELECT name FROM sqlite_master WHERE type='table'")
                 }
                 self.assertNotIn("test_custom_evaluation", names)
-            with run.database(CustomEvaluation) as session:
-                session.add(CustomEvaluation(policy_id=self.policy.id, score=7, label="baseline"))
-                session.commit()
-            with run.database() as session:
-                session.add(CustomEvaluation(policy_id="uncommitted", score=0, label="ignored"))
-        with self.reopen() as run, run.database() as session:
-            rows = session.exec(select(CustomEvaluation)).all()
-            self.assertEqual(
-                [(row.policy_id, row.score, row.label) for row in rows],
-                [(self.policy.id, 7, "baseline")],
-            )
+                self.assertNotIn("test_marker", names)
+            run.save(evaluation, Marker(name="one", label="baseline"))
+            self.assertIsNotNone(evaluation.id)
+            evaluation.score = 8
+            run.save(evaluation)
+            run.save(CustomEvaluation(id=evaluation.id, policy_id=self.policy.id, score=9))
+            with self.assertRaises(IntegrityError):
+                run.save(
+                    CustomEvaluation(id=evaluation.id, policy_id=self.policy.id, score=99),
+                    Marker(name="invalid", label=None),
+                )
+        with self.reopen() as run, run.database() as db:
+            rows = db.exec(select(CustomEvaluation)).all()
+            self.assertEqual([(row.policy_id, row.score) for row in rows], [(self.policy.id, 9)])
+            self.assertEqual([row.label for row in db.exec(select(Marker))], ["baseline"])
         with self.assertRaisesRegex(RuntimeError, "closed"):
-            run.database(CustomEvaluation)
+            run.save(evaluation)
+        with self.assertRaisesRegex(RuntimeError, "closed"):
+            run.database()
 
     async def test_policy_scores_exports_and_reuse(self):
         self.assertTrue(issubclass(self.policy, Policy))

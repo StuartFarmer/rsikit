@@ -3,8 +3,6 @@
 from sqlalchemy import JSON, Column
 from sqlmodel import Field, SQLModel
 
-from rsikit import Run
-
 
 class Evaluation(SQLModel, table=True):
     """One proposed policy version, including failed and unevaluated proposals."""
@@ -34,8 +32,7 @@ class Generation(SQLModel, table=True):
     resets: list[dict] = Field(default_factory=list, sa_column=Column(JSON))
 
 
-def save_history(
-    run: Run,
+def history_records(
     generator,
     *,
     generation: int,
@@ -44,46 +41,46 @@ def save_history(
     seeds,
     complete: bool = False,
     failures: dict[str, str] | None = None,
-) -> None:
-    """Commit the current batch and archive together, retaining old repair versions."""
+) -> list[SQLModel]:
+    """Build typed records for the current batch and archive without writing storage."""
     failures = failures or {}
-    with run.database(Evaluation, Generation) as db:
-        for record in generator.attempts[attempt_start:]:
-            policy, parent = record.get("policy"), record.get("parent")
-            policy_id = None if policy is None else policy.id
-            diagnostic = failures.get(policy_id)
-            status = record["status"]
-            if diagnostic and status != "discarded":
-                status = "failed"
-            db.merge(
-                Evaluation(
-                    generation=generation,
-                    attempt=record["id"],
-                    revision=record.get("revision", 0),
-                    island=record.get("island"),
-                    policy_id=policy_id,
-                    parent_id=None if parent is None else parent.policy.id,
-                    status=status,
-                    score=record.get("score"),
-                    repairs=len(record.get("repairs", [])),
-                    error=record.get("error") or diagnostic,
-                )
-            )
-        db.merge(
-            Generation(
-                number=generation,
-                optimizer=type(generator).__module__,
-                complete=complete,
-                seeds=list(seeds),
-                islands=[
-                    {
-                        "island": i,
-                        "policy_id": None if champion is None else champion.policy.id,
-                        "score": None if champion is None else champion.score,
-                    }
-                    for i, champion in enumerate(generator.islands)
-                ],
-                resets=generator.events[event_start:],
+    records = []
+    for record in generator.attempts[attempt_start:]:
+        policy, parent = record.get("policy"), record.get("parent")
+        policy_id = None if policy is None else policy.id
+        diagnostic = failures.get(policy_id)
+        status = record["status"]
+        if diagnostic and status != "discarded":
+            status = "failed"
+        records.append(
+            Evaluation(
+                generation=generation,
+                attempt=record["id"],
+                revision=record.get("revision", 0),
+                island=record.get("island"),
+                policy_id=policy_id,
+                parent_id=None if parent is None else parent.policy.id,
+                status=status,
+                score=record.get("score"),
+                repairs=len(record.get("repairs", [])),
+                error=record.get("error") or diagnostic,
             )
         )
-        db.commit()
+    records.append(
+        Generation(
+            number=generation,
+            optimizer=type(generator).__module__,
+            complete=complete,
+            seeds=list(seeds),
+            islands=[
+                {
+                    "island": i,
+                    "policy_id": None if champion is None else champion.policy.id,
+                    "score": None if champion is None else champion.score,
+                }
+                for i, champion in enumerate(generator.islands)
+            ],
+            resets=generator.events[event_start:],
+        )
+    )
+    return records

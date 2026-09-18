@@ -54,7 +54,8 @@ Both CLI variants save optimizer-owned records in the Run's existing `run.sqlite
   island, founder policy, and the evaluated-attempt count at the reset.
 
 These SQLModel classes live in `alphaevolve/history.py`. The core only supplies
-`run.database(...)`; another optimizer can supply its own tables and fields.
+`run.save(*records)`, which infers each record's table; another optimizer can
+supply its own SQLModel records and fields.
 Individual episode scores remain in the existing `policy.scores` column. Join by
 policy ID instead of relying on generated names, which can repeat.
 
