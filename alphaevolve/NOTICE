@@ -26,3 +26,11 @@ The improved variant preserves changes from commit 8a6bc96: independent island
 founders instead of copying the best initial program to every island, plus
 per-seed rewards as prompt feedback. Both are local adaptations; neither is
 Google DeepMind's internal AlphaEvolve agent.
+
+The paper variant independently implements the mechanisms described in sections
+2.1-2.6 of https://arxiv.org/abs/2506.13131 . Its persistent per-metric/per-niche
+archive, rank sampling, descriptor discretization and member migration are local
+algorithm choices because those details are not specified by the paper. It reuses
+the local generation and repair machinery, with structured JSON diffs rather than
+the paper's textual SEARCH/REPLACE envelope. See docs/ALPHAEVOLVE.md for coverage
+and experimental differences; no reproduced paper or BipedalWalker score is claimed.

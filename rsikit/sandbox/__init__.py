@@ -110,13 +110,8 @@ class SandboxPolicy(Policy):
         except (ValueError, TypeError, RecursionError) as exc:
             raise InfrastructureError(f"Cannot encode sandbox request: {exc}") from exc
 
-        async def exchange():
-            self.process.stdin.write(payload)
-            await self.process.stdin.drain()
-            return await self.process.stdout.readline()
-
         try:
-            response = loads(await asyncio.wait_for(exchange(), self.call_timeout))
+            response = loads(await asyncio.wait_for(self._exchange(payload), self.call_timeout))
             if not isinstance(response, dict):
                 raise ValueError("Malformed supervisor response")
             if set(response) == {"error"} and isinstance(response["error"], str):
@@ -137,6 +132,11 @@ class SandboxPolicy(Policy):
         except (OSError, ValueError, UnicodeError, RecursionError) as exc:
             self.ready = False
             raise InfrastructureError(f"Sandbox protocol failed: {exc}") from exc
+
+    async def _exchange(self, payload):
+        self.process.stdin.write(payload)
+        await self.process.stdin.drain()
+        return await self.process.stdout.readline()
 
     async def act(self, observation):
         try:

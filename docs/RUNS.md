@@ -9,7 +9,7 @@ from rsikit import DockerSandbox, Executor, Run
 
 executor = Executor(sandbox=DockerSandbox(), concurrency=4, call_timeout=10)
 with gym.make("CartPole-v1", max_episode_steps=500) as environment:
-    with Run.create(name="comparison", environment=environment, executor=executor) as run:
+    async with Run.create(name="comparison", environment=environment, executor=executor) as run:
         scores = await run.evaluate(policies)
         print(scores)  # {policy_id: score}
 ```
@@ -40,12 +40,26 @@ are also supported. Host and sandbox Python minor versions must match.
 
 ## Executor and sandbox
 
-`Executor(concurrency=4, call_timeout=10, sandbox=DockerSandbox())` starts **one Docker
-container for a batch**, then launches up to four evaluation processes inside it.
+With `async with Run.create(...)` or `async with Run.open(...)`,
+`Executor(concurrency=4, call_timeout=10, sandbox=DockerSandbox())` lazily starts
+**one Docker container for the run**, then launches up to four evaluation processes inside it.
 Each process owns its environment and launches the generated agent in a separate
 process. Observation/action communication stays inside the container. Completed
-scores and artifacts stream back to Run. The container is removed when the batch
-finishes or is cancelled. Fully cached evaluations start no container.
+scores and artifacts stream back to Run. The same container serves later batches,
+generations, policy repairs and held-out evaluations. It is removed when the async
+Run context exits, including after model failures or interruption. Fully cached
+runs start no container. All example CLIs use this persistent lifecycle.
+
+Infrastructure failures or cancelled evaluations invalidate and remove the container;
+an explicit retry starts a fresh one. Candidate errors and policy timeouts leave the
+container available for repaired policies. Each episode still uses fresh evaluation
+and policy processes, and actions still cross the internal process boundary.
+
+Direct executor users can use `async with Executor(...)`. `await run.aclose()` or
+`await executor.aclose()` explicitly closes asynchronous resources. The older
+synchronous `with Run(...)` API remains compatible, with per-batch sandbox cleanup;
+use the async context for persistent evaluation. Synchronous `run.close()` releases
+storage only and is not a replacement for async cleanup.
 
 `call_timeout` bounds each agent lifecycle call. Native environment code remains
 responsible for its own step behavior. Cancellation waits for worker and sandbox
@@ -111,7 +125,7 @@ and scores remain intact. There are no episode metrics, optimizer checkpoints, o
 stored environment objects.
 
 ```python
-with Run.open("runs/YOUR_RUN", environment=environment, executor=executor) as run:
+async with Run.open("runs/YOUR_RUN", environment=environment, executor=executor) as run:
     await run.resume()
 ```
 

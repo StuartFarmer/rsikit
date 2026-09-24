@@ -1,12 +1,209 @@
 # AlphaEvolve
 
-AlphaEvolve generates named `Policy` classes in memory. `Run` evaluates and stores
-them. Scores go back to AlphaEvolve to guide the next batch. Slick handles model
-calls and Pydantic validates generated responses; there is no slick-bits dependency.
+The default `alphaevolve.paper` implementation uses a persistent MAP-Elites/island
+population, multiple maximized metrics, evaluation feedback, and overlapping
+generation/evaluation. `Run` executes policies in the existing sandbox. Slick
+handles model calls and Pydantic validates generated responses.
+
+## Paper implementation
+
+This independently implements the mechanisms in
+[AlphaEvolve, sections 2.1–2.6](https://arxiv.org/html/2506.13131v1#S2).
+It is not DeepMind's unpublished implementation, and passing the software tests
+does not reproduce the paper's performance results.
+
+| Paper section | Implementation |
+| --- | --- |
+| 2.1 Task specification | Evaluated initial policies, explicit task/context, protected evolution regions |
+| 2.2 Prompt sampling | Population-derived parents/inspirations, probabilistic prompt variants, rendered evaluation output, persistent scored meta-prompt pool |
+| 2.3 Generation | Weighted provider ensemble, exact sequential edits, optional full rewrites |
+| 2.4 Evaluation | Multiple maximized metrics, threshold cascades, optional LLM feedback, parallel isolated Gym episodes |
+| 2.5 Evolution | Persistent evaluated-program database; metric-specific elites within descriptor cells on each island |
+| 2.6 Pipeline | Bounded asynchronous generation workers overlapping batched evaluation |
+
+Section 2.5 describes the combination of MAP-Elites and islands without publishing
+the exact archive, selection, or migration algorithms. The following are **local,
+explicit choices**, not hyperparameters recovered from the paper:
+
+- Each island retains the winner of every metric in every descriptor bin. A
+  candidate can remain a parent despite a lower primary score. Ties preserve the
+  incumbent. The global primary-score best is retained separately.
+- Choose an occupied island uniformly. With probability `exploration` (0.3),
+  sample uniformly from its retained members. Otherwise choose a metric uniformly
+  and sample with descending rank weights from the top `elite_fraction` (0.2).
+  Thus increasing this fraction **broadens the eligible exploitation pool**.
+- Sample inspirations across islands, prioritizing different descriptor bins.
+- Every `migration_interval` (100) accepted proposals, attempt `migration_count`
+  (1) member transfers. A transfer only replaces target cells it improves; it
+  never erases an island's whole population.
+- AST-equivalent source, including renamed or comment-only copies, shares the
+  first canonical evaluation. This is syntactic deduplication, not proof of
+  behavioral equivalence. Differently written controllers may behave identically.
+- Descriptor bounds/bin counts are supplied by the task. Out-of-range finite
+  values clamp to edge bins. Empty descriptor configuration gives one niche per
+  metric; configure descriptors for meaningful diversity.
+
+The Gym example uses mean reward, worst-seed reward, and negative reward standard
+deviation as maximized metrics. Its descriptors are mean reward and reward
+standard deviation. These are **performance niches, not gait descriptors**. The
+default ranges are local choices; use multiple seeds to measure variability:
+
+| Environment | Mean reward `(low, high, bins)` | Reward standard deviation |
+| --- | --- | --- |
+| CartPole | `(0, 500, 20)` | `(0, 250, 10)` |
+| LunarLander | `(-500, 350, 34)` | `(0, 500, 10)` |
+| BipedalWalker | `(-200, 350, 22)` | `(0, 200, 10)` |
+
+```sh
+.venv/bin/python -B -m examples.alphaevolve --env BipedalWalker-v3 --seeds 0 1 2 3 4 5 6 7 8 9
+```
+
+`paper` is the default variant. BipedalWalker defaults to complete rewrites;
+other environments default to diffs. `--mode diff` or `--mode rewrite` overrides
+the choice. Every generated or repaired program must define exactly one top-level
+`Solution` class. This prevents a later class from silently replacing the intended
+controller; it does not prove that all statements affect the returned action.
+
+`--generations * --batch-size` is the proposal budget for this pipeline, not a
+generation barrier. The first batch seeds selection; subsequent generation and
+evaluation overlap with bounded pending work. `--generation-concurrency` controls
+both model proposals and concurrent runtime repairs, sharing one limit;
+`--concurrency` controls sandbox episode workers. Independent failed policies are
+repaired concurrently in all variants, with each policy retaining its repair
+budget. Duplicate policies share one repair, and cancellation or provider failure
+cancels and drains sibling repairs before saving the final search state.
+`--batch-size` also limits evaluation batches. Timing can affect search order.
+
+`--search-config config.json` supplies `paper.Config` fields, for example:
+
+```json
+{
+  "islands": 8,
+  "exploration": 0.4,
+  "elite_fraction": 0.3,
+  "migration_interval": 200,
+  "migration_count": 1,
+  "meta_interval": 25,
+  "features": {
+    "mean_reward": [-200, 350, 22],
+    "reward_std": [0, 200, 10]
+  }
+}
+```
+
+The Gym adapter supports those two descriptors. Custom evaluators can supply other
+numeric descriptors through the Python API. Migration does not inject fresh
+founders; no promise is made that these settings escape a particular plateau.
+
+The primary `--model` has weight 1. Add `--ensemble MODEL WEIGHT` repeatedly for
+other providers. These model choices are experimental inputs; the default
+OpenRouter model does not recreate the paper's Gemini ensemble. Optional
+`--initial-policy path.py` evaluates that policy before seeding the archive.
+Optional `--screening-seeds 0 1 --screening-min-reward -100` rejects candidates
+below that mean reward before evaluating the full seed set. Screening scores are
+cached but rejected/partial evaluations never enter the breeding archive.
+
+## Paper Python API
+
+### Resume a paper run
+
+```sh
+.venv/bin/python -B -m examples.alphaevolve --resume runs/YOUR_RUN --generations 25
+```
+
+This continues in the same directory from `population.sqlite`, loading the resolved
+configuration, environment, models, screening settings and evaluation seeds from
+`experiment.json`. The original config file and initial-policy source are not
+needed or replayed. Existing history and logs are appended; `experiment.json`
+remains unchanged.
+
+`--generations` specifies **additional** work, multiplied by the saved batch size.
+Without that override, the saved generation count is used. You may also override
+`--batch-size`, `--generation-concurrency`, and `--concurrency`. Changing task,
+model, evaluation, or search settings is rejected to avoid mixing experiments.
+Resume restores the last checkpoint's evaluated population, RNG and search
+counters; interrupted model calls and unevaluated proposals are not replayed.
+Runs made with `original` or `improved` have no optimizer checkpoint and cannot
+use this command. Finishing missing evaluations alone remains `Run.resume()`.
+
+### Use the optimizer directly
+
+Configure `slick.prompts.TEMPLATE_ROOT = Path(alphaevolve.__file__).parent` once.
+Supply measured results, keeping every metric's direction maximized:
+
+```python
+from alphaevolve.paper import AlphaEvolve, Config, EvaluationResult
+
+generator = AlphaEvolve(
+    "Walk forward without falling",
+    provider,
+    context=environment.instructions,
+    config=Config(features={"forward_distance": (0, 100, 20)}, mode="rewrite"),
+    database_path=run.path / "population.sqlite",
+)
+try:
+    policies = await generator.generate(n=10)
+    # The caller's isolated evaluator measures these values.
+    results = await evaluate_policies(policies)
+    generator.update_results(
+        {
+            policy.id: EvaluationResult(
+                metrics=results[policy.id].metrics,
+                features={"forward_distance": results[policy.id].distance},
+                feedback=results[policy.id].diagnostic,
+            )
+            for policy in policies
+        }
+    )
+finally:
+    generator.close()
+```
+
+`register_initial(policy, result)` seeds all islands with a caller-evaluated policy;
+pass `island=` for one island. `search(generator, evaluate_batch, proposals=...)`
+runs the overlapping controller, where `evaluate_batch` returns
+`{policy.id: EvaluationResult}`. It handles bounded policy repairs and propagates
+infrastructure/provider failures. Evaluators own isolation; the optimizer never
+executes source itself. The bundled source contract remains `Solution(Policy)`;
+other tasks can place their algorithms in that program and supply an evaluator.
+
+For optional staged evaluation and an actual model-based feedback grader:
+
+```python
+from alphaevolve.paper import EvaluationStage, LLMFeedback, evaluate_cascade
+
+result = await evaluate_cascade(
+    policy,
+    [EvaluationStage(smoke_test, {"validity": 1}), EvaluationStage(full_evaluation)],
+    feedback_evaluator=LLMFeedback(
+        feedback_provider,
+        {"simplicity": "Grade maintainability from 0 to 1; higher is simpler."},
+    ),
+)
+```
+
+Stage thresholds are minimum values. Later stages may replace earlier estimates;
+rejection stops the cascade. The grader may add named rubric metrics or reject a
+program, but cannot overwrite measured metric values. Model feedback is optional
+and incurs extra calls. Preserve the same complete metric and descriptor schemas
+for all accepted programs. Keep held-out evaluations out of training feedback.
+
+`population.sqlite` stores unique evaluated source, metrics, descriptors, outputs,
+lineage, cells, and optimizer checkpoints. Reopening with the same archive
+configuration and task/context restores selection, RNG, counters, recent failure
+context, and scored prompt ideas. The CLI also saves attempt/revision history and
+island member IDs to `run.sqlite`. Reopening the population does **not** resume
+in-flight model calls or unevaluated proposals, nor reproduce remote model output.
+The caller must retain the same evaluator and seed set. `Run.open` alone only
+opens evaluation storage; it does not create an optimizer. Full raw model responses
+remain in the current process's `attempts`, not a durable transcript; checkpoints
+retain only recent rejection excerpts needed for prompts.
+
+## Historical baselines
 
 The optimizer lives in the top-level `alphaevolve/` package, alongside `rsikit/`.
-RSIKit owns policies, execution, environments, and run storage. The two optimizer
-variants use that same core:
+RSIKit owns policies, execution, environments, and run storage. The two historical
+baseline variants use that same core:
 
 | Variant | Initial island population | Model feedback |
 | --- | --- | --- |
@@ -14,7 +211,7 @@ variants use that same core:
 | `alphaevolve.improved` | Separate founders; identical implementations cannot found multiple islands | Scalar score and per-seed rewards |
 
 `original` preserves the local behavior and prompts from commit `5ba5685`.
-`improved` preserves the changes introduced in `8a6bc96` and remains the CLI default.
+`improved` preserves the changes introduced in `8a6bc96`. Neither baseline is the CLI default.
 Generation, repair budgets, scalar ranking, and evaluation are shared. Each variant
 owns its mutation, rewrite, and search-guidance prompts; initialization and repair
 prompts are identical and inherited from the original. Configure the common template
@@ -45,7 +242,7 @@ costs or successful evaluation counts; repairs and longer feedback affect those.
 
 ## Stored experiment history
 
-Both CLI variants save optimizer-owned records in the Run's existing `run.sqlite`:
+All CLI variants save optimizer-owned records in the Run's existing `run.sqlite`:
 
 - `alphaevolve_evaluation`: generation, proposal attempt, policy revision, selected
   island slot, policy ID, parent ID, status, aggregate score, repair count, and error.
@@ -71,10 +268,15 @@ Discarded proposals may have no policy ID or score; they are included in history
 Provider failures and cancellation save the current generation as incomplete.
 A hard process kill can lose updates since the last committed boundary; it cannot
 create a completed-generation snapshot. Successfully saved episode scores remain
-available even when optimizer selection has not run. `complete` means the outer
+available even when optimizer selection has not run. For baselines, `complete` means the outer
 loop reached `update`, including generations with no surviving policies. Appending
 another `run_search` call starts after the last saved generation number. This does
-not restore optimizer state.
+not itself restore optimizer state. The paper pipeline assigns proposals to the
+snapshot group when first observed, with island snapshots at evaluated-batch
+boundaries. These are asynchronous history groups, not synchronized generations.
+Paper snapshots also include `member_count` and member IDs; the `resets` JSON
+contains migration events with `source`, `target`, and `policy_id` instead of
+baseline reset/donor events.
 
 For island curves, use generation snapshots: the original baseline broadcasts its
 initial proposals across all islands even though their proposal slot is 0. A slot
@@ -95,11 +297,12 @@ ORDER BY generation, island;
 
 Use `Evaluation` and `Generation` with `sqlmodel.select`, or query SQLite directly
 after the run. Historical runs made before this change have no island history to
-backfill reliably. Calling `generate`/`update` directly still writes nothing; the
-example's outer loop owns history persistence. Token usage and model costs are not
+backfill reliably. For baselines, calling `generate`/`update` directly writes nothing;
+the paper variant persists its archive on `update_results`. The example's outer
+loop owns attempt and snapshot history persistence. Token usage and model costs are not
 recorded by these tables.
 
-## Python API
+## Baseline Python API
 
 The following uses the improved version. Import `AlphaEvolve` from
 `alphaevolve.original` to use the baseline with the same loop. Both accept
@@ -132,7 +335,7 @@ executor = Executor(concurrency=4)
 
 # Inside an async function:
 with gym.make("CartPole-v1", max_episode_steps=500) as environment:
-    with Run.create(name="cartpole", environment=environment, executor=executor) as run:
+    async with Run.create(name="cartpole", environment=environment, executor=executor) as run:
         for generation in range(25):
             policies = await generator.generate(n=10, concurrency=4)
             scores = await run.evaluate(policies)
@@ -186,7 +389,7 @@ Pass one configured, serializable environment. The executor loads independent st
 for each evaluation process inside a shared Docker container. See [runs](RUNS.md)
 for recording, artifacts, lifecycle, and evaluation recovery.
 
-## Search behavior
+## Baseline search behavior
 
 `Config` controls island count (4), inspirations (3), exploration (0.2), island
 reset interval (100 evaluated proposals), optional meta-prompt interval (0 means
@@ -277,7 +480,7 @@ versions; it does not silently rewrite them.
 Repair diagnostics and progress appear in the terminal and `run.log`. The full raw
 repair responses and checks remain in the optimizer's in-memory `attempts` history.
 
-Optimizer state remains in memory. Reopening Run restores policies and evaluation
+For the two baselines, optimizer state remains in memory. Reopening Run restores policies and evaluation
 work; it does not restore the optimizer's pending proposals, RNG, or islands.
 
 ## Example
@@ -289,7 +492,7 @@ export OPENROUTER_API_KEY='your-key'
 .venv/bin/python -B -m examples.alphaevolve
 ```
 
-The default makes 25 generations of 10 proposals using
+The default attempts 250 proposals (`25 * 10`) using
 `openai/gpt-oss-120b:nitro`. For a short run (use `--max-repairs 0` to disable healing):
 
 ```sh

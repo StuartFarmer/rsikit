@@ -29,6 +29,7 @@ from alphaevolve.edits import (
     evolution_regions,
 )
 from rsikit import Policy
+from rsikit.generation import WORKER_LIBRARIES
 from rsikit.policy import _policy_class
 
 from .records import Evaluation, Generation
@@ -94,6 +95,8 @@ class _RecordedProvider:
 
 class ShinkaEvolve:
     """Generate Policy classes; learn selection only from externally measured rewards."""
+
+    libraries = WORKER_LIBRARIES
 
     def __init__(
         self,

@@ -2,6 +2,7 @@
 
 import ast
 import re
+from inspect import Parameter, Signature
 from typing import Annotated
 
 from pydantic import BaseModel, Field, StringConstraints
@@ -86,5 +87,53 @@ def check_program(source: str) -> None:
         tree = ast.parse(source)
     except (SyntaxError, ValueError) as exc:
         raise InvalidCandidate(f"Invalid Python: {exc}") from exc
-    if not any(isinstance(node, ast.ClassDef) and node.name == "Solution" for node in tree.body):
-        raise InvalidCandidate("Program must define a top-level Solution class")
+    solutions = [
+        node for node in tree.body if isinstance(node, ast.ClassDef) and node.name == "Solution"
+    ]
+    if len(solutions) != 1:
+        raise InvalidCandidate("Program must define exactly one top-level Solution class")
+    for method in reversed(solutions[0].body):
+        if (
+            not isinstance(method, (ast.FunctionDef, ast.AsyncFunctionDef))
+            or method.name != "__init__"
+        ):
+            continue
+        if isinstance(method, ast.AsyncFunctionDef):
+            raise InvalidCandidate(
+                "Solution.__init__ must be synchronous; initialize state in async reset"
+            )
+        args = method.args
+        positional = [*args.posonlyargs, *args.args]
+        required = len(positional) - len(args.defaults)
+        parameters = [
+            Parameter(
+                arg.arg,
+                Parameter.POSITIONAL_ONLY
+                if i < len(args.posonlyargs)
+                else Parameter.POSITIONAL_OR_KEYWORD,
+                default=Parameter.empty if i < required else None,
+            )
+            for i, arg in enumerate(positional)
+        ]
+        if args.vararg is not None:
+            parameters.append(Parameter(args.vararg.arg, Parameter.VAR_POSITIONAL))
+        parameters.extend(
+            Parameter(
+                arg.arg,
+                Parameter.KEYWORD_ONLY,
+                default=Parameter.empty if default is None else None,
+            )
+            for arg, default in zip(args.kwonlyargs, args.kw_defaults)
+        )
+        if args.kwarg is not None:
+            parameters.append(Parameter(args.kwarg.arg, Parameter.VAR_KEYWORD))
+        try:
+            # Bind the worker's actual call without evaluating any generated code or defaults.
+            Signature(parameters).bind(None, None, None, instructions="")
+        except (TypeError, ValueError) as exc:
+            raise InvalidCandidate(
+                "Solution.__init__ must accept (self, observation_space, action_space, *, "
+                "instructions=''). Prefer removing __init__ and initializing state in "
+                f"async reset after await super().reset(seed=seed). Signature mismatch: {exc}"
+            ) from exc
+        break  # Python uses the last definition of a method in the class body.

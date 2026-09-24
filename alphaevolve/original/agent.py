@@ -16,6 +16,7 @@ from pydantic import BaseModel, Field, ValidationError
 from slick import prompt
 from slick.providers import Provider, ProviderError
 
+from rsikit.generation import WORKER_LIBRARIES
 from rsikit.policy import Policy, _policy_class
 
 from ..edits import (
@@ -83,6 +84,8 @@ class AlphaEvolve:
     updates. Proposals run concurrently, with bounded repair and no evaluation.
     """
 
+    libraries = WORKER_LIBRARIES
+
     def __init__(
         self,
         task: str,
@@ -105,6 +108,8 @@ class AlphaEvolve:
         self.prompt_ideas = [PromptIdea("")]
         # ponytail: in-memory attempt history; bound it if searches exceed RAM.
         self.attempts: list[dict] = []
+        self._attempt_offset = 0
+        self._prior_failures: list[dict] = []
         self.events: list[dict] = []
         self.generation_calls = self.repair_calls = self.meta_calls = self.completed = 0
 
@@ -307,14 +312,17 @@ class AlphaEvolve:
         return island_id, parent, inspirations
 
     async def _propose(self) -> dict | None:
-        attempt_id = len(self.attempts) + 1
+        attempt_id = self._attempt_offset + len(self.attempts) + 1
         model_id = self.rng.choices(range(len(self.models)), [w for _, w in self.models])[0]
         provider = self.models[model_id][0]
-        failures = [
-            {key: row[key] for key in ("id", "raw", "error") if key in row}
-            for row in self.attempts
-            if row.get("error")
-        ][-3:]
+        failures = (
+            self._prior_failures
+            + [
+                {key: row[key] for key in ("id", "raw", "error") if key in row}
+                for row in self.attempts
+                if row.get("error")
+            ]
+        )[-3:]
         record = {"id": attempt_id, "model": model_id, "status": "generating"}
         self.attempts.append(record)
         try:

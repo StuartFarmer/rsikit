@@ -3,6 +3,7 @@
 import argparse
 import json
 import os
+from contextlib import AsyncExitStack
 from pathlib import Path
 from statistics import fmean
 from tempfile import TemporaryDirectory
@@ -33,16 +34,17 @@ async def run_demo(
     task = Environment(undefined=StrictUndefined).from_string(
         (Path(__file__).parent / "prompts/task.j2").read_text()
     )
-    with (
-        TemporaryDirectory() as video_folder,
-        make_environment(max_steps, video, video_folder) as environment,
-        Run.create(
-            name="cartpole-comparison",
-            environment=environment,
-            path=output,
-            executor=Executor(sandbox=DockerSandbox(), concurrency=concurrency),
-        ) as run,
-    ):
+    async with AsyncExitStack() as stack:
+        video_folder = stack.enter_context(TemporaryDirectory())
+        environment = stack.enter_context(make_environment(max_steps, video, video_folder))
+        run = await stack.enter_async_context(
+            Run.create(
+                name="cartpole-comparison",
+                environment=environment,
+                path=output,
+                executor=Executor(sandbox=DockerSandbox(), concurrency=concurrency),
+            )
+        )
         print(f"Run: {run.path}", flush=True)
         policies = []
         for index, approach in enumerate(APPROACHES, 1):
@@ -103,15 +105,18 @@ async def main():
     parser.add_argument("--concurrency", type=int, default=2)
     args = parser.parse_args()
     if args.resume:
-        with (
-            TemporaryDirectory() as video_folder,
-            make_environment(args.max_steps, args.video, video_folder) as environment,
-            Run.open(
-                args.resume,
-                environment=environment,
-                executor=Executor(sandbox=DockerSandbox(), concurrency=args.concurrency),
-            ) as run,
-        ):
+        async with AsyncExitStack() as stack:
+            video_folder = stack.enter_context(TemporaryDirectory())
+            environment = stack.enter_context(
+                make_environment(args.max_steps, args.video, video_folder)
+            )
+            run = await stack.enter_async_context(
+                Run.open(
+                    args.resume,
+                    environment=environment,
+                    executor=Executor(sandbox=DockerSandbox(), concurrency=args.concurrency),
+                )
+            )
             await run.resume()
             write_report(run)
         return

@@ -177,6 +177,16 @@ class SandboxEpisodeSmoke(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(cart[2] or cart[3])
         self.assertGreater(cart[4]["episode"]["l"], 1)
 
+    async def test_scientific_libraries_in_restricted_policy(self):
+        source = COUNTER_SOURCE.replace(
+            "        self.count = 0 if",
+            "        from rsikit.sandbox.check_libraries import check\n"
+            "        check()\n"
+            "        self.count = 0 if",
+        )
+        result = await self.run_source(source, timeout=10)
+        self.assertEqual(result[4]["episode"]["r"], 3.0)
+
     async def test_box2d_examples_preserve_instructions_and_evaluate_multiple_seeds(self):
         import importlib.util
         import io
@@ -667,7 +677,7 @@ class Solution(Policy):
                 max_steps=5,
             )
 
-    async def test_batch_shares_one_container_with_independent_environment_processes(self):
+    async def test_batches_share_one_container_with_independent_environment_processes(self):
         import json
 
         from slick import prompts
@@ -722,25 +732,35 @@ class Solution(Policy):
         with (
             tempfile.TemporaryDirectory() as directory,
             gym.wrappers.TimeLimit(Environment(), max_episode_steps=2) as env,
+            patch.object(sandbox, "start", wraps=sandbox.start) as start,
         ):
-            with (
-                patch.object(sandbox, "start", wraps=sandbox.start) as start,
-                Run.create(
-                    name="pool",
-                    path=Path(directory) / "run",
-                    environment=env,
-                    executor=Executor(sandbox=sandbox, concurrency=2),
-                ) as run,
-            ):
-                result = await run.evaluate([policy], seeds=[0, 1, 2, 3])
+            async with Run.create(
+                name="pool",
+                path=Path(directory) / "run",
+                environment=env,
+                executor=Executor(sandbox=sandbox, concurrency=2),
+            ) as run:
+                result = await run.evaluate([policy], seeds=[0, 1])
+                container = sandbox.name
+                self.assertIsNotNone(container)
+                result = await run.evaluate([policy], seeds=[2, 3])
                 self.assertEqual(result, {policy.id: 2.0})
+                self.assertEqual(sandbox.name, container)
                 start.assert_awaited_once_with(2)
                 workers = [p.read_text().split(":") for p in run.path.rglob("worker.txt")]
                 self.assertEqual(len(workers), 4)
                 self.assertEqual(len({host for host, pid in workers}), 1)
                 self.assertEqual(len({pid for host, pid in workers}), 4)
                 self.assertEqual(env.unwrapped.count, 0)
-                self.assertIsNone(sandbox.name)
+            self.assertIsNone(sandbox.name)
+            inspected = await asyncio.create_subprocess_exec(
+                "docker",
+                "inspect",
+                container,
+                stdout=asyncio.subprocess.DEVNULL,
+                stderr=asyncio.subprocess.DEVNULL,
+            )
+            self.assertNotEqual(await inspected.wait(), 0)
 
     async def test_batch_timeout_and_cancellation_remove_shared_container(self):
         from rsikit import DockerSandbox, Executor, Run
@@ -778,7 +798,7 @@ class Solution(Policy):
 
             async def delayed_create(*args, **kwargs):
                 process = await create_process(*args, **kwargs)
-                if args[:2] == ("docker", "exec"):
+                if args[:2] == ("docker", "run"):
                     processes.append(process)
                     started.set()
                     try:

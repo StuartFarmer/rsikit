@@ -5,6 +5,7 @@ import asyncio
 import json
 import logging
 import os
+from contextlib import AsyncExitStack
 from pathlib import Path
 
 from rich.console import Console
@@ -134,15 +135,16 @@ async def main():
     args.model = args.model or ["openai/gpt-oss-120b:nitro"]
     prompts.TEMPLATE_ROOT = Path(shinkaevolve.__file__).parent / "prompts"
     models = [OpenRouterAPI(model=name, max_output_tokens=8192, timeout=120) for name in args.model]
-    with (
-        make_environment(args.env, max_steps=args.max_steps) as environment,
-        Run.create(
-            name=f"{args.env.lower()}-shinkaevolve",
-            environment=environment,
-            executor=Executor(concurrency=args.concurrency),
-            path=args.output,
-        ) as run,
-    ):
+    async with AsyncExitStack() as stack:
+        environment = stack.enter_context(make_environment(args.env, max_steps=args.max_steps))
+        run = await stack.enter_async_context(
+            Run.create(
+                name=f"{args.env.lower()}-shinkaevolve",
+                environment=environment,
+                executor=Executor(concurrency=args.concurrency),
+                path=args.output,
+            )
+        )
         generator = ShinkaEvolve(
             task="Maximize cumulative episode reward in the described environment.",
             context=environment.instructions,

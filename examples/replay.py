@@ -35,7 +35,9 @@ async def record_best(
         name = f"{source.name}-videos"
         console.print(f"Source run: {source.path}", markup=False)
 
-    with Run.create(name=name, environment=environment, path=output, executor=executor) as replay:
+    async with Run.create(
+        name=name, environment=environment, path=output, executor=executor
+    ) as replay:
         console.print(f"Video run: {replay.path}", markup=False)
         scores = await replay.evaluate([policy for _, policy in selected], seeds=seeds)
         table = Table("Policy", "Original mean", "Replay mean")

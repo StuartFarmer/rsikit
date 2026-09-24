@@ -6,6 +6,7 @@ import json
 import os
 import signal
 import sys
+from contextlib import nullcontext
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
@@ -18,7 +19,31 @@ from rsikit.sandbox.codec import MAX_MESSAGE, loads
 
 
 class ProcessPolicy(SandboxPolicy):
+    def __init__(self, *args, channel=None, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.channel = channel
+        self.reader = self.writer = None
+
     async def reset(self, *, seed=None):
+        if self.channel is not None:
+            self.reader, self.writer = await asyncio.open_connection(
+                sock=self.channel, limit=MAX_MESSAGE + 1
+            )
+        else:
+            await self._start_process()
+        self.ready = True
+        await self._request(
+            {
+                "command": "start",
+                "source": self._implementation,
+                "observation_space": self.space_definitions[0],
+                "action_space": self.space_definitions[1],
+                "instructions": self.instructions,
+                "seed": seed,
+            }
+        )
+
+    async def _start_process(self):
         self.process = await asyncio.create_subprocess_exec(
             sys.executable,
             "-I",
@@ -33,20 +58,26 @@ class ProcessPolicy(SandboxPolicy):
         )
         if loads(await asyncio.wait_for(self.process.stdout.readline(), 60)) != {"ready": True}:
             raise InfrastructureError("Policy worker did not start")
-        self.ready = True
-        await self._request(
-            {
-                "command": "start",
-                "source": self._implementation,
-                "observation_space": self.space_definitions[0],
-                "action_space": self.space_definitions[1],
-                "instructions": self.instructions,
-                "seed": seed,
-            }
-        )
+
+    async def _exchange(self, payload):
+        if self.channel is None:
+            return await super()._exchange(payload)
+        self.writer.write(payload)
+        await self.writer.drain()
+        response = await self.reader.readline()
+        if not response:
+            raise PolicyError("Candidate exited without a response")
+        return response
 
     async def _destroy(self):
         self.ready = False
+        if self.channel is not None:
+            if self.writer is not None:
+                self.writer.transport.abort()
+                await self.writer.wait_closed()
+            else:
+                self.channel.close()
+            return
         if self.process is None:
             return
         process, self.process = self.process, None
@@ -58,12 +89,12 @@ class ProcessPolicy(SandboxPolicy):
         await process.wait()
 
 
-async def evaluate(request):
+async def evaluate(request, *, channel=None, directory=None):
     if request["python"] != list(sys.version_info[:2]):
         raise InfrastructureError(
             "Host and sandbox Python minor versions must match; rebuild with --build-arg PYTHON_VERSION=X.Y"
         )
-    with TemporaryDirectory() as directory:
+    with TemporaryDirectory() if directory is None else nullcontext(directory) as directory:
         os.chdir(directory)
         env = cloudpickle.loads(base64.b64decode(request["environment"], validate=True))
         # Only relocate output paths into this worker's filesystem; recording options stay on Gymnasium.
@@ -82,6 +113,7 @@ async def evaluate(request):
                 instructions=instructions,
                 source=request["implementation"],
                 call_timeout=request["call_timeout"],
+                channel=channel,
             )
 
         *_, info = await run_episode(
@@ -99,6 +131,33 @@ async def evaluate(request):
         }
 
 
+def error_result(exc):
+    kind = (
+        "timeout"
+        if isinstance(exc, PolicyTimeout)
+        else "policy"
+        if isinstance(exc, PolicyError)
+        else "infrastructure"
+    )
+    return {"kind": kind, "error": f"{type(exc).__name__}: {str(exc)[:2000]}"}
+
+
+def result_bytes(request, **kwargs):
+    try:
+        result = asyncio.run(evaluate(request, **kwargs))
+        data = json.dumps(result, allow_nan=False).encode()
+        if len(data) > 64 * 1024 * 1024:
+            raise ValueError("Evaluation artifacts exceed 64 MiB")
+        return data + b"\n"
+    except Exception as exc:
+        return json.dumps(error_result(exc)).encode() + b"\n"
+
+
+def run_evaluation(request, channel, output, directory):
+    with channel, output:
+        output.sendall(result_bytes(request, channel=channel, directory=directory))
+
+
 def main():
     # Environment prints and native library output must not corrupt the result channel.
     with os.fdopen(os.dup(1), "w") as output:
@@ -107,18 +166,8 @@ def main():
             raw = sys.stdin.buffer.read(64 * 1024 * 1024 + 1)
             if len(raw) > 64 * 1024 * 1024:
                 raise ValueError("Environment request exceeds 64 MiB")
-            result = asyncio.run(evaluate(json.loads(raw)))
-            data = json.dumps(result, allow_nan=False)
-            if len(data.encode()) > 64 * 1024 * 1024:
-                raise ValueError("Evaluation artifacts exceed 64 MiB")
+            data = result_bytes(json.loads(raw)).decode()
         except Exception as exc:
-            kind = (
-                "timeout"
-                if isinstance(exc, PolicyTimeout)
-                else "policy"
-                if isinstance(exc, PolicyError)
-                else "infrastructure"
-            )
-            data = json.dumps({"kind": kind, "error": f"{type(exc).__name__}: {exc}"})
-        output.write(data + "\n")
+            data = json.dumps(error_result(exc)) + "\n"
+        output.write(data)
         output.flush()

@@ -1,0 +1,63 @@
+{
+  "python": "3.14.2",
+  "platform": "macOS-26.4-arm64-arm-64bit-Mach-O",
+  "gymnasium": "1.3.0",
+  "decks": 6,
+  "hands_per_repeat": 100000,
+  "results": [
+    {
+      "environment": "finite_shoe",
+      "median_hands_per_second": 122726.42897242763,
+      "samples": [
+        {
+          "hands_per_second": 122726.42897242763,
+          "seconds": 0.8148204167373478,
+          "steps": 240242,
+          "resets": 2320,
+          "profit": -4079.0
+        },
+        {
+          "hands_per_second": 119716.02749592206,
+          "seconds": 0.8353100423701108,
+          "steps": 239530,
+          "resets": 2318,
+          "profit": -4366.0
+        },
+        {
+          "hands_per_second": 123648.22857993672,
+          "seconds": 0.8087459169328213,
+          "steps": 239883,
+          "resets": 2316,
+          "profit": -4678.5
+        }
+      ]
+    },
+    {
+      "environment": "gymnasium_blackjack_v1",
+      "median_hands_per_second": 31041.71534570493,
+      "samples": [
+        {
+          "hands_per_second": 31127.895148085983,
+          "seconds": 3.2125525842420757,
+          "steps": 162242,
+          "resets": 100000,
+          "profit": -7486.0
+        },
+        {
+          "hands_per_second": 31041.71534570493,
+          "seconds": 3.221471458207816,
+          "steps": 162472,
+          "resets": 100000,
+          "profit": -7871.0
+        },
+        {
+          "hands_per_second": 30903.76157360008,
+          "seconds": 3.2358520422130823,
+          "steps": 162728,
+          "resets": 100000,
+          "profit": -7832.0
+        }
+      ]
+    }
+  ]
+}

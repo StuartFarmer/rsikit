@@ -41,11 +41,12 @@ def history_records(
     seeds,
     complete: bool = False,
     failures: dict[str, str] | None = None,
+    attempts=None,
 ) -> list[SQLModel]:
     """Build typed records for the current batch and archive without writing storage."""
     failures = failures or {}
     records = []
-    for record in generator.attempts[attempt_start:]:
+    for record in generator.attempts[attempt_start:] if attempts is None else attempts:
         policy, parent = record.get("policy"), record.get("parent")
         policy_id = None if policy is None else policy.id
         diagnostic = failures.get(policy_id)
@@ -66,20 +67,25 @@ def history_records(
                 error=record.get("error") or diagnostic,
             )
         )
+    islands = []
+    for i, champion in enumerate(generator.islands):
+        island = {
+            "island": i,
+            "policy_id": None if champion is None else champion.policy.id,
+            "score": None if champion is None else champion.score,
+        }
+        if hasattr(generator, "database"):
+            members = generator.database.members(i)
+            island["members"] = [candidate.policy.id for candidate in members]
+            island["member_count"] = len(members)
+        islands.append(island)
     records.append(
         Generation(
             number=generation,
             optimizer=type(generator).__module__,
             complete=complete,
             seeds=list(seeds),
-            islands=[
-                {
-                    "island": i,
-                    "policy_id": None if champion is None else champion.policy.id,
-                    "score": None if champion is None else champion.score,
-                }
-                for i, champion in enumerate(generator.islands)
-            ],
+            islands=islands,
             resets=generator.events[event_start:],
         )
     )

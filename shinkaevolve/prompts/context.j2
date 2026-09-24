@@ -11,7 +11,9 @@ from rsikit. Inherit __init__; the executor provides observation_space, action_s
 and static instructions. Implement async act(self, observation), returning a valid
 action. Initialize policy state in async reset(self, *, seed=None), calling
 await super().reset(seed=seed). Do not generate or replace the task instructions.
-Python, NumPy, Gymnasium and rsikit.Policy are available in the worker. No network,
+{{ instance.libraries }}
+
+No network,
 credentials, host files, environment creation, LLM calls, or executable main block.
 
 The first parent supplies the skeleton that must be preserved.

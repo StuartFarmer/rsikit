@@ -17,7 +17,9 @@ Initialize and clear policy-owned state in async reset(self, *, seed=None), call
 await super().reset(seed=seed) first. The inherited reset seeds self.rng and
 self.action_space. Optional async close(self) releases resources.
 
-The worker provides Python, NumPy, Gymnasium, and rsikit.Policy. It has no
+{{ instance.libraries }}
+
+The worker has no
 network, credentials, or host files. Do not call an LLM, create an environment,
 or include an executable main block. The implementation must be Python code,
 without Markdown fences.

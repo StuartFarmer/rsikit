@@ -121,6 +121,23 @@ class Run:
     def __exit__(self, *exc):
         self.close()
 
+    async def __aenter__(self) -> "Run":
+        await self.executor.__aenter__()
+        return self
+
+    async def __aexit__(self, *exc):
+        try:
+            await self.executor.__aexit__(*exc)
+        finally:
+            self.close()
+
+    async def aclose(self) -> None:
+        """Close the persistent evaluation sandbox and release the run database."""
+        try:
+            await self.executor.aclose()
+        finally:
+            self.close()
+
     def close(self) -> None:
         if self._engine is not None:
             self._engine.dispose()

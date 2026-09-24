@@ -1,0 +1,48 @@
+{
+  "1": {
+    "ready": {
+      "ready": true,
+      "protocol": 1,
+      "supervisor_pid": 7,
+      "forkserver_pid": 9
+    },
+    "stats": {
+      "BlockIO": "0B / 0B",
+      "CPUPerc": "0.00%",
+      "Container": "rsikit-51b238f66eea4f22a5cd3a177e1b38b8",
+      "ID": "682be7f0eb1c",
+      "MemPerc": "7.23%",
+      "MemUsage": "74.07MiB / 1GiB",
+      "Name": "rsikit-51b238f66eea4f22a5cd3a177e1b38b8",
+      "NetIO": "0B / 0B",
+      "PIDs": "5"
+    },
+    "processes": "PID                 PPID                RSS                 COMMAND\n45763               45742               420                 docker-init\n45778               45763               51036               python\n45779               45778               17584               python\n45780               45778               50976               python\n"
+  },
+  "image_runtime": {
+    "python": "3.14.7 (main, Sep 19 2026, 01:05:36) [GCC 14.2.0]",
+    "numpy": "2.5.3",
+    "gymnasium": "1.3.0",
+    "cloudpickle": "3.1.2"
+  },
+  "4": {
+    "ready": {
+      "ready": true,
+      "protocol": 1,
+      "supervisor_pid": 7,
+      "forkserver_pid": 9
+    },
+    "stats": {
+      "BlockIO": "0B / 0B",
+      "CPUPerc": "0.00%",
+      "Container": "rsikit-e0b455c3f7a44882bc0c6945e20a9733",
+      "ID": "8fee41e5d01e",
+      "MemPerc": "1.82%",
+      "MemUsage": "74.5MiB / 4GiB",
+      "Name": "rsikit-e0b455c3f7a44882bc0c6945e20a9733",
+      "NetIO": "0B / 0B",
+      "PIDs": "5"
+    },
+    "processes": "PID                 PPID                RSS                 COMMAND\n45867               45844               420                 docker-init\n45880               45867               51028               python\n45881               45880               17592               python\n45882               45880               50988               python\n"
+  }
+}

@@ -1,0 +1,21 @@
+Decompose the solution space into exactly {{ instance.config.families }} distinct approach families.
+Task: {{ instance.task }}
+Constraints and executable interface: {{ instance.context }}
+{% include "policy.j2" %}
+
+Partition by substantive mechanisms, representations, or assumptions. Cover a broad range
+of plausible solutions. Parameter changes and renamed versions belong to the same family.
+LEVEL CONTRACT: this level contains mechanism families. Keep all siblings at that level,
+with distinct scopes and broad collective coverage. Concrete experimental approaches are
+planned separately beneath each elected family; policies are implemented only afterward.
+Each family receives exactly {{ instance.config.initial_per_family }} initial approaches.
+Name each family and describe its core mechanism clearly enough to generate experiments.
+No scores or confidence estimates: executable measurements will decide which approaches work.
+Latest failed partition and correction diagnostic: {{ failures | tojson }}
+When repairing, preserve usable families and correct only the reported defects.
+
+# Output Format
+Return only JSON matching {{ schema | tojson }}.
+The families array must contain exactly {{ instance.config.families }} entries.
+Each entry has exactly the keys name and mechanism. Keep each mechanism to one short
+sentence. Count the entries, complete the JSON object, then stop.

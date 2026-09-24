@@ -1,0 +1,26 @@
+{
+  "source": "https://community-api.coinmetrics.io/v4/timeseries/asset-metrics?assets=btc&metrics=PriceUSD&frequency=1d&start_time=2016-09-19&end_time=2026-09-18&page_size=10000&format=csv",
+  "provider": "Coin Metrics Community API, PriceUSD, frequency=1d",
+  "license": "https://creativecommons.org/licenses/by-nc/4.0/",
+  "attribution": "https://coinmetrics.io/; https://github.com/coinmetrics/data",
+  "downloaded_at": "2026-09-19T14:17:01.857540+00:00",
+  "as_of": "2026-09-19",
+  "source_sha256": "dfadd3030514f591925134f07d8423b97812c5977064856cfa85e881226b51d0",
+  "split": "Shared boundary price; no overlapping daily returns. Final day liquidates BTC.",
+  "files": [
+    {
+      "path": "rsikit/envs/data/bitcoin_train.csv",
+      "rows": 2557,
+      "start": "2016-09-19",
+      "end": "2023-09-19",
+      "sha256": "2825cfe512f0f1680453ce9db6b087449af80b45c048ddcf82b0e8c0e1109d21"
+    },
+    {
+      "path": "data/bitcoin/validation.csv",
+      "rows": 1096,
+      "start": "2023-09-19",
+      "end": "2026-09-18",
+      "sha256": "050476cdc691a6d67e37a5e9b344dec128751d76563384ca9ddb37a5f0907c4e"
+    }
+  ]
+}

@@ -134,6 +134,24 @@ class InnerLoopTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaisesRegex(InfrastructureError, "worker unavailable"):
             await self.run_counter(BackendFailure)
 
+    async def test_environment_invalid_action_is_a_policy_failure(self):
+        class MaskedEnv(CounterEnv):
+            def step(self, action):
+                raise gym.error.InvalidAction("Action masked in this state")
+
+        env = MaskedEnv()
+        with self.assertRaisesRegex(PolicyError, "Action masked") as caught:
+            await run_episode(lambda: env, CounterPolicy)
+        self.assertIsInstance(caught.exception.__cause__, gym.error.InvalidAction)
+        self.assertTrue(env.closed)
+
+        class BrokenEnv(CounterEnv):
+            def step(self, action):
+                raise ValueError("Broken environment calculation")
+
+        with self.assertRaisesRegex(ValueError, "Broken environment calculation"):
+            await run_episode(BrokenEnv, CounterPolicy)
+
     async def test_cancellation_closes_both_sides(self):
         env, policies = CounterEnv(), []
         started = asyncio.Event()

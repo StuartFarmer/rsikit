@@ -7,9 +7,10 @@ Evolve and evaluate class-based policies in
 - `generate`: returns a named `Policy` subclass from the LLM.
 - `Run`: stores policies, scores, and returned artifacts.
 - `Executor`: owns concurrency and timeouts, using a configurable sandbox.
-- `DockerSandbox`: runs a batch inside one container with independent evaluation processes.
+- `DockerSandbox`: reuses one container across a run, with independent evaluation processes.
 - `AlphaEvolve`: evolutionary search using Slick and Gymnasium feedback.
 - `ShinkaEvolve`: island archives, adaptive model selection, and diff/rewrite/crossover search.
+- `LineageSearch`: diverse approach families, measured refinement and pivots, and stagnation-based completion.
 
 ```python
 from pathlib import Path
@@ -31,9 +32,9 @@ policy = await generate(
     "velocity. Action 0 pushes left and 1 pushes right. Maximize surviving steps.",
     provider=provider,
 )
-executor = Executor(sandbox=DockerSandbox(), concurrency=4, call_timeout=10)
+executor = Executor(sandbox=DockerSandbox(episode_timeout=60), concurrency=4, call_timeout=10)
 with gym.make("CartPole-v1", max_episode_steps=500) as environment:
-    with Run.create(name="cartpole-comparison", environment=environment, executor=executor) as run:
+    async with Run.create(name="cartpole-comparison", environment=environment, executor=executor) as run:
         scores = await run.evaluate([policy], seeds=[0, 1, 2])
         print(policy.name, scores[policy.id])
         print(run.path)
@@ -44,6 +45,10 @@ run; there is no source/file argument to assemble. Automatic Python export is on
 by default (`export=False` disables it). Use `run.evaluate(policies)`
 for a group; it returns one mean score per policy ID. See [execution, runs, and recovery](docs/RUNS.md).
 
+Docker episodes default to a 60-second wall-clock limit per seed. Exceeding it
+raises a recoverable `PolicyTimeout` and terminates that episode's workers while
+other episodes continue. `call_timeout` separately limits each policy call.
+
 ## Setup
 
 ```sh
@@ -53,6 +58,12 @@ uv pip install --python .venv/bin/python -e '.[dev]'
 ```
 
 Runtime dependencies are Gymnasium, NumPy, Slick (`slick-ai`), Pydantic, SQLModel, cloudpickle, and Rich.
+
+The Docker worker additionally includes SciPy, python-control (`control`), CVXPY
+with OSQP/Clarabel/SCS, scikit-learn (`sklearn`), and CPU-only PyTorch (`torch`).
+All generators and repair prompts share scientific-library guidance. Image builds
+verify Riccati/LQR, convex solvers, regression and Torch autograd; installed versions
+are recorded in `/opt/worker/libraries.json`. Rebuild the image after dependency changes.
 No sibling checkout or `slick-bits` dependency is required.
 
 ## Isolated programs
@@ -69,6 +80,17 @@ processes. The lower-level `run_program` helper still keeps its environment on t
 
 See the [API guide](docs/INNER_LOOP.md) for task instructions, class contracts,
 results, and execution limits.
+
+For finite-shoe blackjack with betting and memory across hands, see the
+[blackjack environment](docs/BLACKJACK.md). Benchmark completed hands with
+`.venv/bin/python -m examples.blackjack --compare-gym`.
+Run a Blackjack test with automatic leader videos after each generation using
+`.venv/bin/python -m examples.blackjack_train --output runs/blackjack-test`.
+
+For daily BTC portfolio allocation with transaction fees and a seven-year training /
+three-year validation split, see the [Bitcoin environment](docs/BITCOIN.md).
+Use `--env Bitcoin` with the optimizer examples, or benchmark locally with
+`.venv/bin/python -m examples.bitcoin` (100,000 steps/second minimum).
 
 ## Generate and compare five policies with OpenRouter
 
@@ -131,21 +153,23 @@ uv pip install --python .venv/bin/python -e '.[openrouter]'
 .venv/bin/python -B -m examples.alphaevolve --generations 25 --batch-size 10
 ```
 
-Build the Docker worker above before running the search. The example uses
-`openai/gpt-oss-120b:nitro` and this loop:
+Build the Docker worker above before running the search. The default `paper`
+variant uses `openai/gpt-oss-120b:nitro` and overlaps generation with evaluation:
 
 ```python
-for generation in range(25):
-    policies = await generator.generate(n=10, concurrency=4)
-    scores = await run.evaluate(policies)
-    generator.update(scores, seed_scores={p.id: run.scores(p) for p in policies})
+from alphaevolve.paper import search
+
+# evaluate_batch returns policy.id -> EvaluationResult with metrics and descriptors.
+await search(generator, evaluate_batch, proposals=250, evaluation_batch_size=10)
 ```
 
-Generation writes nothing to disk. Run saves policies, scores, and artifacts during
-evaluation, and exports Python automatically. Ten means new proposals per batch;
-the optimizer's retained archive is separate. Rich progress shows each policy's
+Run saves policies, scores, and artifacts during evaluation, and exports Python
+automatically. The optimizer saves its population in `population.sqlite`, with
+metric-specific elites in descriptor bins on each island. Lower primary-score
+candidates remain available when they win another metric or niche. Ten limits the
+evaluation batch size; the retained population is separate. Rich progress shows each policy's
 name and description as it is generated, then scores as evaluations finish.
-A score table closes each generation; `run.log` keeps messages and error details.
+A score table follows each evaluation batch; `run.log` keeps messages and error details.
 Self-healing allows two model repairs per policy for malformed generation or sandbox
 policy failures (`--max-repairs` changes the limit). Successful scores are reused.
 An exhausted repair budget discards that policy; surviving policies and later
@@ -153,10 +177,21 @@ generations continue. A generation can return fewer policies than `--batch-size`
 Generation runs four proposals concurrently by default, including their repair calls.
 Use `--generation-concurrency` to change this; `--concurrency` controls sandbox
 evaluation separately. Set generation concurrency to 1 for sequential requests.
-The optimizer lives outside the core in `alphaevolve/original/` and
-`alphaevolve/improved/`. Select `--variant original` for the local scalar-feedback
-baseline or `--variant improved` (default) for independent founding and per-seed
-feedback. Run names include the variant and `experiment.json` saves CLI settings.
+The optimizer lives outside the core in `alphaevolve/paper/`. This independently
+implements the published mechanisms; the paper does not disclose exact database
+sampling/migration rules, so those choices are documented in the guide.
+Select `--variant original` for the historical scalar-feedback baseline or
+`--variant improved` for the historical independent-founding baseline.
+Run names include the variant and `experiment.json` saves resolved settings.
+Continue a `paper` run with its saved population and settings:
+
+```sh
+.venv/bin/python -B -m examples.alphaevolve --resume runs/YOUR_RUN --generations 25
+```
+
+This adds 25 batches using the saved batch size. Logs/history stay in the same
+directory. Interrupted proposals are not replayed; older baseline runs have no
+optimizer checkpoint. See [resume details](docs/ALPHAEVOLVE.md#resume-a-paper-run).
 See [the comparison setup](docs/ALPHAEVOLVE.md#comparing-the-variants).
 The CLI also saves per-proposal outcomes, ancestry, repair versions, and per-generation
 island champions and resets in SQLite. See [the history schema and island-curve query](docs/ALPHAEVOLVE.md#stored-experiment-history).
@@ -175,7 +210,9 @@ docker build -t rsikit-sandbox:local -f rsikit/sandbox/Dockerfile .
 .venv/bin/python -B -m examples.alphaevolve --env BipedalWalker-v3 --seeds 0 1 2
 ```
 
-Both default to 25 generations of 10 policies. Each command creates a separate run.
+Both default to a budget of 250 proposals. BipedalWalker uses full rewrites by
+default (`--mode diff` overrides). Duplicate top-level `Solution` definitions are
+rejected and repaired. Each command creates a separate run.
 The native time limits apply (1,000 steps for LunarLander, 1,600 for BipedalWalker);
 `--max-steps` overrides them. `--seeds` evaluates every policy on the same starting
 conditions and returns their mean score. The environment wrapper owns observation,
@@ -212,6 +249,50 @@ an ensemble. The CLI saves proposal ancestry, repair revisions, full island
 populations, migration, reflection, and model allocation history in SQLite.
 See [the ShinkaEvolve guide](docs/SHINKAEVOLVE.md) for mechanisms, optional novelty
 checks, the Python API, and analysis queries.
+
+## EliteSearch
+
+Keep a leaderboard of 10 elites and evaluate 50 new organisms per generation.
+Candidates are new ideas, focused edits of an elite, or remixes combining multiple
+elites. Only measured scores decide promotion; the top 10 from old elites plus
+newcomers survive. Generation and Docker evaluation overlap, with bounded repair
+and a Rich leaderboard.
+
+```sh
+.venv/bin/python -B -m examples.elitesearch --env BipedalWalker-v3 \
+  --elites 10 --population 50 --generations 20 \
+  --generation-concurrency 100 --concurrency 8 --max-repairs 5
+```
+
+See [the EliteSearch guide](docs/ELITESEARCH.md) for the operator mix, scoring,
+saved generations and Python API. This is independent of LineageSearch.
+
+## LineageSearch
+
+Generate broad approach families, evaluate their implementations, and expand promising
+parents within each family until all families stagnate or the attempt budget is spent.
+MAKER's typed taxonomy adaptation elects the families first, then all initial
+approaches beneath them, before any policy implementation. Rich displays the tree;
+`decomposition.json` saves it. `--decomposition-k 3` uses five competing partitions
+and requires a discriminator vote lead of three.
+Each family receives exploration time; additional batches favor strong scores and
+recent confirmed gains. `--cull-percent 90` keeps the top 10% globally across
+survivors plus newly scored candidates, then expands from those survivors again.
+Families with no survivors retire; culled candidates stay archived but cannot
+parent later trials.
+The optimizer records ancestry, hypotheses, failures, and
+completion reasons in the Run database.
+Malformed generations and failed policies receive up to two repair calls per
+policy (`--max-repairs` changes the limit). Rich progress shows generation,
+repairs, evaluation, family completion, and score tables; `run.log` retains the messages.
+
+```sh
+.venv/bin/python -B -m examples.lineagesearch --env CartPole-v1 --max-attempts 500
+```
+
+Use the OpenRouter and Docker setup above. Search uses seeds 0–4; the final incumbent
+is evaluated on separate seeds 100–104. See [the LineageSearch guide](docs/LINEAGESEARCH.md)
+for the API, selection rules, stagnation settings, and stored history.
 
 ## Checks
 

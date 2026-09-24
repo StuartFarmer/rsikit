@@ -15,6 +15,7 @@ from slick.providers import ProviderError
 from sqlmodel import select
 
 import alphaevolve
+from alphaevolve import improved, original, paper
 from alphaevolve.edits import Program
 from alphaevolve.history import Evaluation, Generation
 from alphaevolve.improved import AlphaEvolve, Config
@@ -33,6 +34,95 @@ class RepairTests(unittest.IsolatedAsyncioTestCase):
         root = patch.object(prompts, "TEMPLATE_ROOT", ROOT)
         root.start()
         self.addCleanup(root.stop)
+
+    async def test_runtime_repairs_overlap_within_generation_limit_for_all_variants(self):
+        for variant in (paper, original, improved):
+            with self.subTest(variant=variant.__name__), tempfile.TemporaryDirectory() as directory:
+                provider = ScriptedProvider([program(i) for i in (9, 8, 7, 9, 0, 1, 2)])
+                acall = provider.acall
+                started, release = asyncio.Event(), asyncio.Event()
+                active = peak = 0
+
+                async def respond(*args, **kwargs):
+                    nonlocal active, peak
+                    index = len(provider.calls)
+                    response = await acall(*args, **kwargs)
+                    if index < 4:
+                        return response
+                    active += 1
+                    peak = max(peak, active)
+                    if active == 2:
+                        started.set()
+                    try:
+                        await release.wait()
+                        return response
+                    finally:
+                        active -= 1
+
+                provider.acall = respond
+                agent = variant.AlphaEvolve("task", provider, config=variant.Config(islands=1))
+                if variant is paper:
+                    self.addCleanup(agent.close)
+                sandbox = FakeSandbox()
+
+                async def evaluate(source, environment, seed, timeout):
+                    if any(f"return {i}" in source for i in (9, 8, 7)):
+                        raise PolicyError("bad action")
+                    return 7.0, {}
+
+                sandbox.evaluate.side_effect = evaluate
+                with (
+                    gym.make("CartPole-v1") as env,
+                    Run.create(
+                        name="concurrent-repairs",
+                        path=Path(directory) / "run",
+                        environment=env,
+                        executor=Executor(sandbox=sandbox, concurrency=3),
+                    ) as run,
+                ):
+                    task = asyncio.create_task(
+                        run_search(
+                            agent,
+                            run,
+                            generations=1,
+                            batch_size=4,
+                            generation_concurrency=2,
+                            console=Console(file=io.StringIO()),
+                        )
+                    )
+                    try:
+                        await asyncio.wait_for(started.wait(), 1)
+                        self.assertEqual(len(provider.calls), 6)
+                        self.assertEqual(active, 2)
+                        release.set()
+                        await asyncio.wait_for(task, 2)
+                    finally:
+                        release.set()
+                        task.cancel()
+                        await asyncio.gather(task, return_exceptions=True)
+                    self.assertEqual((peak, active), (2, 0))
+                    self.assertEqual((agent.completed, agent.repair_calls), (4, 3))
+                    self.assertEqual(agent._pending, {})
+                    with run.database() as db:
+                        rows = db.exec(select(Evaluation)).all()
+                        self.assertEqual(
+                            sorted(row.status for row in rows), ["evaluated"] * 4 + ["failed"] * 4
+                        )
+
+    async def test_shadowed_solution_is_repaired_and_rechecked(self):
+        duplicate = program(0).model_copy(
+            update={"implementation": SOURCE + "\nclass Solution(Policy):\n    pass\n"}
+        )
+        still_duplicate = duplicate.model_copy(
+            update={"implementation": duplicate.implementation.replace("return 0", "return 1")}
+        )
+        provider = ScriptedProvider([duplicate, still_duplicate, program(2)])
+        agent = AlphaEvolve("task", provider, config=Config(max_repairs=2))
+        policies = await agent.generate()
+        self.assertEqual([p._implementation for p in policies], [program(2).implementation])
+        self.assertEqual(agent.repair_calls, 2)
+        self.assertIn("exactly one top-level Solution class", provider.calls[1])
+        self.assertIn("exactly one top-level Solution class", provider.calls[2])
 
     async def test_exhausted_proposal_does_not_cancel_concurrent_survivor(self):
         broken = program(0).model_copy(update={"implementation": SOURCE + "}"})

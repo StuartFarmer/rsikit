@@ -58,7 +58,7 @@ with make_environment("LunarLander-v3") as env:
         provider=provider,
         config=Config(islands=2),
     )
-    with Run.create(name="shinka-lander", environment=env, executor=Executor()) as run:
+    async with Run.create(name="shinka-lander", environment=env, executor=Executor()) as run:
         for _ in range(10):
             policies = await generator.generate(n=25, concurrency=4)
             scores = await run.evaluate(policies, seeds=[0, 1, 2])

@@ -87,9 +87,13 @@ pickle transport or fallback to local execution.
 
 ## Failures
 
-Exceptions propagate after cleanup. Invalid actions raise `PolicyError` before
-`env.step`; sandbox failures raise `PolicyError`, `PolicyTimeout`, or
-`InfrastructureError` from `rsikit.episode`. Environment and trusted-policy
+Exceptions propagate after cleanup. Actions outside `action_space` raise
+`PolicyError` before `env.step`. Environments should raise
+`gymnasium.error.InvalidAction` for state-dependent illegal actions; the runner
+converts this to `PolicyError` so optimizers can repair the candidate without
+stopping sibling evaluations. Other environment exceptions are not reclassified.
+Sandbox failures raise `PolicyError`, `PolicyTimeout`, or
+`InfrastructureError` from `rsikit.episode`. Other environment and trusted-policy
 exceptions retain their original types. Cancellation propagates. Secondary
 cleanup failures are logged without replacing the original failure.
 

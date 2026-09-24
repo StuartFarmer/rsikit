@@ -39,13 +39,42 @@ class Executor:
         self.concurrency = concurrency
         self.call_timeout = call_timeout
         self._busy = asyncio.Lock()
+        self._keep_alive = False
+        self._started = False
+        self._needs_cleanup = False
+
+    async def __aenter__(self):
+        self._keep_alive = True
+        return self
+
+    async def __aexit__(self, exc_type, exc, traceback):
+        try:
+            await self.aclose()
+        except Exception:
+            if exc is None:
+                raise
+            logging.getLogger(__name__).exception("Sandbox cleanup failed during shutdown")
+        finally:
+            self._keep_alive = False
+
+    async def aclose(self):
+        """Release the sandbox after all active evaluation work has finished."""
+        async with self._busy:
+            await self._close()
+
+    async def _close(self):
+        self._started = False
+        if self._needs_cleanup:
+            await self.sandbox.close()
+            self._needs_cleanup = False
+            logging.getLogger(__name__).info("Sandbox closed")
 
     async def evaluate(
         self,
         jobs: Iterable[tuple[str, str, int]],
         environment: gym.Env,
     ) -> AsyncIterator[tuple[str, int, Result]]:
-        """Yield completed (policy ID, seed, result) tuples from one sandbox per batch."""
+        """Yield episode results; an async context retains the sandbox between batches."""
         jobs = list(jobs)
         if not jobs:
             return
@@ -85,13 +114,17 @@ class Executor:
             policy_error = None
             failures = {}
             try:
-                logging.getLogger(__name__).info("Starting %s", type(self.sandbox).__name__)
-                starting = asyncio.create_task(self.sandbox.start(self.concurrency))
-                try:
-                    await asyncio.shield(starting)
-                except asyncio.CancelledError:
-                    await starting
-                    raise
+                if not self._started:
+                    await self._close()
+                    logging.getLogger(__name__).info("Starting %s", type(self.sandbox).__name__)
+                    self._needs_cleanup = True  # Failed/partial startup still requires cleanup.
+                    starting = asyncio.create_task(self.sandbox.start(self.concurrency))
+                    try:
+                        await asyncio.shield(starting)
+                    except asyncio.CancelledError:
+                        await starting
+                        raise
+                    self._started = True
                 tasks = [asyncio.create_task(evaluate(*job)) for job in jobs]
                 for task in asyncio.as_completed(tasks):
                     try:
@@ -120,8 +153,12 @@ class Executor:
                     task.cancel()
                 await asyncio.gather(*tasks, return_exceptions=True)
                 try:
-                    await self.sandbox.close()
-                    logging.getLogger(__name__).info("Sandbox closed")
+                    # An interrupted service connection can leave episode processes behind.
+                    # Keep the container only after normal completion or candidate failure.
+                    if not self._keep_alive or (
+                        primary is not None and not isinstance(primary, PolicyError)
+                    ):
+                        await self._close()
                 except Exception:
                     if primary is None:
                         raise

@@ -1,0 +1,30 @@
+{
+  "python": "3.14.2",
+  "platform": "macOS-26.4-arm64-arm-64bit-Mach-O",
+  "gymnasium": "1.3.0",
+  "numpy": "2.5.3",
+  "steps_per_repeat": 1000000,
+  "fee_rate": 0.001,
+  "scope": "In-process env.step, action selection, reward accumulation, and resets; excludes imports, CSV load, async runner, Docker, and model inference.",
+  "median_steps_per_second": 709982.3969045936,
+  "samples": [
+    {
+      "steps_per_second": 709982.3969045936,
+      "seconds": 1.4084856249392033,
+      "resets": 391,
+      "reward_sum": 14905076.744438555
+    },
+    {
+      "steps_per_second": 710711.7433975843,
+      "seconds": 1.407040209043771,
+      "resets": 391,
+      "reward_sum": 14905076.744438555
+    },
+    {
+      "steps_per_second": 706316.0726777297,
+      "seconds": 1.4157967497594655,
+      "resets": 391,
+      "reward_sum": 14905076.744438555
+    }
+  ]
+}

@@ -6,6 +6,7 @@ from collections.abc import Callable
 from copy import deepcopy
 
 import gymnasium as gym
+import numpy as np
 
 from .policy import Policy
 
@@ -67,7 +68,16 @@ async def run_episode(
                 valid = False
             if not valid:
                 raise PolicyError("Action outside action_space")
-            result = env.step(action)
+            # Discrete.contains accepts scalar arrays, but toy-text uses dict keys.
+            if isinstance(env.action_space, gym.spaces.Discrete):
+                action = int(action)
+            elif isinstance(env.action_space, gym.spaces.Box):
+                # Box.contains validates lists via a temporary array; pass that representation.
+                action = np.asarray(action, dtype=env.action_space.dtype)
+            try:
+                result = env.step(action)
+            except gym.error.InvalidAction as exc:
+                raise PolicyError(str(exc)) from exc
             observation, _, terminated, truncated, _ = result
             if terminated or truncated:
                 return result

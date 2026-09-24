@@ -57,6 +57,59 @@ class RunTests(unittest.IsolatedAsyncioTestCase):
     def reopen(self, path=None):
         return Run.open(path or self.path, environment=self.env, executor=self.executor)
 
+    async def test_async_run_reuses_sandbox_across_batches_repairs_and_resume(self):
+        async with self.create() as run:
+            self.sandbox.start.assert_not_awaited()
+            await run.evaluate([self.policy], seeds=[0])
+            self.sandbox.evaluate.side_effect = PolicyError("bad policy")
+            with self.assertRaises(PolicyError):
+                await run.evaluate([self.policy], seeds=[1])
+            self.sandbox.close.assert_not_awaited()
+            self.sandbox.evaluate.side_effect = None
+            await run.resume()
+            await run.evaluate([self.policy], seeds=[100])
+            self.assertEqual(run.scores(self.policy), {0: 7, 1: 7, 100: 7})
+            self.sandbox.start.assert_awaited_once_with(1)
+            self.sandbox.close.assert_not_awaited()
+        self.sandbox.close.assert_awaited_once()
+        with self.assertRaisesRegex(RuntimeError, "closed"):
+            run.database()
+
+    async def test_async_run_closes_on_body_failure_and_cancellation(self):
+        for exception in (RuntimeError("generation failed"), asyncio.CancelledError()):
+            with self.subTest(exception=type(exception).__name__):
+                run = self.create() if not self.path.exists() else self.reopen()
+                before = self.sandbox.close.await_count
+                with self.assertRaises(type(exception)):
+                    async with run:
+                        await run.evaluate([self.policy], seeds=[before])
+                        raise exception
+                self.assertEqual(self.sandbox.close.await_count, before + 1)
+
+    async def test_async_run_invalidates_failed_sandbox_before_retry(self):
+        async with self.create() as run:
+            self.sandbox.evaluate.side_effect = InfrastructureError("worker died")
+            with self.assertRaises(InfrastructureError):
+                await run.evaluate([self.policy])
+            self.sandbox.close.assert_awaited_once()
+            self.sandbox.evaluate.side_effect = None
+            await run.resume()
+            self.assertEqual(self.sandbox.start.await_count, 2)
+            self.assertEqual(run.scores(self.policy), {0: 7})
+        self.assertEqual(self.sandbox.close.await_count, 2)
+
+    async def test_failed_cleanup_must_finish_before_restart(self):
+        self.sandbox.start.side_effect = [InfrastructureError("start failed"), None]
+        self.sandbox.close.side_effect = [InfrastructureError("cleanup failed"), None, None]
+        async with self.create() as run:
+            with self.assertRaisesRegex(InfrastructureError, "start failed"):
+                await run.evaluate([self.policy])
+            await run.resume()
+            self.assertEqual(self.sandbox.start.await_count, 2)
+            self.assertEqual(self.sandbox.close.await_count, 2)
+            self.assertEqual(run.scores(self.policy), {0: 7})
+        self.assertEqual(self.sandbox.close.await_count, 3)
+
     async def test_save_infers_tables_upserts_and_commits_atomically(self):
         class CustomEvaluation(SQLModel, table=True):
             __tablename__ = "test_custom_evaluation"
@@ -98,6 +151,8 @@ class RunTests(unittest.IsolatedAsyncioTestCase):
             run.database()
 
     async def test_policy_scores_exports_and_reuse(self):
+        self.assertIn("scipy.linalg.solve_discrete_are", self.provider.calls[0])
+        self.assertIn("CPU-only PyTorch", self.provider.calls[0])
         self.assertTrue(issubclass(self.policy, Policy))
         self.assertEqual(self.policy.name, RESPONSE["name"])
         self.assertEqual(self.policy.description, RESPONSE["description"])
@@ -275,7 +330,7 @@ class RunTests(unittest.IsolatedAsyncioTestCase):
         self.sandbox.evaluate.side_effect = evaluate
         self.sandbox.close.side_effect = close
         self.executor = Executor(sandbox=self.sandbox, concurrency=2)
-        with self.create() as run:
+        async with self.create() as run:
             task = asyncio.create_task(run.evaluate([self.policy], seeds=[0, 1, 2]))
             await asyncio.wait_for(started.wait(), 2)
             task.cancel()

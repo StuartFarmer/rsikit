@@ -11,8 +11,9 @@ Implement async act(self, observation) returning a valid action. Initialize and
 clear policy-owned state in async reset(self, *, seed=None), calling
 await super().reset(seed=seed) first. Optional async close(self) releases resources.
 The policy cannot access the environment or its reward calculation. Its state
-persists for one episode. The standard Docker worker provides Python, NumPy,
-and Gymnasium, with no network or host files. Do not add an executable main block.
+persists for one episode. No network or host files. Do not add an executable main block.
+
+{{ instance.libraries }}
 
 Background and evaluator contract:
 {{ instance.context }}
