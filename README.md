@@ -3,6 +3,10 @@
 Evolve and evaluate class-based policies in
 [Gymnasium](https://gymnasium.farama.org/) environments.
 
+Install the shared library with `pip install rsikit` (Python 3.10+).
+Research algorithms and examples require a clone of this repository.
+This is an experimental release; APIs may change.
+
 - `Policy`: the agent interface: `reset`, `act`, and `close`.
 - `generate`: returns a named `Policy` subclass from the LLM.
 - `Run`: stores policies, scores, and returned artifacts.

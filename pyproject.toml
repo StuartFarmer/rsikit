@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "rsikit"
-version = "0.2.0"
+version = "0.0.1"
 description = "Class-based policies and isolated Gymnasium evaluation for API-only agent research."
 readme = "README.md"
 requires-python = ">=3.10"
@@ -17,6 +17,10 @@ dependencies = [
     "cloudpickle>=3.1,<4",
     "rich>=13,<16",
 ]
+
+[project.urls]
+Repository = "https://github.com/StuartFarmer/rsikit"
+Issues = "https://github.com/StuartFarmer/rsikit/issues"
 
 [project.optional-dependencies]
 dev = ["ruff>=0.4"]
