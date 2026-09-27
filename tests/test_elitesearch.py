@@ -15,7 +15,7 @@ from slick import prompts
 from slick.providers import ProviderError
 from sqlmodel import select
 
-from elitesearch import Config, EliteSearch, Generation, Measurement, Organism
+from research.elitesearch import Config, EliteSearch, Generation, Measurement, Organism
 from rsikit import Executor, Run
 from tests.providers import ScriptedProvider
 from tests.test_run import FakeSandbox
@@ -35,7 +35,9 @@ def program(value):
 class EliteSearchTests(unittest.IsolatedAsyncioTestCase):
     def setUp(self):
         root = patch.object(
-            prompts, "TEMPLATE_ROOT", Path(__file__).resolve().parents[1] / "elitesearch/prompts"
+            prompts,
+            "TEMPLATE_ROOT",
+            Path(__file__).resolve().parents[1] / "research/elitesearch/prompts",
         )
         root.start()
         self.addCleanup(root.stop)
@@ -185,6 +187,32 @@ class EliteSearchTests(unittest.IsolatedAsyncioTestCase):
                     await agent.run()
                 self.assertEqual(agent.elites, [])
                 self.assertEqual(agent.reason, "error")
+
+    async def test_arriving_candidate_evaluates_while_previous_candidate_is_running(self):
+        provider = ScriptedProvider([program(0), program(1)])
+        first_started, second_started = asyncio.Event(), asyncio.Event()
+        original = provider.acall
+
+        async def respond(context, **kwargs):
+            result = await original(context, **kwargs)
+            if result[0] == program(1):
+                await first_started.wait()
+            return result
+
+        async def evaluate(policies):
+            if policies[0].name == "Policy 0":
+                first_started.set()
+                await asyncio.wait_for(second_started.wait(), 1)
+            else:
+                second_started.set()
+            return {p.id: Measurement({0: 7}) for p in policies}
+
+        agent = EliteSearch(
+            "Score", provider, evaluate, config=Config(population_size=2, generations=1)
+        )
+        with patch.object(provider, "acall", side_effect=respond):
+            await agent.run()
+        self.assertTrue(all(row.status == "evaluated" for row in agent.organisms))
 
     async def test_duplicate_and_failed_populations_preserve_existing_elites(self):
         async def evaluate(policies):

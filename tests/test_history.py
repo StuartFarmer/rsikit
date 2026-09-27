@@ -13,10 +13,10 @@ from slick import prompts
 from slick.providers import ProviderError
 from sqlmodel import select
 
-import alphaevolve
-from alphaevolve import improved, original
-from alphaevolve.history import Evaluation, Generation
 from examples.alphaevolve import run_search
+from research import alphaevolve
+from research.alphaevolve import improved, original
+from research.alphaevolve.history import Evaluation, Generation
 from rsikit import Executor, Run
 from tests.providers import ScriptedProvider
 from tests.test_alphaevolve import program

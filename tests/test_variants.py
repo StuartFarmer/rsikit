@@ -13,11 +13,11 @@ from rich.console import Console
 from slick import prompts
 from sqlmodel import select
 
-import alphaevolve
 import examples.alphaevolve as example
-from alphaevolve import improved, original, paper
-from alphaevolve.history import Evaluation, Generation
 from examples.alphaevolve import run_search
+from research import alphaevolve
+from research.alphaevolve import improved, original, paper
+from research.alphaevolve.history import Evaluation, Generation
 from rsikit import Executor, Run
 from rsikit.episode import PolicyError
 from rsikit.policy import _policy_class
@@ -80,7 +80,8 @@ class VariantTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(metadata["mode"], "diff")
                 self.assertEqual(metadata["config"]["mode"], "diff")
                 self.assertIn(
-                    f"Optimizer: alphaevolve.{variant}.agent", (output / "run.log").read_text()
+                    f"Optimizer: research.alphaevolve.{variant}.agent",
+                    (output / "run.log").read_text(),
                 )
                 with gym.make("CartPole-v1") as env, Run.open(output, environment=env) as run:
                     self.assertIn(variant, run.name)
@@ -351,7 +352,7 @@ class VariantTests(unittest.IsolatedAsyncioTestCase):
                 )
                 await run.evaluate(policies[1:], seeds=(99,))
                 output = io.StringIO()
-                example._show_scores(policies, run, Console(file=output), seeds=(0, 1))
+                example.show_scores(policies, run, Console(file=output), seeds=(0, 1))
                 self.assertEqual(results[policies[0].id].metrics["reward"], 0.5)
                 self.assertIn("0.5", output.getvalue())
                 self.assertIn("unfinished", output.getvalue())
@@ -508,7 +509,7 @@ class VariantTests(unittest.IsolatedAsyncioTestCase):
                     await generating.wait()
                 return 7, {}
 
-            show_scores = example._show_scores
+            show_scores = example.show_scores
 
             def show(policies, *args, **kwargs):
                 show_scores(policies, *args, **kwargs)
@@ -528,7 +529,7 @@ class VariantTests(unittest.IsolatedAsyncioTestCase):
                     path=Path(directory) / "run",
                     executor=Executor(sandbox=sandbox),
                 ) as run,
-                patch.object(example, "_show_scores", side_effect=show),
+                patch.object(example, "show_scores", side_effect=show),
             ):
                 task = asyncio.create_task(
                     run_search(

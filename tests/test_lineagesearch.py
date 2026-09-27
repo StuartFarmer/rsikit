@@ -17,13 +17,13 @@ from slick import prompts
 from slick.providers import ProviderError
 from sqlmodel import select
 
-from lineagesearch import Config, Family, LineageSearch, Measurement, Study, Trial
+from research.lineagesearch import Config, Family, LineageSearch, Measurement, Study, Trial
 from rsikit import Executor, Run
 from rsikit.episode import PolicyError
 from tests.providers import ScriptedProvider
 from tests.test_run import FakeSandbox
 
-ROOT = Path(__file__).resolve().parents[1] / "lineagesearch" / "prompts"
+ROOT = Path(__file__).resolve().parents[1] / "research/lineagesearch" / "prompts"
 
 
 def families(n=1):
@@ -148,10 +148,10 @@ class LineageTests(unittest.IsolatedAsyncioTestCase):
                 Config(cull_percent=value)
 
     def test_progress_keeps_overlapping_generation_and_evaluation_visible(self):
-        from examples.alphaevolve import _ProgressHandler
+        from rsikit.progress import ProgressHandler
 
         progress = Progress(console=Console(file=io.StringIO()))
-        handler = _ProgressHandler(progress, overlap=True)
+        handler = ProgressHandler(progress, overlap=True)
         for event, total in (
             ("generation_started", 2),
             ("policy_generated", 0),

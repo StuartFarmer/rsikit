@@ -30,3 +30,15 @@ async def generate(
         extra={"event": "policy_generated", "policy_id": policy.id},
     )
     return policy
+
+
+class RecordingProvider:
+    """Retain raw responses even when Slick's structured parsing rejects them."""
+
+    def __init__(self, provider, record, key="raw"):
+        self.provider, self.record, self.key = provider, record, key
+
+    async def acall(self, *args, **kwargs):
+        text, calls = await self.provider.acall(*args, **kwargs)
+        self.record[self.key] = text
+        return text, calls

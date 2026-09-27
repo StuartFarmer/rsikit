@@ -20,11 +20,12 @@ from rich.progress import (
 from slick import prompts
 from slick.providers import OpenRouterAPI
 
-import shinkaevolve
-from examples.alphaevolve import TASKS, _ProgressHandler, _show_scores, make_environment
+from research import shinkaevolve
+from research.shinkaevolve import Config, ShinkaEvolve
 from rsikit import Executor, Run
+from rsikit.envs.tasks import TASKS, make_environment
 from rsikit.episode import PolicyError
-from shinkaevolve import Config, ShinkaEvolve
+from rsikit.progress import ProgressHandler, show_scores
 
 
 async def run_search(
@@ -32,7 +33,7 @@ async def run_search(
 ):
     seeds = tuple(seeds)
     console = console or Console()
-    logger = logging.getLogger("shinkaevolve")
+    logger = logging.getLogger("research.shinkaevolve")
     loggers = (logger, logging.getLogger("rsikit"))
     old_settings = [(item.level, item.propagate) for item in loggers]
     with Progress(
@@ -44,7 +45,7 @@ async def run_search(
         console=console,
     ) as progress:
         overall = progress.add_task("Generations", total=generations)
-        display = _ProgressHandler(progress)
+        display = ProgressHandler(progress)
         log = logging.FileHandler(run.path / "run.log", encoding="utf-8")
         log.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(name)s: %(message)s"))
         for item in loggers:
@@ -88,7 +89,7 @@ async def run_search(
                     complete = True
                 finally:
                     run.save(*generator.records(seeds=seeds, complete=complete))
-                _show_scores(policies, run, console)
+                show_scores(policies, run, console)
                 if not policies:
                     logger.warning("No surviving policies in this generation; continuing")
                 if generator.best is not None:
@@ -96,7 +97,7 @@ async def run_search(
                 progress.advance(overall)
         except Exception:
             logger.exception("Run failed; saved results and details are in %s", run.path)
-            _show_scores(run.policies(), run, console)
+            show_scores(run.policies(), run, console)
             raise
         finally:
             for item, (level, propagate) in zip(loggers, old_settings):

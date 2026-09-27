@@ -57,6 +57,47 @@ class RunTests(unittest.IsolatedAsyncioTestCase):
     def reopen(self, path=None):
         return Run.open(path or self.path, environment=self.env, executor=self.executor)
 
+    async def test_new_candidate_uses_free_worker_before_previous_candidate_finishes(self):
+        other = await generate(
+            "task", provider=ScriptedProvider([json.dumps({**RESPONSE, "name": "Other"})])
+        )
+        first_started, second_started, release = (asyncio.Event() for _ in range(3))
+        active = peak = 0
+
+        async def evaluate(implementation, environment, seed, call_timeout):
+            nonlocal active, peak
+            active += 1
+            peak = max(peak, active)
+            try:
+                if seed == 0:
+                    first_started.set()
+                    await release.wait()
+                else:
+                    second_started.set()
+                    await release.wait()
+                return float(seed), {}
+            finally:
+                active -= 1
+
+        self.sandbox.evaluate.side_effect = evaluate
+        self.executor = Executor(sandbox=self.sandbox, concurrency=2)
+        async with self.create() as run:
+            first = asyncio.create_task(run.evaluate([self.policy], seeds=[0]))
+            await asyncio.wait_for(first_started.wait(), 1)
+            second = asyncio.create_task(run.evaluate([other], seeds=[1, 2]))
+            duplicate = asyncio.create_task(run.evaluate([other], seeds=[1, 2]))
+            try:
+                await asyncio.wait_for(second_started.wait(), 1)
+                self.assertFalse(first.done())
+            finally:
+                release.set()
+                await asyncio.gather(first, second, duplicate)
+            self.assertEqual(run.scores(other), {1: 1, 2: 2})
+        self.assertEqual(peak, 2)
+        self.assertEqual(self.sandbox.evaluate.await_count, 3)
+        self.sandbox.start.assert_awaited_once_with(2)
+        self.sandbox.close.assert_awaited_once()
+
     async def test_async_run_reuses_sandbox_across_batches_repairs_and_resume(self):
         async with self.create() as run:
             self.sandbox.start.assert_not_awaited()
@@ -74,6 +115,79 @@ class RunTests(unittest.IsolatedAsyncioTestCase):
         self.sandbox.close.assert_awaited_once()
         with self.assertRaisesRegex(RuntimeError, "closed"):
             run.database()
+        with self.assertRaisesRegex(RuntimeError, "closed"):
+            await run.resume()
+
+    async def test_cancel_queued_submission_does_not_interrupt_active_batch(self):
+        started, release = asyncio.Event(), asyncio.Event()
+
+        async def evaluate(implementation, environment, seed, call_timeout):
+            if seed == 0:
+                started.set()
+                await release.wait()
+            return float(seed), {}
+
+        self.sandbox.evaluate.side_effect = evaluate
+
+        async def batch(seeds):
+            return [
+                item
+                async for item in self.executor.evaluate(
+                    [(str(seed), RESPONSE["implementation"], seed) for seed in seeds], self.env
+                )
+            ]
+
+        async with self.executor:
+            first = asyncio.create_task(batch([0, 1]))
+            await started.wait()
+            queued = asyncio.create_task(batch([2]))
+            try:
+                for _ in range(20):
+                    if self.executor._queued == 2:
+                        break
+                    await asyncio.sleep(0)
+                self.assertEqual(self.executor._queued, 2)
+                queued.cancel()
+                with self.assertRaises(asyncio.CancelledError):
+                    await queued
+                release.set()
+                self.assertEqual([seed for _, seed, _ in await first], [0, 1])
+            finally:
+                release.set()
+                queued.cancel()
+                await asyncio.gather(first, queued, return_exceptions=True)
+        self.assertEqual([call.args[2] for call in self.sandbox.evaluate.call_args_list], [0, 1])
+
+    async def test_resume_only_dispatches_policies_it_locked(self):
+        other = await generate(
+            "task", provider=ScriptedProvider([json.dumps({**RESPONSE, "name": "Other"})])
+        )
+        started = [asyncio.Event(), asyncio.Event()]
+        release = [asyncio.Event(), asyncio.Event()]
+
+        async def evaluate(implementation, environment, seed, call_timeout):
+            started[seed].set()
+            await release[seed].wait()
+            return float(seed), {}
+
+        self.sandbox.evaluate.side_effect = evaluate
+        self.executor = Executor(sandbox=self.sandbox, concurrency=3)
+        async with self.create() as run:
+            first = asyncio.create_task(run.evaluate([self.policy], seeds=[0]))
+            await started[0].wait()
+            resume = asyncio.create_task(run.resume())
+            await asyncio.sleep(0)  # resume has snapshotted A and is waiting on its lock.
+            second = asyncio.create_task(run.evaluate([other], seeds=[1]))
+            await started[1].wait()
+            try:
+                release[0].set()
+                await first
+                await asyncio.wait_for(asyncio.shield(resume), 0.5)
+                self.assertFalse(second.done())
+            finally:
+                release[1].set()
+                await asyncio.gather(first, second, resume, return_exceptions=True)
+        self.assertEqual([call.args[2] for call in self.sandbox.evaluate.call_args_list], [0, 1])
 
     async def test_async_run_closes_on_body_failure_and_cancellation(self):
         for exception in (RuntimeError("generation failed"), asyncio.CancelledError()):

@@ -14,7 +14,7 @@ RUN mkdir -p /opt/worker/rsikit/sandbox && printf 'from .policy import Policy\n'
 COPY rsikit/policy.py /opt/worker/rsikit/policy.py
 COPY rsikit/episode.py /opt/worker/rsikit/episode.py
 COPY rsikit/envs/ /opt/worker/rsikit/envs/
-COPY rsikit/sandbox/__init__.py rsikit/sandbox/worker.py rsikit/sandbox/codec.py rsikit/sandbox/evaluate.py rsikit/sandbox/service.py /opt/worker/rsikit/sandbox/
+COPY rsikit/sandbox/__init__.py rsikit/sandbox/worker.py rsikit/sandbox/codec.py rsikit/sandbox/evaluate.py rsikit/sandbox/service.py rsikit/sandbox/in_process.py /opt/worker/rsikit/sandbox/
 RUN python -c "import site; from pathlib import Path; Path(site.getsitepackages()[0], 'rsikit-worker.pth').write_text('/opt/worker\n')"
 COPY rsikit/sandbox/check_libraries.py /opt/worker/rsikit/sandbox/check_libraries.py
 RUN python /opt/worker/rsikit/sandbox/check_libraries.py > /opt/worker/libraries.json

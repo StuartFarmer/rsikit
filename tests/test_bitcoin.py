@@ -128,7 +128,7 @@ class BitcoinTests(unittest.TestCase):
         self.assertEqual(result[4]["episode"]["l"], len(dates) - 1)
 
     def test_optimizer_factory_and_invalid_dates(self):
-        from examples.alphaevolve import make_environment
+        from rsikit.envs.tasks import make_environment
 
         with make_environment("Bitcoin") as env:
             self.assertIsInstance(env, envs.BitcoinEnv)

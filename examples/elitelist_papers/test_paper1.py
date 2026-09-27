@@ -6,6 +6,7 @@ import io
 import json
 import tempfile
 import unittest
+import zipfile
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -118,7 +119,9 @@ class Paper1Tests(unittest.IsolatedAsyncioTestCase):
             with (
                 patch.dict("os.environ", {"OPENROUTER_API_KEY": "test"}),
                 patch.object(runner, "LoggedOpenRouter", return_value=provider),
-                patch.object(runner, "Executor", return_value=Executor(sandbox=sandbox)) as executor,
+                patch.object(
+                    runner, "Executor", return_value=Executor(sandbox=sandbox)
+                ) as executor,
                 patch.object(runner, "Console", return_value=Console(file=io.StringIO())),
             ):
                 await runner.main(
@@ -158,6 +161,18 @@ class Paper1Tests(unittest.IsolatedAsyncioTestCase):
                 json.loads((output / "status.json").read_text())["status"], "completed"
             )
             self.assertTrue((output / "source.zip").is_file())
+            with zipfile.ZipFile(output / "source.zip") as archive:
+                for name in (
+                    "uv.lock",
+                    "rsikit/sandbox/Dockerfile",
+                    "rsikit/generation/edits.py",
+                    "rsikit/envs/tasks.py",
+                    "rsikit/progress.py",
+                    "research/__init__.py",
+                    "research/elitesearch/agent.py",
+                    "research/elitesearch/prompts/new.j2",
+                ):
+                    self.assertEqual(archive.read(name), (runner.ROOT / name).read_bytes())
             with (
                 runner.make_environment("CartPole-v1") as env,
                 Run.open(output, environment=env) as run,
@@ -232,12 +247,13 @@ class Paper1Tests(unittest.IsolatedAsyncioTestCase):
 
     async def test_early_stopping_uses_search_target_and_keeps_outputs(self):
         runner = self.runner()
-        for env, flags, expected_generations, reason in (
-            ("CartPole-v1", [], 1, "target_reached"),
-            ("CartPole-v1", ["--target-score", "475"], 1, "target_reached"),
-            ("CartPole-v1", ["--target-score", "476"], 3, "completed"),
-            ("CartPole-v1", ["--no-early-stop"], 3, "completed"),
-            ("Pendulum-v1", [], 3, "completed"),
+        for env, flags, expected_generations, reason, reporting_target in (
+            ("CartPole-v1", [], 1, "target_reached", 475),
+            ("CartPole-v1", ["--target-score", "475"], 1, "target_reached", 475),
+            ("CartPole-v1", ["--target-score", "476"], 3, "completed", 476),
+            ("CartPole-v1", ["--no-early-stop"], 3, "completed", 475),
+            ("CartPole-v1", ["--no-early-stop", "--target-score", "474"], 3, "completed", 474),
+            ("Pendulum-v1", [], 3, "completed", None),
         ):
             with self.subTest(env=env, flags=flags), tempfile.TemporaryDirectory() as directory:
                 output = Path(directory) / "run"
@@ -256,7 +272,9 @@ class Paper1Tests(unittest.IsolatedAsyncioTestCase):
                                 dict(
                                     name=f"Policy {i}",
                                     description="Edited",
-                                    edits=[dict(search=f"return {i - 1}", replacement=f"return {i}")],
+                                    edits=[
+                                        dict(search=f"return {i - 1}", replacement=f"return {i}")
+                                    ],
                                 )
                             )
                             for i in (1, 2)
@@ -289,6 +307,8 @@ class Paper1Tests(unittest.IsolatedAsyncioTestCase):
                         ]
                     )
                 summary = json.loads((output / "summary.json").read_text())
+                manifest = json.loads((output / "experiment.json").read_text())
+                self.assertEqual(manifest["reporting_target"], reporting_target)
                 self.assertEqual(summary["reason"], reason)
                 self.assertEqual(summary["generations"], expected_generations)
                 self.assertEqual(len(provider.calls), expected_generations)

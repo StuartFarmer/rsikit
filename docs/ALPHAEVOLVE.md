@@ -132,7 +132,7 @@ Configure `slick.prompts.TEMPLATE_ROOT = Path(alphaevolve.__file__).parent` once
 Supply measured results, keeping every metric's direction maximized:
 
 ```python
-from alphaevolve.paper import AlphaEvolve, Config, EvaluationResult
+from research.alphaevolve.paper import AlphaEvolve, Config, EvaluationResult
 
 generator = AlphaEvolve(
     "Walk forward without falling",
@@ -170,7 +170,7 @@ other tasks can place their algorithms in that program and supply an evaluator.
 For optional staged evaluation and an actual model-based feedback grader:
 
 ```python
-from alphaevolve.paper import EvaluationStage, LLMFeedback, evaluate_cascade
+from research.alphaevolve.paper import EvaluationStage, LLMFeedback, evaluate_cascade
 
 result = await evaluate_cascade(
     policy,
@@ -201,7 +201,7 @@ retain only recent rejection excerpts needed for prompts.
 
 ## Historical baselines
 
-The optimizer lives in the top-level `alphaevolve/` package, alongside `rsikit/`.
+The optimizer lives in `research/alphaevolve/`, separate from the common `rsikit/` library.
 RSIKit owns policies, execution, environments, and run storage. The two historical
 baseline variants use that same core:
 
@@ -250,7 +250,7 @@ All CLI variants save optimizer-owned records in the Run's existing `run.sqlite`
   every island's champion ID and score, and reset events with donor island, target
   island, founder policy, and the evaluated-attempt count at the reset.
 
-These SQLModel classes live in `alphaevolve/history.py`. The core only supplies
+These SQLModel classes live in `research/alphaevolve/history.py`. The core only supplies
 `run.save(*records)`, which infers each record's table; another optimizer can
 supply its own SQLModel records and fields.
 Individual episode scores remain in the existing `policy.scores` column. Join by
@@ -317,9 +317,9 @@ import gymnasium as gym
 from slick import prompts
 from slick.providers import OpenRouterAPI
 
-import alphaevolve
+from research import alphaevolve
 from rsikit import Executor, Run
-from alphaevolve.improved import AlphaEvolve
+from research.alphaevolve.improved import AlphaEvolve
 
 # Configure Slick once at application startup.
 prompts.TEMPLATE_ROOT = Path(alphaevolve.__file__).parent
@@ -404,8 +404,8 @@ founding lineages but does not guarantee different behavior or algorithm familie
 Selection chooses an occupied island's parent;
 exploration can use another island's champion. Other distinct champions provide
 inspiration. The weaker half of islands is periodically reseeded from survivors,
-adapting FunSearch's reset policy (see [NOTICE](../alphaevolve/NOTICE) and
-[LICENSE.funsearch](../alphaevolve/LICENSE.funsearch)). Resets wait
+adapting FunSearch's reset policy (see [NOTICE](../research/alphaevolve/NOTICE) and
+[LICENSE.funsearch](../research/alphaevolve/LICENSE.funsearch)). Resets wait
 until every island has a founder; subsequent reseeding can share champions.
 
 Exact mutations must match uniquely and stay inside optional EVOLVE-BLOCK regions.
@@ -523,5 +523,5 @@ score table and the best policy so far.
 The same log messages and failure tracebacks are saved in `run.log` inside the run
 directory. Failed policies retain unfinished scores, and successful evaluations
 remain saved. Every model repair is logged with its diagnostic and position in the repair budget.
-Library code uses Python's `logging` under `rsikit` and `alphaevolve`; the example configures Rich
+Library code uses Python's `logging` under `rsikit` and `research.alphaevolve`; the example configures Rich
 and file handlers. Policy descriptions are stored in SQLite alongside names.

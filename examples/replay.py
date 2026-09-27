@@ -13,8 +13,8 @@ from rich.logging import RichHandler
 from rich.table import Table
 from rich.text import Text
 
-from examples.alphaevolve import TASKS, make_environment
 from rsikit import Executor, Run
+from rsikit.envs.tasks import TASKS, make_environment
 
 
 async def record_best(

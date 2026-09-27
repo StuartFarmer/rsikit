@@ -17,12 +17,12 @@ from slick.providers import ProviderError
 from sqlmodel import select
 
 import examples.shinkaevolve as example
-import shinkaevolve
-from alphaevolve.edits import Edit, Mutation
 from examples.shinkaevolve import run_search
+from research import shinkaevolve
+from research.shinkaevolve import Config, Evaluation, Generation, ShinkaEvolve
 from rsikit import Executor, Run
 from rsikit.episode import PolicyError
-from shinkaevolve import Config, Evaluation, Generation, ShinkaEvolve
+from rsikit.generation.edits import Edit, Mutation
 from tests.providers import ScriptedProvider
 from tests.test_alphaevolve import SOURCE, program
 from tests.test_run import FakeSandbox

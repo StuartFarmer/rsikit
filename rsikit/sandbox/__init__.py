@@ -9,7 +9,7 @@ from uuid import uuid4
 from rsikit.episode import InfrastructureError, PolicyError, PolicyTimeout, run_episode
 from rsikit.policy import Policy
 
-from .codec import MAX_MESSAGE, MAX_SOURCE, decode, dumps, encode, encode_space, loads
+from .codec import MAX_MESSAGE, MAX_SOURCE, decode, dumps, encode, encode_space, loads, pack, unpack
 
 
 class SandboxPolicy(Policy):
@@ -40,6 +40,7 @@ class SandboxPolicy(Policy):
         self.container_name = f"rsikit-{uuid4().hex}"
         self.process = None
         self.ready = False
+        self._binary = False
 
     async def reset(self, *, seed=None):
         if self.process is not None:
@@ -106,12 +107,13 @@ class SandboxPolicy(Policy):
         if not self.ready:
             raise InfrastructureError("Sandbox is not running")
         try:
-            payload = dumps(request)
+            payload = pack(request) if self._binary else dumps(request)
         except (ValueError, TypeError, RecursionError) as exc:
             raise InfrastructureError(f"Cannot encode sandbox request: {exc}") from exc
 
         try:
-            response = loads(await asyncio.wait_for(self._exchange(payload), self.call_timeout))
+            data = await self._exchange_with_timeout(payload)
+            response = unpack(data) if self._binary else loads(data)
             if not isinstance(response, dict):
                 raise ValueError("Malformed supervisor response")
             if set(response) == {"error"} and isinstance(response["error"], str):
@@ -129,7 +131,15 @@ class SandboxPolicy(Policy):
             self.ready = False
             await self._destroy_after(exc)
             raise
-        except (OSError, ValueError, UnicodeError, RecursionError) as exc:
+        except (
+            OSError,
+            ValueError,
+            TypeError,
+            KeyError,
+            OverflowError,
+            UnicodeError,
+            RecursionError,
+        ) as exc:
             self.ready = False
             raise InfrastructureError(f"Sandbox protocol failed: {exc}") from exc
 
@@ -138,14 +148,17 @@ class SandboxPolicy(Policy):
         await self.process.stdin.drain()
         return await self.process.stdout.readline()
 
+    async def _exchange_with_timeout(self, payload):
+        return await asyncio.wait_for(self._exchange(payload), self.call_timeout)
+
     async def act(self, observation):
         try:
-            encoded = encode(observation)
+            encoded = observation if self._binary else encode(observation)
         except (ValueError, TypeError, RecursionError) as exc:
             raise InfrastructureError(f"Cannot encode observation: {exc}") from exc
         response = await self._request({"command": "act", "observation": encoded})
         try:
-            return decode(response["action"])
+            return response["action"] if self._binary else decode(response["action"])
         except (ValueError, TypeError, KeyError, IndexError, OverflowError, RecursionError) as exc:
             raise PolicyError(f"Malformed candidate action: {exc}") from exc
 

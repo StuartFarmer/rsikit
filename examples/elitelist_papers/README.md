@@ -4,6 +4,16 @@ Working paper name: **EliteTable**. The implementation is currently named
 `EliteSearch`; this folder reuses it without renaming or changing the algorithm.
 Agreed direction: 2026-09-24. Background: [CONTEXT.md](CONTEXT.md).
 
+**Paper 1 update, 2026-09-25:** six environments including CarRacing, ten independent
+searches per environment, and **ten full generations even after target attainment**.
+The current [protocol and reproduction checklist](PROTOCOL.md) and
+[delivery plan/manuscript outline](outputs/.plans/elitetable-policy-search.md)
+record the study scope. Preparation is now frozen in the standalone
+[companion repository](companion/README.md): use its [launch handoff](companion/RUN_MAIN.md)
+and [initial manuscript](companion/papers/elitetable-policy-search.md). The 60 main
+searches will be run externally. Existing runs remain exploratory pilots.
+Use the companion commands for main-v1; this development notebook is historical.
+
 | Paper | Independently useful question | Scope |
 | --- | --- | --- |
 | 1. Evolving executable policies with an LLM | Can evaluated search improve policies over generations, and where does it stall? | Algorithm, held-out learning curves, interpretable policy changes, failures, resource use. |
@@ -21,10 +31,20 @@ The working document is [paper1.ipynb](paper1.ipynb). It contains the paper outl
 protocol, editable experiment settings, launch commands, analysis and plots.
 Running all its cells **does not launch simulations or call a model**.
 
-**Claim to test:** evaluated LLM-guided program search can improve executable
-policies over generations, with identifiable limits. The LLM weights are fixed;
+**Claim to test:** EliteTable can produce policies that reach environment score
+targets, or increase the best policy's score over generations. Report both target
+attainment and improvement, including flat curves and unsuccessful runs.
+The LLM weights are fixed;
 policy source code evolves. These familiar tasks cannot establish that the LLM
 invented previously unknown control strategies.
+
+The notebook's per-run demonstration exports `figures/target-and-progress.csv`
+and PDF/PNG plots. It reads completed generations from checkpoints, including
+interrupted runs, and marks their status. Each row reports generation-one and
+latest search scores, their difference, the recorded target and first generation
+reaching it, plus available full-panel held-out confirmation for the same policy.
+Undefined targets and missing evidence remain unknown. This descriptive evidence
+does not require ablations or comparisons; those remain separate papers.
 
 Describe the actual implementation: a frozen elite table breeds each generation;
 new proposals, edits and multi-parent remixes are evaluated on a fixed search seed
@@ -41,7 +61,7 @@ wins. Higher scores always take priority. On resume, historical boards are kept
 as recorded; future promotions use this rule. Treat resumes from the previous
 age-only tie rule as a changed search protocol.
 
-Search stops after a completed generation if its best elite's **mean search
+By default, the general CLI stops after a completed generation if its best elite's **mean search
 reward** reaches Gymnasium's registered `reward_threshold` (CartPole: 475;
 LunarLander: 200; BipedalWalker: 300). This is an operational search criterion,
 not proof of held-out success. The current generation finishes; no further
@@ -56,14 +76,22 @@ episode limits may require a different target. The resolved target is saved in
 held-out evaluations are still exported normally. Held-out results never drive
 stopping. Existing running processes retain their original behavior.
 
+Paper 1's main-study notebook sets `EARLY_STOP = False`, adding `--no-early-stop`
+to every new launch command. New manifests also save `reporting_target` independently
+of the stopping rule, so target lines and attainment counts remain available.
+Legacy runs use their recorded `config.target_score`; no target is invented for
+an old run that did not record one. Early-stopped pilots cannot become fixed-budget
+main runs through resume: start new directories with the new protocol.
+
 ### Staged experiment
 
 1. Plumbing pilot: CartPole, 3 independent searches, 5 generations, 20 candidates
    per generation, 5 elites, 10 search seeds and 100 held-out seeds.
 2. Research pilot: add MountainCar, Pendulum, FrozenLake and BipedalWalker, keeping
    failures and flat curves. Use the pilot to choose a feasible fixed protocol.
-3. Main experiment: provisionally 10 independent searches per environment,
-   20 generations, 50 candidates per generation, 10 elites. Freeze budgets,
+3. Main experiment: 10 independent searches per environment, **10 full generations**,
+   50 candidates per generation, 10 elites. Include CartPole, MountainCar, Acrobot,
+   LunarLander, BipedalWalker and CarRacing. Freeze budgets,
    environment settings, prompts and seed panels before the main runs. Treat the
    pilots as exploratory; use fresh held-out seeds for the main experiment.
 
@@ -83,9 +111,9 @@ having stopped. Report those counts and the number reaching the search target.
 Held-out curves need not be monotonic. A missing/failed evaluation is not zero
 reward and must remain visible. Do not choose a winner using held-out scores.
 
-Include a random-action reference and generation-one performance. A small,
-budget-matched independent-sampling control is recommended before claiming that
-iteration adds value beyond sampling; the extensive comparative study is Paper 3.
+Include a random-action reference and generation-one performance. Independent
+sampling and broad comparisons are deferred to the follow-up study. Paper 1 makes
+no claim that iteration adds value beyond budget-matched sampling.
 That control is **not implemented here**: `--new-fraction 1` in the original
 runner still exposes elite descriptions and scores, so is not independent sampling.
 
@@ -211,7 +239,9 @@ explicitly during exploration. Do not silently pool them with fixed-timeout runs
 
 - `experiment.json`: model, seed panels, search config, resolved environment,
   versions and revision information.
-- `source.zip`: source/prompts used by the local runner and optimizer/evaluator.
+- `source.zip`: source/prompts used by the local runner and optimizer/evaluator,
+  plus the host lockfile and worker Dockerfile for new runs. This is not yet a
+  validated standalone release or a fully pinned worker build.
 - `context.txt`: exact shared environment/evaluation context for the original attempt.
 - `run.sqlite`, `exports/`, `best.py`: existing search evidence and policy code.
 - `run.log`: existing generation log; detached stdout/stderr goes to `logs/`.

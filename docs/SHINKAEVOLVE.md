@@ -1,9 +1,9 @@
 # ShinkaEvolve
 
-`shinkaevolve/` is a separate optimizer alongside `alphaevolve/`. It ports the
+`research/shinkaevolve/` is a separate optimizer alongside `research/alphaevolve/`. It ports the
 previous local implementation on `main` to the current Policy/Run API. It uses
 Slick, API models, and Gymnasium; it does not train model weights or depend on
-the upstream ShinkaEvolve framework. See [provenance](../shinkaevolve/NOTICE).
+the upstream ShinkaEvolve framework. See [provenance](../research/shinkaevolve/NOTICE).
 
 ## Run an experiment
 
@@ -41,9 +41,9 @@ Videos use the existing replay command and do not need model calls:
 from pathlib import Path
 from slick import prompts
 from slick.providers import OpenRouterAPI
-import shinkaevolve
-from shinkaevolve import Config, ShinkaEvolve
-from examples.alphaevolve import make_environment
+from research import shinkaevolve
+from research.shinkaevolve import Config, ShinkaEvolve
+from rsikit.envs.tasks import make_environment
 from rsikit import Executor, Run
 
 # Configure Slick once at application startup.

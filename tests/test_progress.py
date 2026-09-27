@@ -2,6 +2,7 @@
 
 import asyncio
 import io
+import logging
 import tempfile
 import unittest
 from pathlib import Path
@@ -9,19 +10,44 @@ from unittest.mock import patch
 
 import gymnasium as gym
 from rich.console import Console
+from rich.progress import Progress
 from slick import prompts
 
-import alphaevolve
 import examples.alphaevolve as example
-from alphaevolve.edits import Program
-from alphaevolve.improved import AlphaEvolve, Config
+from research import alphaevolve
+from research.alphaevolve.improved import AlphaEvolve, Config
 from rsikit import Executor, Run
 from rsikit.episode import PolicyError
+from rsikit.generation.edits import Program
+from rsikit.progress import ProgressHandler
 from tests.providers import ScriptedProvider
 from tests.test_run import RESPONSE, FakeSandbox
 
 
 class ProgressTests(unittest.IsolatedAsyncioTestCase):
+    def test_overlapping_evaluation_submissions_accumulate_progress(self):
+        progress = Progress(console=Console(file=io.StringIO()))
+        handler = ProgressHandler(progress, overlap=True)
+        self.addCleanup(handler.close)
+        for total in (3, 4):
+            record = logging.makeLogRecord(
+                dict(
+                    msg="evaluating",
+                    levelno=logging.INFO,
+                    levelname="INFO",
+                    event="evaluation_started",
+                    total=total,
+                )
+            )
+            handler.emit(record)
+        handler.emit(
+            logging.makeLogRecord(
+                dict(msg="done", levelno=logging.INFO, levelname="INFO", event="policy_evaluated")
+            )
+        )
+        task = progress.tasks[handler.evaluation]
+        self.assertEqual((task.total, task.completed), (7, 1))
+
     async def test_live_policy_summaries_scores_and_failure_log(self):
         output = io.StringIO()
         console = Console(file=output, width=160, force_terminal=False)

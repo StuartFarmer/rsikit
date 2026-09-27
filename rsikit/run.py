@@ -5,7 +5,7 @@ import fcntl
 import logging
 import re
 from collections.abc import Sequence
-from contextlib import aclosing
+from contextlib import AsyncExitStack, aclosing, asynccontextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 from statistics import fmean
@@ -106,7 +106,7 @@ class Run:
                 self._settings = session.exec(select(_Settings)).one()
                 for stored in session.exec(select(_StoredPolicy)):
                     self._export(stored)
-            self._busy = asyncio.Lock()
+            self._policy_locks = {}
         except BaseException:
             self.close()
             raise
@@ -189,6 +189,16 @@ class Run:
             row = session.get(_StoredPolicy, policy.id)
             return {} if row is None else {int(seed): score for seed, score in row.scores.items()}
 
+    @asynccontextmanager
+    async def _evaluating(self, policy_ids):
+        # Serialize overlapping policies to retain score reuse; different candidates
+        # can feed the same executor while a previous candidate's last seed finishes.
+        async with AsyncExitStack() as stack:
+            for policy_id in sorted(set(policy_ids)):
+                lock = self._policy_locks.setdefault(policy_id, asyncio.Lock())
+                await stack.enter_async_context(lock)
+            yield
+
     async def evaluate(self, policies: Sequence[type[Policy]], *, seeds=(0,)) -> dict[str, float]:
         """Save and evaluate a batch, returning mean scores keyed by policy ID.
 
@@ -199,7 +209,7 @@ class Run:
         if not seeds:
             raise ValueError("Evaluation requires at least one seed")
         policies = tuple({policy.id: policy for policy in policies}.values())
-        async with self._busy:
+        async with self._evaluating(policy.id for policy in policies):
             if self._lock.closed:
                 raise RuntimeError("Run is closed")
             with Session(self._engine) as session:
@@ -287,13 +297,17 @@ class Run:
 
     async def resume(self) -> None:
         """Evaluate only missing scores with this run's executor."""
-        async with self._busy:
+        if self._lock.closed:
+            raise RuntimeError("Run is closed")
+        policy_ids = {policy.id for policy in self.policies()}
+        async with self._evaluating(policy_ids):
             if self._lock.closed:
                 raise RuntimeError("Run is closed")
             with Session(self._engine) as session:
                 jobs = [
                     (row.id, row.implementation, int(seed))
                     for row in session.exec(select(_StoredPolicy))
+                    if row.id in policy_ids
                     for seed, score in row.scores.items()
                     if score is None
                 ]

@@ -14,14 +14,14 @@ from slick import prompts
 from slick.providers import ProviderError
 from sqlmodel import select
 
-import alphaevolve
-from alphaevolve import improved, original, paper
-from alphaevolve.edits import Program
-from alphaevolve.history import Evaluation, Generation
-from alphaevolve.improved import AlphaEvolve, Config
 from examples.alphaevolve import run_search
+from research import alphaevolve
+from research.alphaevolve import improved, original, paper
+from research.alphaevolve.history import Evaluation, Generation
+from research.alphaevolve.improved import AlphaEvolve, Config
 from rsikit import Executor, Run
 from rsikit.episode import InfrastructureError, PolicyError
+from rsikit.generation.edits import Program
 from tests.providers import ScriptedProvider
 from tests.test_alphaevolve import SOURCE, program
 from tests.test_run import FakeSandbox

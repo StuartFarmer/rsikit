@@ -3,7 +3,7 @@
 import json
 import unittest
 
-from elitesearch import Config, EliteSearch, Generation, Organism
+from research.elitesearch import Config, EliteSearch, Generation, Organism
 from rsikit.policy import _policy_class
 from tests.providers import ScriptedProvider
 from tests.test_elitesearch import program
@@ -12,8 +12,11 @@ from tests.test_elitesearch import program
 class TieBreakTests(unittest.TestCase):
     def agent(self):
         return EliteSearch(
-            "test", ScriptedProvider([]), None,
-            config=Config(elite_size=2, population_size=5, generations=3), seed=42,
+            "test",
+            ScriptedProvider([]),
+            None,
+            config=Config(elite_size=2, population_size=5, generations=3),
+            seed=42,
         )
 
     def test_score_then_operator_then_id(self):
@@ -53,7 +56,7 @@ class TieBreakTests(unittest.TestCase):
                     if legacy:
                         original.elites = sorted(
                             original.elites + rows, key=lambda r: (-r.score, r.id)
-                        )[:original.config.elite_size]
+                        )[: original.config.elite_size]
                         generation.elite_ids = [r.id for r in original.elites]
                         generation.status = "completed"
                     else:

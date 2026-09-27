@@ -8,14 +8,25 @@ import socket
 import sys
 
 from rsikit.policy import Policy
-from rsikit.sandbox.codec import MAX_MESSAGE, decode, decode_space, dumps, encode, loads
+from rsikit.sandbox.codec import (
+    MAX_MESSAGE,
+    MAX_SOURCE,
+    decode,
+    decode_space,
+    dumps,
+    encode,
+    frame_size,
+    loads,
+    pack,
+    unpack,
+)
 
 
-def block_connections():
-    """Prevent a forkserver child from reconnecting to privileged control sockets."""
-    arch, connect = {
-        "aarch64": (0xC00000B7, 203),
-        "x86_64": (0xC000003E, 42),
+def block_connections(*, keep_process_group=False):
+    """Block control connections and optionally escape from the episode process group."""
+    arch, connect, setpgid, setsid = {
+        "aarch64": (0xC00000B7, 203, 154, 157),
+        "x86_64": (0xC000003E, 42, 109, 112),
     }[os.uname().machine]
 
     class Filter(ctypes.Structure):
@@ -30,19 +41,20 @@ def block_connections():
         _fields_ = [("len", ctypes.c_ushort), ("filter", ctypes.POINTER(Filter))]
 
     denied = 0x00050001  # SECCOMP_RET_ERRNO | EPERM
-    rules = (Filter * 11)(
+    instructions = [
         Filter(0x20, 0, 0, 4),  # Load seccomp_data.arch.
         Filter(0x15, 1, 0, arch),
         Filter(0x06, 0, 0, denied),  # Reject alternate syscall architectures.
         Filter(0x20, 0, 0, 0),  # Load seccomp_data.nr.
         Filter(0x35, 0, 1, 0x40000000),  # Reject the x32 ABI too.
         Filter(0x06, 0, 0, denied),
-        Filter(0x15, 0, 1, connect),
-        Filter(0x06, 0, 0, denied),
-        Filter(0x15, 0, 1, 425),  # io_uring_setup can bypass connect().
-        Filter(0x06, 0, 0, denied),
-        Filter(0x06, 0, 0, 0x7FFF0000),  # SECCOMP_RET_ALLOW
-    )
+    ]
+    # io_uring_setup can bypass connect(). Descendants inherit this filter.
+    syscalls = (connect, 425) + ((setpgid, setsid) if keep_process_group else ())
+    for syscall in syscalls:
+        instructions.extend((Filter(0x15, 0, 1, syscall), Filter(0x06, 0, 0, denied)))
+    instructions.append(Filter(0x06, 0, 0, 0x7FFF0000))  # SECCOMP_RET_ALLOW
+    rules = (Filter * len(instructions))(*instructions)
     libc = ctypes.CDLL(None, use_errno=True)
     program = Program(len(rules), rules)
     if libc.prctl(38, 1, 0, 0, 0) or libc.prctl(22, 2, ctypes.byref(program), 0, 0):
@@ -50,36 +62,54 @@ def block_connections():
         raise OSError(errno, os.strerror(errno))
 
 
-async def candidate(channel):
+def load_policy(source, observation_space, action_space, instructions):
+    """Container-only policy loading, shared by the two execution backends."""
+    if len(source.encode()) > MAX_SOURCE:
+        raise ValueError("Source exceeds 64 KiB")
+    namespace = {"__name__": "candidate"}
+    exec(compile(source, "candidate.py", "exec"), namespace)
+    solution = namespace["Solution"]
+    if not isinstance(solution, type) or not issubclass(solution, Policy):
+        raise TypeError("Solution must subclass rsikit.Policy")
+    return solution(observation_space, action_space, instructions=instructions)
+
+
+async def candidate(channel, *, binary=False):
     policy = None
-    while line := channel.readline(MAX_MESSAGE + 2):
-        request = loads(line)
+    while line := channel.read(4) if binary else channel.readline(MAX_MESSAGE + 2):
+        if binary:
+            size = frame_size(line)
+            body = channel.read(size)
+            if len(body) != size:
+                raise ValueError("Incomplete frame")
+            request = unpack(body)
+        else:
+            request = loads(line)
         try:
             command = request["command"]
             if command == "start":
-                namespace = {"__name__": "candidate"}
-                exec(compile(request["source"], "candidate.py", "exec"), namespace)
-                solution = namespace["Solution"]
-                if not isinstance(solution, type) or not issubclass(solution, Policy):
-                    raise TypeError("Solution must subclass rsikit.Policy")
-                policy = solution(
+                policy = load_policy(
+                    request["source"],
                     decode_space(request["observation_space"]),
                     decode_space(request["action_space"]),
-                    instructions=request["instructions"],
+                    request["instructions"],
                 )
                 await policy.reset(seed=request["seed"])
                 response = {"ok": True}
             elif command == "act":
-                response = {"action": encode(await policy.act(decode(request["observation"])))}
+                observation = request["observation"] if binary else decode(request["observation"])
+                action = await policy.act(observation)
+                response = {"action": action if binary else encode(action)}
             elif command == "close":
                 if policy is not None:
                     await policy.close()
                 response = {"ok": True}
             else:
                 raise ValueError("Unknown command")
-            output = dumps(response)
+            output = pack(response) if binary else dumps(response)
         except BaseException as exc:
-            output = dumps({"error": f"{type(exc).__name__}: {str(exc)[:2000]}"})
+            error = {"error": f"{type(exc).__name__}: {str(exc)[:2000]}"}
+            output = pack(error) if binary else dumps(error)
         channel.write(output)
         channel.flush()
         if request["command"] == "close":
@@ -98,7 +128,7 @@ def run_candidate(channel, directory=None):
         for fd in (0, 1, 2):
             os.dup2(sink.fileno(), fd)
     with channel, channel.makefile("rwb") as stream:
-        asyncio.run(candidate(stream))
+        asyncio.run(candidate(stream, binary=directory is not None))
 
 
 def main():

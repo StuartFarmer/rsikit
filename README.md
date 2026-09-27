@@ -8,9 +8,15 @@ Evolve and evaluate class-based policies in
 - `Run`: stores policies, scores, and returned artifacts.
 - `Executor`: owns concurrency and timeouts, using a configurable sandbox.
 - `DockerSandbox`: reuses one container across a run, with independent evaluation processes.
+- `InProcessDockerSandbox`: runs policy and environment together inside Docker, avoiding per-action IPC.
 - `AlphaEvolve`: evolutionary search using Slick and Gymnasium feedback.
 - `ShinkaEvolve`: island archives, adaptive model selection, and diff/rewrite/crossover search.
 - `LineageSearch`: diverse approach families, measured refinement and pivots, and stagnation-based completion.
+
+The shared library lives in `rsikit/`. The four independent search algorithms
+live under [`research/`](research/README.md) and import shared functionality from
+`rsikit`, never from another algorithm. Run research examples from the repository
+root; the library wheel includes only `rsikit`.
 
 ```python
 from pathlib import Path
@@ -20,7 +26,7 @@ from slick import prompts
 from slick.providers import OpenRouterAPI
 
 import rsikit.generation as generation
-from rsikit import DockerSandbox, Executor, Run, generate
+from rsikit import Executor, Run, generate
 
 # Configure Slick once at application startup.
 prompts.TEMPLATE_ROOT = Path(generation.__file__).parent / "prompts"
@@ -32,7 +38,7 @@ policy = await generate(
     "velocity. Action 0 pushes left and 1 pushes right. Maximize surviving steps.",
     provider=provider,
 )
-executor = Executor(sandbox=DockerSandbox(episode_timeout=60), concurrency=4, call_timeout=10)
+executor = Executor(concurrency=4)
 with gym.make("CartPole-v1", max_episode_steps=500) as environment:
     async with Run.create(name="cartpole-comparison", environment=environment, executor=executor) as run:
         scores = await run.evaluate([policy], seeds=[0, 1, 2])
@@ -47,7 +53,21 @@ for a group; it returns one mean score per policy ID. See [execution, runs, and 
 
 Docker episodes default to a 60-second wall-clock limit per seed. Exceeding it
 raises a recoverable `PolicyTimeout` and terminates that episode's workers while
-other episodes continue. `call_timeout` separately limits each policy call.
+other episodes continue. With `DockerSandbox`, `call_timeout` separately limits each policy call.
+
+`Executor` defaults to `InProcessDockerSandbox`. To configure its episode timeout:
+
+```python
+from rsikit import Executor, InProcessDockerSandbox
+
+executor = Executor(sandbox=InProcessDockerSandbox(episode_timeout=60), concurrency=4)
+```
+
+It keeps the restricted Docker container and a fresh process per episode, but
+lets the policy share memory with the environment. It protects the host rather
+than hidden environment state or scoring integrity. Its external `episode_timeout`
+covers the complete rollout; `call_timeout` is not applied. Rebuild the sandbox
+image before using it. See [performance measurements](docs/IN_PROCESS_SANDBOX.md).
 
 ## Setup
 
@@ -157,7 +177,7 @@ Build the Docker worker above before running the search. The default `paper`
 variant uses `openai/gpt-oss-120b:nitro` and overlaps generation with evaluation:
 
 ```python
-from alphaevolve.paper import search
+from research.alphaevolve.paper import search
 
 # evaluate_batch returns policy.id -> EvaluationResult with metrics and descriptors.
 await search(generator, evaluate_batch, proposals=250, evaluation_batch_size=10)
@@ -177,7 +197,7 @@ generations continue. A generation can return fewer policies than `--batch-size`
 Generation runs four proposals concurrently by default, including their repair calls.
 Use `--generation-concurrency` to change this; `--concurrency` controls sandbox
 evaluation separately. Set generation concurrency to 1 for sequential requests.
-The optimizer lives outside the core in `alphaevolve/paper/`. This independently
+The optimizer lives outside the core in `research/alphaevolve/paper/`. This independently
 implements the published mechanisms; the paper does not disclose exact database
 sampling/migration rules, so those choices are documented in the guide.
 Select `--variant original` for the historical scalar-feedback baseline or
@@ -235,7 +255,7 @@ Replay scores are stored separately, so previously cached scores cannot skip rec
 
 ## ShinkaEvolve
 
-The previous `main` implementation is now available in `shinkaevolve/`, using the
+The previous `main` implementation is now available in `research/shinkaevolve/`, using the
 same environments, Docker executor, Run storage, and video replay:
 
 ```sh
@@ -306,6 +326,6 @@ Host and sandbox Python minor versions must match. The Dockerfile defaults to Py
 3.14; use `--build-arg PYTHON_VERSION=X.Y` when building for another version.
 
 Docker checks skip explicitly when Docker or the worker image is unavailable.
-Examples and tests live at the repository root and are excluded from the library
-wheel (included in the source distribution). The core remains a Gymnasium episode runner. AlphaEvolve and ShinkaEvolve are separate
-modules that generate policies and update selection from Run's returned scores.
+Research algorithms, examples, and tests are included in the source distribution
+and excluded from the library wheel. The core supplies policy generation, shared
+edit validation, execution, environments, run storage, and progress display.

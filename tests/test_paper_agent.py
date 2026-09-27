@@ -7,9 +7,9 @@ from unittest.mock import patch
 
 from slick import prompts
 
-import alphaevolve
-from alphaevolve import paper
-from alphaevolve.original.agent import Guidance
+from research import alphaevolve
+from research.alphaevolve import paper
+from research.alphaevolve.original.agent import Guidance
 from rsikit.episode import PolicyError
 from rsikit.policy import _policy_class
 from tests.providers import ScriptedProvider
@@ -44,9 +44,7 @@ class PaperAgentTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_runtime_policy_error_is_repaired_before_entering_archive(self):
         provider = ScriptedProvider([program(0), program(1)])
-        agent = paper.AlphaEvolve(
-            "task", provider, config=paper.Config(islands=1, meta_interval=0)
-        )
+        agent = paper.AlphaEvolve("task", provider, config=paper.Config(islands=1, meta_interval=0))
         self.addCleanup(agent.close)
         diagnostic = "ValueError: cannot reshape array of size 6 into shape (2,6)"
         evaluated = []

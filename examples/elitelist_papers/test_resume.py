@@ -10,9 +10,9 @@ from unittest.mock import patch
 from rich.console import Console
 from slick import prompts
 
-import elitesearch
-from elitesearch import Config, EliteSearch, Generation, Measurement, Organism
 from examples.elitelist_papers import run as runner
+from research import elitesearch
+from research.elitesearch import Config, EliteSearch, Generation, Measurement, Organism
 from rsikit import Executor, Run
 from rsikit.episode import InfrastructureError
 from tests.providers import ScriptedProvider

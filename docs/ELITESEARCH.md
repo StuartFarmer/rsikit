@@ -49,7 +49,8 @@ controls operator shuffling and parent sampling.
 
 Generation overlaps evaluation as candidates become ready. All model calls,
 including repairs, share `--generation-concurrency`; Docker episode workers use
-the separate `--concurrency` setting. A generation completes before breeding the
+the separate `--concurrency` setting. New candidates can use free workers while
+earlier candidates finish their remaining seeds. A generation completes before breeding the
 next one so it can use the updated leaderboard.
 
 Rich shows generations, evaluated/discarded population slots, filled elite slots,
@@ -64,8 +65,11 @@ seeds 100–104, without changing the leaderboard or repairing against those res
 Improvement on search seeds is not a guarantee of improvement on unseen seeds.
 
 Programmatic callers import `Config`, `EliteSearch`, and `Measurement` from
-`elitesearch`, configure Slick's template root to `elitesearch/prompts`, and inject
+`research.elitesearch`, configure Slick's template root to `research/elitesearch/prompts`, and inject
 an async evaluator returning `{policy.id: Measurement(per_seed_scores)}`. Candidate
 failures use `Measurement({}, failure="diagnostic")`; infrastructure failures raise.
+Evaluation callbacks run concurrently; a shared Run/Executor bounds episode workers.
 The caller owns isolated execution and persistence through `on_checkpoint` and
 `agent.records()`. Generated code is never executed by the optimizer itself.
+
+See [evaluation throughput](EVALUATOR_PERFORMANCE.md) for timing and benchmark commands.

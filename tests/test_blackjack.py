@@ -266,7 +266,8 @@ class BlackjackTests(unittest.TestCase):
     def test_optimizer_environment_factory(self):
         import cloudpickle
 
-        from examples.alphaevolve import FEATURE_BOUNDS, TASKS, make_environment
+        from examples.alphaevolve import FEATURE_BOUNDS
+        from rsikit.envs.tasks import TASKS, make_environment
 
         self.assertIn("Blackjack", TASKS)
         self.assertIn("Blackjack", FEATURE_BOUNDS)

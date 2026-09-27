@@ -8,7 +8,18 @@ __pycache__/
 build/
 dist/
 *.egg-info/
+# Generated run artifacts (at any depth).
 runs/
+outputs/
+logs/
+artifacts/
+exports/
+videos/
+*.sqlite
+*.sqlite-*
+*.log
+*.jsonl
+.ipynb_checkpoints/
 .DS_Store
 .env
 .env.*

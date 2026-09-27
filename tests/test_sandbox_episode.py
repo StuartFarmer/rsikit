@@ -196,11 +196,12 @@ class SandboxEpisodeSmoke(unittest.IsolatedAsyncioTestCase):
         from rich.console import Console
         from slick import prompts
 
-        import alphaevolve
-        from alphaevolve.edits import Program
-        from alphaevolve.improved import AlphaEvolve
-        from examples.alphaevolve import make_environment, run_search
+        from examples.alphaevolve import run_search
+        from research import alphaevolve
+        from research.alphaevolve.improved import AlphaEvolve
         from rsikit import Run
+        from rsikit.envs.tasks import make_environment
+        from rsikit.generation.edits import Program
         from tests.providers import ScriptedProvider
 
         if importlib.util.find_spec("Box2D") is None:
@@ -264,12 +265,12 @@ class Solution(Policy):
         from slick import prompts
         from sqlmodel import select
 
-        import shinkaevolve
-        from alphaevolve.edits import Program
-        from examples.alphaevolve import make_environment
         from examples.shinkaevolve import run_search
+        from research import shinkaevolve
+        from research.shinkaevolve import Config, Evaluation, Generation, ShinkaEvolve
         from rsikit import Executor, Run
-        from shinkaevolve import Config, Evaluation, Generation, ShinkaEvolve
+        from rsikit.envs.tasks import make_environment
+        from rsikit.generation.edits import Program
         from tests.providers import ScriptedProvider
 
         try:
@@ -348,12 +349,12 @@ class Solution(Policy):
         from rich.console import Console
         from slick import prompts
 
-        import alphaevolve
-        from alphaevolve.edits import Program
-        from alphaevolve.improved import AlphaEvolve, Config
         from examples import cartpole
         from examples.alphaevolve import run_search
+        from research import alphaevolve
+        from research.alphaevolve.improved import AlphaEvolve, Config
         from rsikit import Executor, Run
+        from rsikit.generation.edits import Program
         from tests.providers import ScriptedProvider
 
         initial = "from rsikit import Policy\nclass Solution(Policy):\n    async def act(self, observation):\n        return 0\n"
@@ -407,11 +408,11 @@ class Solution(Policy):
         from rich.console import Console
         from slick import prompts
 
-        import alphaevolve
-        from alphaevolve.edits import Program
-        from alphaevolve.improved import AlphaEvolve
         from examples.alphaevolve import run_search
+        from research import alphaevolve
+        from research.alphaevolve.improved import AlphaEvolve
         from rsikit import Executor, Run
+        from rsikit.generation.edits import Program
         from tests.providers import ScriptedProvider
 
         broken = """from rsikit import Policy

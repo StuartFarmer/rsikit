@@ -3,3 +3,4 @@ logs/
 figures/
 .ipynb_checkpoints/
 __pycache__/
+companion/

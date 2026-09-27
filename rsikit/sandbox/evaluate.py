@@ -9,27 +9,24 @@ import sys
 from contextlib import nullcontext
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from time import monotonic
 
 import cloudpickle
 import gymnasium as gym
 
 from rsikit.episode import InfrastructureError, PolicyError, PolicyTimeout, run_episode
 from rsikit.sandbox import SandboxPolicy
-from rsikit.sandbox.codec import MAX_MESSAGE, loads
+from rsikit.sandbox.codec import MAX_MESSAGE, frame_size, loads
 
 
 class ProcessPolicy(SandboxPolicy):
     def __init__(self, *args, channel=None, **kwargs):
         super().__init__(*args, **kwargs)
         self.channel = channel
-        self.reader = self.writer = None
+        self._binary = channel is not None
 
     async def reset(self, *, seed=None):
-        if self.channel is not None:
-            self.reader, self.writer = await asyncio.open_connection(
-                sock=self.channel, limit=MAX_MESSAGE + 1
-            )
-        else:
+        if self.channel is None:
             await self._start_process()
         self.ready = True
         await self._request(
@@ -59,24 +56,34 @@ class ProcessPolicy(SandboxPolicy):
         if loads(await asyncio.wait_for(self.process.stdout.readline(), 60)) != {"ready": True}:
             raise InfrastructureError("Policy worker did not start")
 
-    async def _exchange(self, payload):
+    async def _exchange_with_timeout(self, payload):
         if self.channel is None:
-            return await super()._exchange(payload)
-        self.writer.write(payload)
-        await self.writer.drain()
-        response = await self.reader.readline()
-        if not response:
-            raise PolicyError("Candidate exited without a response")
-        return response
+            return await super()._exchange_with_timeout(payload)
+        # This process serves exactly one episode. Blocking here avoids a task and
+        # event-loop round trip per action; the supervisor still owns cancellation.
+        deadline = monotonic() + self.call_timeout
+        self.channel.settimeout(self.call_timeout)
+        self.channel.sendall(payload)
+
+        def receive(size):
+            data = bytearray()
+            while len(data) < size:
+                remaining = deadline - monotonic()
+                if remaining <= 0:
+                    raise TimeoutError("Policy response deadline exceeded")
+                self.channel.settimeout(remaining)
+                chunk = self.channel.recv(size - len(data))
+                if not chunk:
+                    raise PolicyError("Candidate exited without a complete response")
+                data.extend(chunk)
+            return bytes(data)
+
+        return receive(frame_size(receive(4)))
 
     async def _destroy(self):
         self.ready = False
         if self.channel is not None:
-            if self.writer is not None:
-                self.writer.transport.abort()
-                await self.writer.wait_closed()
-            else:
-                self.channel.close()
+            self.channel.close()
             return
         if self.process is None:
             return
@@ -89,7 +96,7 @@ class ProcessPolicy(SandboxPolicy):
         await process.wait()
 
 
-async def evaluate(request, *, channel=None, directory=None):
+async def evaluate(request, *, channel=None, directory=None, in_process=False):
     if request["python"] != list(sys.version_info[:2]):
         raise InfrastructureError(
             "Host and sandbox Python minor versions must match; rebuild with --build-arg PYTHON_VERSION=X.Y"
@@ -107,6 +114,15 @@ async def evaluate(request, *, channel=None, directory=None):
             wrapper = wrapper.env
 
         def make_policy(observation_space, action_space, *, instructions):
+            if in_process:
+                from rsikit.sandbox.in_process import DirectPolicy
+
+                return DirectPolicy(
+                    observation_space,
+                    action_space,
+                    instructions=instructions,
+                    source=request["implementation"],
+                )
             return ProcessPolicy(
                 observation_space,
                 action_space,

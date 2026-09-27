@@ -25,11 +25,12 @@ from rich.text import Text
 from slick import prompts
 from slick.providers import OpenRouterAPI
 
-import elitesearch
-from elitesearch import Config, EliteSearch, Measurement
-from examples.alphaevolve import TASKS, _ProgressHandler, make_environment
+from research import elitesearch
+from research.elitesearch import Config, EliteSearch, Measurement
 from rsikit import Executor, Run
+from rsikit.envs.tasks import TASKS, make_environment
 from rsikit.episode import PolicyError
+from rsikit.progress import ProgressHandler
 from rsikit.sandbox.docker import DockerSandbox
 
 
@@ -83,7 +84,7 @@ async def generation_videos(queue, path, top, workers):
                 raise
         if code:
             raise RuntimeError(f"Generation {generation} video export failed; see {log_path}")
-        logging.getLogger("elitesearch").info(
+        logging.getLogger("research.elitesearch").info(
             "Generation %s videos: %s", generation, output / "index.html"
         )
 
@@ -92,7 +93,7 @@ async def run_search(
     agent, run, *, seeds, heldout_seeds, console=None, video_top=0, video_workers=2
 ):
     console = console or Console()
-    loggers = [logging.getLogger("elitesearch"), logging.getLogger("rsikit")]
+    loggers = [logging.getLogger("research.elitesearch"), logging.getLogger("rsikit")]
     settings = [(item.level, item.propagate) for item in loggers]
     previous = agent.on_checkpoint
     reported = 0
@@ -115,7 +116,7 @@ async def run_search(
             "Population evaluated/discarded", total=agent.config.population_size
         )
         elites = progress.add_task("Elite slots filled", total=agent.config.elite_size)
-        display = _ProgressHandler(progress, overlap=True)
+        display = ProgressHandler(progress, overlap=True)
         log = logging.FileHandler(run.path / "run.log", encoding="utf-8")
         log.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(name)s: %(message)s"))
         for item in loggers:

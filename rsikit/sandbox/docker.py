@@ -27,6 +27,8 @@ async def _spawn(*args, **kwargs):
 
 
 class DockerSandbox:
+    _in_process = False
+
     def __init__(self, *, image: str = "rsikit-sandbox:local", episode_timeout: float = 60.0):
         if not math.isfinite(episode_timeout) or episode_timeout <= 0:
             raise ValueError("episode_timeout must be positive and finite")
@@ -106,8 +108,12 @@ class DockerSandbox:
                     for key in ("supervisor_pid", "forkserver_pid")
                 )
             ):
-                raise InfrastructureError("Invalid sandbox readiness message; rebuild the Docker image")
+                raise InfrastructureError(
+                    "Invalid sandbox readiness message; rebuild the Docker image"
+                )
             self.ready = ready
+            if self._in_process and ready.get("in_process") is not True:
+                raise InfrastructureError("Rebuild the Docker image for InProcessDockerSandbox")
             self._reader = asyncio.create_task(self._read_results())
         except BaseException as exc:
             try:
@@ -212,6 +218,7 @@ class DockerSandbox:
                     "seed": seed,
                     "call_timeout": call_timeout,
                     "episode_timeout": self.episode_timeout,
+                    "in_process": self._in_process,
                 },
             },
             allow_nan=False,
@@ -285,3 +292,13 @@ class DockerSandbox:
                         await self.process.communicate()
                     self.process = None
                 self.ready = None
+
+
+class InProcessDockerSandbox(DockerSandbox):
+    """Policy and environment share a fresh process inside the restricted container.
+
+    Protects the host, not scoring integrity. The supervisor enforces
+    episode_timeout; Executor.call_timeout is not applied to individual calls.
+    """
+
+    _in_process = True

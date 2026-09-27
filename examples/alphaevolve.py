@@ -12,9 +12,7 @@ from dataclasses import asdict
 from pathlib import Path
 from statistics import fmean, pstdev
 
-import gymnasium as gym
 from rich.console import Console
-from rich.logging import RichHandler
 from rich.progress import (
     BarColumn,
     MofNCompleteColumn,
@@ -23,59 +21,20 @@ from rich.progress import (
     TextColumn,
     TimeElapsedColumn,
 )
-from rich.table import Table
-from rich.text import Text
 from slick import prompts
 from slick.providers import OpenRouterAPI
 from sqlalchemy import inspect
 from sqlmodel import func, select
 
-import alphaevolve
-from alphaevolve import improved, original, paper
-from alphaevolve.edits import check_program
-from alphaevolve.history import Generation, history_records
+from research import alphaevolve
+from research.alphaevolve import improved, original, paper
+from research.alphaevolve.history import Generation, history_records
 from rsikit import Executor, Run
-from rsikit.envs import BitcoinEnv, BlackjackEnv
+from rsikit.envs.tasks import TASKS, make_environment
 from rsikit.episode import PolicyError
+from rsikit.generation.edits import check_program
 from rsikit.policy import _policy_class
-
-TASKS = {
-    "Bitcoin": "Maximize final USD wealth after BTC trading fees over the training period.",
-    "Blackjack": "Maximize net profit over a finite blackjack shoe, with betting and sitting out.",
-    "CartPole-v1": (
-        "Balance the pole for as many steps as possible. Observation: [cart position, "
-        "cart velocity, pole angle, pole angular velocity]. Action 0 pushes left; "
-        "1 pushes right. Each surviving step earns 1 reward. The episode terminates "
-        "when the pole tilts too far or the cart leaves the allowed range."
-    ),
-    "LunarLander-v3": (
-        "Land safely near the pad at (0, 0), maximizing cumulative reward. Wind and "
-        "turbulence are enabled. Observation indices: 0 horizontal position, 1 vertical "
-        "position, 2 horizontal velocity, 3 vertical velocity, 4 angle, 5 angular "
-        "velocity, 6 left leg contact, 7 right leg contact. Positions and velocities "
-        "are normalized simulator values. Return a float32 array [main, lateral], "
-        "each in [-1, 1]. Main < 0 turns the main engine off; main in [0, 1] maps to "
-        "50-100% power. Lateral in (-0.5, 0.5) turns side engines off; below -0.5 "
-        "fires the left booster, above 0.5 fires the right, with magnitude mapping "
-        "to 50-100% power. Reward favors approaching the pad, slowing down, staying "
-        "upright and leg contact; firing engines costs reward. A crash costs 100; "
-        "a safe landing earns 100. Termination: crash, leaving the horizontal bounds, "
-        "or coming to rest. Initial force and wind vary with the episode seed."
-    ),
-    "BipedalWalker-v3": (
-        "Walk to the right over uneven terrain without falling, maximizing cumulative "
-        "reward. Normal terrain, not hardcore. Observation indices: 0 hull angle, "
-        "1 scaled hull angular velocity, 2-3 scaled horizontal/vertical velocity; "
-        "4 hip angle, 5 scaled hip speed, 6 knee angle plus 1, 7 scaled knee speed, "
-        "8 foot contact for the first leg; 9-13 the same five values for the second "
-        "leg; 14-23 ten lidar fractions (0 near, 1 far). Return a float32 array of "
-        "four motor commands in [-1, 1]: first hip, first knee, second hip, second "
-        "knee. Sign sets motor direction; magnitude limits torque. Reward favors "
-        "forward progress and an upright hull, with a motor-effort penalty. Falling "
-        "costs 100. Termination: hull contacts ground or reaching the terrain end. "
-        "Terrain and initial push vary with the episode seed."
-    ),
-}
+from rsikit.progress import ProgressHandler, show_scores
 
 FEATURE_BOUNDS = {
     "Bitcoin": {"mean_reward": (-10000, 1000000, 50), "reward_std": (0, 1, 1)},
@@ -133,81 +92,6 @@ async def evaluate_gym(
     return results
 
 
-def make_environment(name, *, max_steps=None, render_mode=None, shoes_per_episode=24):
-    if name in ("Bitcoin", "Blackjack"):
-        if render_mode is not None:
-            raise ValueError(f"{name} does not support rendering")
-        env = (
-            BitcoinEnv() if name == "Bitcoin" else BlackjackEnv(shoes_per_episode=shoes_per_episode)
-        )
-        if max_steps is not None:
-            instructions = env.instructions
-            env = gym.wrappers.TimeLimit(env, max_episode_steps=max_steps)
-            env.instructions = instructions + f" The episode is truncated after {max_steps} steps."
-        return env
-    options = {"continuous": True, "enable_wind": True} if name == "LunarLander-v3" else {}
-    if max_steps is not None:
-        options["max_episode_steps"] = max_steps
-    # Keep instructions on a wrapper: Box2D's EzPickle reconstructs the base env.
-    env = gym.Wrapper(gym.make(name, render_mode=render_mode, **options))
-    env.instructions = (
-        f"{name}: {TASKS[name]}\n"
-        f"Observation space: {env.observation_space}\nAction space: {env.action_space}\n"
-        f"The episode is truncated after {env.spec.max_episode_steps} steps."
-    )
-    return env
-
-
-class _ProgressHandler(RichHandler):
-    def __init__(self, progress, *, overlap=False):
-        super().__init__(
-            console=progress.console,
-            show_path=False,
-            markup=False,
-            highlighter=None,
-            rich_tracebacks=True,
-            tracebacks_show_locals=False,
-        )
-        self.progress = progress
-        self.overlap = overlap
-        self.generation = progress.add_task("Generating policies", total=0, visible=False)
-        self.evaluation = progress.add_task("Evaluating policies", total=0, visible=False)
-
-    def emit(self, record):
-        event = getattr(record, "event", None)
-        if event == "generation_started":
-            if self.overlap:
-                total = self.progress.tasks[self.generation].total + record.total
-                self.progress.update(self.generation, total=total, visible=True)
-            else:
-                self.progress.update(self.evaluation, visible=False)
-                self.progress.reset(self.generation, total=record.total, visible=True)
-        elif event in ("policy_generated", "proposal_discarded"):
-            self.progress.advance(self.generation)
-        elif event == "evaluation_started":
-            if not self.overlap:
-                self.progress.update(self.generation, visible=False)
-            self.progress.reset(self.evaluation, total=record.total, visible=True)
-        elif event in ("policy_evaluated", "evaluation_failed"):
-            self.progress.advance(self.evaluation)
-        super().emit(record)
-
-
-def _show_scores(policies, run, console, *, seeds=None):
-    table = Table("Policy", "Description", "Score")
-    seeds = None if seeds is None else tuple(dict.fromkeys(seeds))
-    for policy in policies:
-        scores = run.scores(policy)
-        values = list(scores.values()) if seeds is None else [scores.get(seed) for seed in seeds]
-        score = (
-            f"{fmean(values):.1f}"
-            if values and all(v is not None for v in values)
-            else "unfinished"
-        )
-        table.add_row(Text(policy.name), Text(policy.description), score)
-    console.print(table)
-
-
 async def run_search(
     generator,
     run,
@@ -242,7 +126,7 @@ async def run_search(
         if inspect(db.bind).has_table(Generation.__tablename__):
             first_generation = (db.exec(select(func.max(Generation.number))).one() or 0) + 1
     logger = logging.getLogger("rsikit")
-    loggers = (logger, logging.getLogger("alphaevolve"))
+    loggers = (logger, logging.getLogger("research.alphaevolve"))
     old_settings = [(item.level, item.propagate) for item in loggers]
     with Progress(
         SpinnerColumn(),
@@ -253,7 +137,7 @@ async def run_search(
         console=console,
     ) as progress:
         overall = progress.add_task("Generations", total=generations)
-        display = _ProgressHandler(progress)
+        display = ProgressHandler(progress)
         log = logging.FileHandler(run.path / "run.log", encoding="utf-8")
         log.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(name)s: %(message)s"))
         for item in loggers:
@@ -330,7 +214,7 @@ async def run_search(
                     run.save(
                         *history_records(generator, **history, complete=complete, failures=failures)
                     )
-                _show_scores(policies, run, console)
+                show_scores(policies, run, console)
                 if not policies:
                     logger.warning("No surviving policies in this generation; continuing")
                 if generator.best is not None:
@@ -338,7 +222,7 @@ async def run_search(
                 progress.advance(overall)
         except Exception:
             logger.exception("Run failed; saved results and details are in %s", run.path)
-            _show_scores(run.policies(), run, console)
+            show_scores(run.policies(), run, console)
             raise
         finally:
             for item, (level, propagate) in zip(loggers, old_settings):
@@ -379,7 +263,7 @@ async def run_paper_search(
     )
     console = console or Console()
     logger = logging.getLogger("rsikit")
-    loggers = (logger, logging.getLogger("alphaevolve"))
+    loggers = (logger, logging.getLogger("research.alphaevolve"))
     old_settings = [(item.level, item.propagate) for item in loggers]
     generation = 1
     with run.database() as db:
@@ -416,7 +300,7 @@ async def run_paper_search(
         console=console,
     ) as progress:
         overall = progress.add_task("Evaluated policies", total=generations * batch_size)
-        display = _ProgressHandler(progress)
+        display = ProgressHandler(progress)
         log = logging.FileHandler(run.path / "run.log", encoding="utf-8")
         log.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(name)s: %(message)s"))
         for item in loggers:
@@ -476,7 +360,7 @@ async def run_paper_search(
             for key in unresolved_keys:
                 del unresolved[key]
             if event == "evaluated":
-                _show_scores(policies, run, console, seeds=seeds)
+                show_scores(policies, run, console, seeds=seeds)
                 progress.advance(overall, len(policies))
                 if generator.best is not None:
                     logger.info("Best so far: %s", generator.best.name)
@@ -494,7 +378,7 @@ async def run_paper_search(
                 if not result.accepted:
                     raise ValueError("Initial policy failed screening; it was not registered")
                 generator.register_initial(policy, result)
-                _show_scores([policy], run, console, seeds=seeds)
+                show_scores([policy], run, console, seeds=seeds)
             await paper.search(
                 generator,
                 evaluate,

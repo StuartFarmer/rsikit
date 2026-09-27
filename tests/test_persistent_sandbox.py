@@ -166,20 +166,28 @@ class ProtocolTests(unittest.IsolatedAsyncioTestCase):
         finally:
             await process.communicate()
 
-    async def test_candidate_cleanup_discards_buffered_writes(self):
+    async def test_candidate_timeout_closes_backpressured_socket(self):
         channel, peer = socket.socketpair()
         channel.setsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF, 4096)
         env = CirclePackingEnv(1)
         policy = ProcessPolicy(
-            env.observation_space, env.action_space, source=PACKING, channel=channel
+            env.observation_space,
+            env.action_space,
+            source=PACKING,
+            channel=channel,
+            call_timeout=0.05,
         )
-        policy.reader, policy.writer = await asyncio.open_connection(sock=channel)
+        policy.ready = True
         try:
-            policy.writer.write(b"x" * 1024 * 1024)
-            self.assertGreater(policy.writer.transport.get_write_buffer_size(), 0)
-            await asyncio.wait_for(policy._destroy(), 0.5)
+            with self.assertRaises(PolicyTimeout):
+                await asyncio.wait_for(
+                    policy._request({"command": "start", "source": "x" * 524288}), 0.5
+                )
+            self.assertFalse(policy.ready)
+            self.assertEqual(channel.fileno(), -1)
+            await policy._destroy()  # Cleanup remains idempotent.
         finally:
-            policy.writer.transport.abort()
+            channel.close()
             peer.close()
             env.close()
 
@@ -463,7 +471,8 @@ class PersistentTests(unittest.IsolatedAsyncioTestCase):
             "    async def act(self, observation): return 4\n"
         )
         slow = fast.replace(
-            "return 4", "\n        import asyncio\n        await asyncio.sleep(0.05)\n        return 4"
+            "return 4",
+            "\n        import asyncio\n        await asyncio.sleep(0.05)\n        return 4",
         )
         sandbox = DockerSandbox(episode_timeout=0.5)
         async with Executor(sandbox=sandbox, concurrency=2, call_timeout=3) as executor:
@@ -477,7 +486,8 @@ class PersistentTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual([(p, s, r.score) for p, s, r in results], [("fast", 1, 0)])
             ready, process = sandbox.ready.copy(), sandbox.process
             results = [
-                result async for result in executor.evaluate(
+                result
+                async for result in executor.evaluate(
                     [("repaired", fast, 0)], BlackjackEnv(shoes_per_episode=1)
                 )
             ]

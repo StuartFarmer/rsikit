@@ -13,11 +13,11 @@ from pydantic import ValidationError
 from slick import prompts
 from slick.providers import ProviderError
 
-import alphaevolve
-from alphaevolve.edits import Edit, Mutation, Program, apply_edits, check_rewrite
-from alphaevolve.improved import AlphaEvolve, Config, InvalidCandidate
-from alphaevolve.original.agent import Guidance
+from research import alphaevolve
+from research.alphaevolve.improved import AlphaEvolve, Config, InvalidCandidate
+from research.alphaevolve.original.agent import Guidance
 from rsikit import Executor, Policy, Run
+from rsikit.generation.edits import Edit, Mutation, Program, apply_edits, check_rewrite
 from tests.providers import ScriptedProvider
 from tests.test_run import FakeSandbox
 
@@ -263,7 +263,7 @@ class AlphaEvolveTests(unittest.IsolatedAsyncioTestCase):
 
         provider.acall = delayed
         agent = AlphaEvolve("task", provider)
-        with self.assertLogs("alphaevolve", level="INFO") as logs:
+        with self.assertLogs("research.alphaevolve", level="INFO") as logs:
             async with asyncio.timeout(2):
                 task = asyncio.create_task(agent.generate(n=3, concurrency=2))
                 try:

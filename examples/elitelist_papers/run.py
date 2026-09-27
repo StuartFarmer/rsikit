@@ -26,9 +26,9 @@ from slick.providers import OpenRouterAPI
 from sqlalchemy import inspect as inspect_database
 from sqlmodel import select
 
-import elitesearch
-from elitesearch import Config, EliteSearch, Generation, Organism
 from examples.elitesearch import measure, run_search
+from research import elitesearch
+from research.elitesearch import Config, EliteSearch, Generation, Organism
 from rsikit import Executor, Run
 from rsikit.policy import _policy_class
 from rsikit.sandbox.docker import DockerSandbox
@@ -162,10 +162,12 @@ def command_output(*command):
 def snapshot(path):
     files = [
         ROOT / "pyproject.toml",
-        ROOT / "examples/alphaevolve.py",
+        ROOT / "uv.lock",
+        ROOT / "rsikit/sandbox/Dockerfile",
+        ROOT / "research/__init__.py",
         ROOT / "examples/elitesearch.py",
     ]
-    for package in ("rsikit", "elitesearch", "alphaevolve"):
+    for package in ("rsikit", "research/elitesearch"):
         files.extend(
             file for file in (ROOT / package).rglob("*") if file.suffix in (".py", ".j2", ".txt")
         )
@@ -260,7 +262,9 @@ async def main(argv=None):
     parser.add_argument("--generation-concurrency", type=int, default=4)
     parser.add_argument("--concurrency", type=int, default=4, help="Docker episode workers")
     parser.add_argument(
-        "--episode-timeout", type=float, default=10,
+        "--episode-timeout",
+        type=float,
+        default=10,
         help="Wall-clock seconds per episode evaluation (default: 10)",
     )
     parser.add_argument(
@@ -506,6 +510,11 @@ async def main(argv=None):
                         run.path / "experiment.json",
                         dict(
                             **vars(args),
+                            reporting_target=(
+                                args.target_score
+                                if args.target_score is not None
+                                else env.spec.reward_threshold
+                            ),
                             config=asdict(config),
                             environment=env.paper_settings,
                             instructions=env.instructions,

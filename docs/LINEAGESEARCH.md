@@ -184,8 +184,8 @@ Configure Slick's process-global template root once at application startup:
 ```python
 from pathlib import Path
 from slick import prompts
-import lineagesearch
-from lineagesearch import Config, LineageSearch, Measurement
+from research import lineagesearch
+from research.lineagesearch import Config, LineageSearch, Measurement
 
 prompts.TEMPLATE_ROOT = Path(lineagesearch.__file__).parent / "prompts"
 

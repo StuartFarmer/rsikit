@@ -2,7 +2,7 @@
 
 import unittest
 
-from alphaevolve.edits import InvalidCandidate, check_program
+from rsikit.generation.edits import InvalidCandidate, check_program
 
 
 class PolicyContractTests(unittest.TestCase):

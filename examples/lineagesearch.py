@@ -24,11 +24,12 @@ from rich.tree import Tree
 from slick import prompts
 from slick.providers import OpenRouterAPI
 
-import lineagesearch
-from examples.alphaevolve import TASKS, _ProgressHandler, _show_scores, make_environment
-from lineagesearch import Config, LineageSearch, Measurement
+from research import lineagesearch
+from research.lineagesearch import Config, LineageSearch, Measurement
 from rsikit import Executor, Run
+from rsikit.envs.tasks import TASKS, make_environment
 from rsikit.episode import PolicyError
+from rsikit.progress import ProgressHandler, show_scores
 
 
 async def measure(run, policies, seeds):
@@ -54,7 +55,7 @@ async def measure(run, policies, seeds):
 async def run_search(agent, run, *, seeds, heldout_seeds, console=None):
     """Show generation, repair, evaluation and family progress; retain messages in run.log."""
     console = console or Console()
-    loggers = (logging.getLogger("lineagesearch"), logging.getLogger("rsikit"))
+    loggers = (logging.getLogger("research.lineagesearch"), logging.getLogger("rsikit"))
     logger = loggers[0]
     settings = [(item.level, item.propagate) for item in loggers]
     previous_checkpoint = agent.on_checkpoint
@@ -72,7 +73,7 @@ async def run_search(agent, run, *, seeds, heldout_seeds, console=None):
         families = progress.add_task("Families complete", total=agent.config.families)
         planning = progress.add_task("Planning families", total=agent.config.families)
         calls = progress.add_task("Model calls completed", total=None)
-        display = _ProgressHandler(progress, overlap=True)
+        display = ProgressHandler(progress, overlap=True)
         log = logging.FileHandler(run.path / "run.log", encoding="utf-8")
         log.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(name)s: %(message)s"))
         for item in loggers:
@@ -136,7 +137,7 @@ async def run_search(agent, run, *, seeds, heldout_seeds, console=None):
                         for row in rows
                         if row.batch == batch and row.policy_id is not None
                     }
-                    _show_scores(
+                    show_scores(
                         [p for p in run.policies() if p.id in ids], run, console, seeds=seeds
                     )
                 reported_batches[family.id] = family.batches
@@ -170,7 +171,7 @@ async def run_search(agent, run, *, seeds, heldout_seeds, console=None):
                 heldout = (await measure(run, [agent.best], heldout_seeds))[agent.best.id]
                 summary["heldout"] = dict(scores=heldout.scores, failure=heldout.failure)
                 destination.write_text(json.dumps(summary, indent=2) + "\n", encoding="utf-8")
-                _show_scores([agent.best], run, console, seeds=heldout_seeds)
+                show_scores([agent.best], run, console, seeds=heldout_seeds)
             logger.info(
                 "Stopped: %s; %s attempts, %s model calls, %s policy repairs",
                 study.reason,

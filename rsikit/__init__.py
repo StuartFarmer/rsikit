@@ -6,10 +6,11 @@ from .generation import generate
 from .policy import Policy
 from .run import Run
 from .sandbox import run_program
-from .sandbox.docker import DockerSandbox
+from .sandbox.docker import DockerSandbox, InProcessDockerSandbox
 
 __all__ = [
     "DockerSandbox",
+    "InProcessDockerSandbox",
     "Executor",
     "Policy",
     "Run",

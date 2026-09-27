@@ -6,7 +6,7 @@ import unittest
 from dataclasses import replace
 from pathlib import Path
 
-from alphaevolve.paper.database import Candidate, Database
+from research.alphaevolve.paper.database import Candidate, Database
 from rsikit.policy import _policy_class
 
 

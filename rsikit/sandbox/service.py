@@ -5,13 +5,15 @@ import json
 import math
 import multiprocessing as mp
 import os
+import signal
 import socket
 import sys
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
-from rsikit.episode import InfrastructureError, PolicyTimeout
+from rsikit.episode import InfrastructureError, PolicyError, PolicyTimeout
 from rsikit.sandbox.evaluate import error_result, run_evaluation
+from rsikit.sandbox.in_process import run_in_process
 from rsikit.sandbox.worker import run_candidate
 
 MAX_FRAME = 64 * 1024 * 1024
@@ -49,8 +51,13 @@ async def read_frame(reader):
     return value
 
 
-def reap(process):
+def reap(process, *, group=False):
     if process.pid is not None:
+        if group:
+            try:
+                os.killpg(process.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
         if process.is_alive():
             process.kill()
         process.join()
@@ -96,6 +103,7 @@ async def serve(workers, output):
             "protocol": 2,
             "supervisor_pid": os.getpid(),
             "forkserver_pid": ready["forkserver_pid"],
+            "in_process": True,
         }
     )
     active = set()
@@ -106,21 +114,34 @@ async def serve(workers, output):
             episode_timeout = request.get("episode_timeout", 60.0)
             if not math.isfinite(episode_timeout) or episode_timeout <= 0:
                 raise InfrastructureError("episode_timeout must be positive and finite")
+            in_process = request.get("in_process", False)
+            if type(in_process) is not bool:
+                raise InfrastructureError("in_process must be a boolean")
             with TemporaryDirectory() as directory:
-                policy_side, environment_side = socket.socketpair()
                 result_reader, result_writer = socket.socketpair()
-                candidate = context.Process(target=run_candidate, args=(policy_side, directory))
-                evaluator = context.Process(
-                    target=run_evaluation,
-                    args=(request, environment_side, result_writer, directory),
-                )
+                channels = [result_writer]
+                if in_process:
+                    processes = [
+                        context.Process(
+                            target=run_in_process, args=(request, result_writer, directory)
+                        )
+                    ]
+                else:
+                    policy_side, environment_side = socket.socketpair()
+                    channels.extend((policy_side, environment_side))
+                    processes = [
+                        context.Process(target=run_candidate, args=(policy_side, directory)),
+                        context.Process(
+                            target=run_evaluation,
+                            args=(request, environment_side, result_writer, directory),
+                        ),
+                    ]
                 transport = None
                 try:
-                    candidate.start()
-                    policy_side.close()
-                    evaluator.start()
-                    environment_side.close()
-                    result_writer.close()
+                    for process in processes:
+                        process.start()
+                    for channel in channels:
+                        channel.close()
                     reader, transport = await asyncio.open_connection(
                         sock=result_reader, limit=MAX_FRAME + 1
                     )
@@ -128,10 +149,16 @@ async def serve(workers, output):
                         result = await asyncio.wait_for(read_frame(reader), episode_timeout)
                     except asyncio.TimeoutError as exc:
                         raise PolicyTimeout(f"Episode exceeded {episode_timeout:g}s") from exc
+                    except (InfrastructureError, ValueError, ConnectionError) as exc:
+                        if in_process:
+                            raise PolicyError(
+                                f"Episode process exited without a valid result: {exc}"
+                            ) from exc
+                        raise
                 finally:
-                    for process in (evaluator, candidate):
-                        reap(process)
-                    for channel in (policy_side, environment_side, result_writer):
+                    for process in reversed(processes):
+                        reap(process, group=in_process)
+                    for channel in channels:
                         channel.close()
                     if transport is not None:
                         transport.close()

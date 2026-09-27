@@ -9,9 +9,13 @@ from pydantic import ValidationError
 from slick import prompts
 from slick.providers import ProviderError
 
-import alphaevolve
-from alphaevolve.paper.evaluation import EvaluationResult, EvaluationStage, evaluate_cascade
-from alphaevolve.paper.feedback import LLMFeedback
+from research import alphaevolve
+from research.alphaevolve.paper.evaluation import (
+    EvaluationResult,
+    EvaluationStage,
+    evaluate_cascade,
+)
+from research.alphaevolve.paper.feedback import LLMFeedback
 from rsikit.policy import _policy_class
 from tests.providers import ScriptedProvider
 from tests.test_alphaevolve import program
