@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import ast
 import asyncio
+import json
 import logging
 import math
 import random
@@ -12,12 +13,12 @@ from dataclasses import dataclass
 from statistics import fmean
 
 from pydantic import ValidationError
-from slick import prompt
+from slick import parse, render
 from slick.providers import Provider
 
 from research.rewards import Measurement
 from rsikit import Policy
-from rsikit.generation import WORKER_LIBRARIES, RecordingProvider
+from rsikit.generation import WORKER_LIBRARIES
 from rsikit.generation.edits import (
     InvalidCandidate,
     Mutation,
@@ -27,6 +28,7 @@ from rsikit.generation.edits import (
     check_rewrite,
 )
 
+from .healing import SelfHealer
 from .records import Generation, Organism
 
 logger = logging.getLogger(__name__)
@@ -71,6 +73,7 @@ class EliteSearch:
     ):
         if config.target_score is not None and not math.isfinite(config.target_score):
             raise ValueError("target_score must be finite")
+        self.healer = SelfHealer(task, provider, context=context, libraries=self.libraries)
         self.task, self.context, self.provider = task, context, provider
         self.evaluate, self.config, self.on_checkpoint = evaluate, config, on_checkpoint
         self.rng = random.Random(seed)
@@ -163,23 +166,50 @@ class EliteSearch:
         if self.on_checkpoint is not None:
             self.on_checkpoint(self)
 
-    @prompt(template="new.j2", output_type=Program)
-    async def invent(self, proposal: int, elites: list[Organism], *, generated: Program) -> Program:
-        return generated
-
-    @prompt(template="edit.j2", output_type=Mutation)
-    async def edit(self, parent: Organism, *, generated: Mutation) -> Mutation:
-        return generated
-
-    @prompt(template="remix.j2", output_type=Program)
-    async def remix(self, parents: list[Organism], *, generated: Program) -> Program:
-        return generated
-
-    @prompt(template="repair.j2", output_type=Program)
-    async def repair(
-        self, reference: str, failed: str, diagnostic: str, *, generated: Program
+    async def invent(
+        self, proposal: int, elites: list[Organism], *, provider, record=None
     ) -> Program:
-        return generated
+        schema = Program.model_json_schema()
+        context = render(
+            "new.j2",
+            instance=self,
+            schema=schema,
+            schema_json=json.dumps(schema, indent=2),
+            proposal=proposal,
+            elites=elites,
+        )
+        raw, _ = await provider.acall(context)
+        if record is not None:
+            record["raw"] = raw
+        return parse(raw, Program)
+
+    async def edit(self, parent: Organism, *, provider, record=None) -> Mutation:
+        schema = Mutation.model_json_schema()
+        context = render(
+            "edit.j2",
+            instance=self,
+            schema=schema,
+            schema_json=json.dumps(schema, indent=2),
+            parent=parent,
+        )
+        raw, _ = await provider.acall(context)
+        if record is not None:
+            record["raw"] = raw
+        return parse(raw, Mutation)
+
+    async def remix(self, parents: list[Organism], *, provider, record=None) -> Program:
+        schema = Program.model_json_schema()
+        context = render(
+            "remix.j2",
+            instance=self,
+            schema=schema,
+            schema_json=json.dumps(schema, indent=2),
+            parents=parents,
+        )
+        raw, _ = await provider.acall(context)
+        if record is not None:
+            record["raw"] = raw
+        return parse(raw, Program)
 
     async def _call(self, row, operation, *args):
         call = dict(operation=operation.__name__)
@@ -188,7 +218,7 @@ class EliteSearch:
         try:
             async with self._call_slots:
                 return await asyncio.wait_for(
-                    operation(*args, provider=RecordingProvider(self.provider, call)),
+                    operation(*args, provider=self.provider, record=call),
                     self.config.generation_timeout,
                 )
         except ValidationError as exc:
@@ -251,7 +281,7 @@ class EliteSearch:
                     )
                 )
                 row.repairs += 1
-                operation, args = self.repair, (reference, failed, row.error)
+                operation, args = self.healer.repair, (reference, failed, row.error)
                 logger.warning(
                     "Repairing organism %s (%s/%s): %s",
                     row.id,

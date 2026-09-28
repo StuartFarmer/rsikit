@@ -1,19 +1,22 @@
 """Exercise archive-driven generation, evaluated feedback and optimizer reopening."""
 
+import json
 import tempfile
 import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from slick import prompts
+from slick import prompts, render
 
 from research import alphaevolve
 from research.alphaevolve import paper
 from research.alphaevolve.original.agent import Guidance
 from rsikit.evaluation import PolicyError
+from rsikit.generation.edits import Mutation
 from rsikit.policy import Policy
 from tests.providers import ScriptedProvider
 from tests.test_alphaevolve import program
+from tests.test_episode_storage import trajectory
 
 
 class PaperAgentTests(unittest.IsolatedAsyncioTestCase):
@@ -41,6 +44,79 @@ class PaperAgentTests(unittest.IsolatedAsyncioTestCase):
             feedback="Measured forward speed; reached the time limit.",
             seed_scores={0: reward},
         )
+
+    async def test_propose_and_episode_pairs_derive_fitness_by_persistent_identity(self):
+        from rsikit import Episode, Optimizer
+
+        agent = paper.AlphaEvolve(
+            "task",
+            ScriptedProvider([program(0), program(1)]),
+            config=paper.Config(
+                islands=1,
+                meta_interval=0,
+                features={"mean_reward": (0, 10, 2), "reward_std": (0, 5, 2)},
+            ),
+        )
+        self.addCleanup(agent.close)
+        optimizer: Optimizer = agent
+        policies = await optimizer.propose(2)
+        # Reloaded definitions have different Python identities but the same persistent ID.
+        restored = Policy.from_text(policies[0].to_text())
+        first_episode = Episode(
+            observations=[0, 1, 2],
+            actions=[0, 0],
+            rewards=[1.0, 2.0],
+            terminations=[False, True],
+            truncations=[False, False],
+            infos=[{}, {}, {}],
+        )
+        episodes = [first_episode, trajectory(7), trajectory(8)]
+        optimizer.update(zip([restored, policies[0], policies[1]], episodes, strict=True))
+        candidates = {row.policy.id: row for row in agent.database.all()}
+        first = candidates[policies[0].id]
+        self.assertEqual(first.metrics, {"reward": 5, "worst_reward": 3, "stability": -2})
+        self.assertEqual(first.features, {"mean_reward": 5, "reward_std": 2})
+        self.assertEqual(first.seed_scores, {})  # An Episode does not identify its seed.
+        self.assertEqual(
+            candidates[policies[1].id].metrics, {"reward": 8, "worst_reward": 8, "stability": 0}
+        )
+        self.assertEqual(agent.best.id, policies[1].id)
+        self.assertEqual(agent.completed, 2)
+        self.assertEqual(agent._pending, {})
+
+    async def test_bad_episode_pairs_leave_the_whole_batch_pending(self):
+        from rsikit import Episode
+
+        agent = paper.AlphaEvolve(
+            "task",
+            ScriptedProvider([program(0), program(1)]),
+            config=paper.Config(islands=1, meta_interval=0),
+        )
+        self.addCleanup(agent.close)
+        policies = await agent.generate(2)
+        for episodes in (
+            [trajectory(3), Episode()],
+            [trajectory(3), trajectory(float("nan"))],
+            [trajectory(3)],
+        ):
+            with self.subTest(episodes=episodes), self.assertRaises(ValueError):
+                agent.update(zip(policies, episodes, strict=True))
+            self.assertEqual(agent.completed, 0)
+            self.assertEqual(agent.database.all(), [])
+            self.assertEqual(len(agent._pending), 2)
+
+    async def test_scalar_feedback_updates_the_paper_archive(self):
+        agent = paper.AlphaEvolve(
+            "task", ScriptedProvider([program(0)]), config=paper.Config(islands=1)
+        )
+        self.addCleanup(agent.close)
+        (policy,) = await agent.propose(1)
+        agent.update_scores({policy.id: 3}, seed_scores={policy.id: {42: 3}})
+        (candidate,) = agent.database.all()
+        self.assertEqual(candidate.policy.id, policy.id)
+        self.assertEqual(candidate.metrics, {"reward": 3})
+        self.assertEqual(candidate.seed_scores, {42: 3})
+        self.assertEqual(agent.database.load_state("optimizer")["completed"], 1)
 
     async def test_runtime_policy_error_is_repaired_before_entering_archive(self):
         provider = ScriptedProvider([program(0), program(1)])
@@ -204,7 +280,17 @@ class PaperAgentTests(unittest.IsolatedAsyncioTestCase):
         agent.update_results({child.id: paper.EvaluationResult(metrics={"reward": 2})})
         self.assertEqual(agent.prompt_ideas[-1].score, 1)
         self.assertEqual(agent.database.load_state("optimizer")["prompt_ideas"][-1]["reward"], 1)
-        text = await paper.AlphaEvolve.mutate.render(agent, agent.islands[0], [], "", [])
+        schema = Mutation.model_json_schema()
+        text = render(
+            "paper/prompts/mutate.j2",
+            instance=agent,
+            schema=schema,
+            schema_json=json.dumps(schema, indent=2),
+            parent=agent.islands[0],
+            inspirations=[],
+            guidance="",
+            failures=[],
+        )
         self.assertIn("exact edits", text)
 
 

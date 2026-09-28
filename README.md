@@ -12,6 +12,7 @@ This is an experimental release; APIs may change.
 - `generate`: returns a named `Policy` subclass from the LLM.
 - `Evaluator`: rolls out existing environment and policy instances.
 - `Episode`: records observations, actions, rewards, flags, infos, and artifacts.
+- `Optimizer`: the `propose(n)` / `update(policy_episode_pairs)` protocol, implemented by all three AlphaEvolve variants.
 - `Run`: persists one optimizer run: configuration, checkpoints, policies, and episodes.
 - `Executor`: owns concurrency and timeouts, using a configurable sandbox.
 - `DockerSandbox`: reuses one container across a run, with independent evaluation processes.

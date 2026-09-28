@@ -18,15 +18,16 @@ from statistics import fmean, stdev
 from typing import Annotated
 
 from pydantic import BaseModel, Field, StrictInt, StringConstraints, ValidationError
-from slick import prompt
+from slick import parse, render
 from slick.providers import Provider
 from sqlmodel import SQLModel
 
 from research.rewards import Measurement
 from rsikit import Policy
-from rsikit.generation import WORKER_LIBRARIES, RecordingProvider
+from rsikit.generation import WORKER_LIBRARIES
 from rsikit.generation.edits import InvalidCandidate, Program, check_program, check_rewrite
 
+from .healing import SelfHealer
 from .records import Family, Study, Trial
 
 logger = logging.getLogger(__name__)
@@ -104,6 +105,7 @@ class LineageSearch:
         seed: int = 0,
         on_checkpoint: Callable[[LineageSearch], None] | None = None,
     ):
+        self.healer = SelfHealer(task, provider, context=context, libraries=self.libraries)
         self.task, self.context = task, context
         self.provider, self.evaluate = provider, evaluate
         self.config, self.rng, self.on_checkpoint = config, random.Random(seed), on_checkpoint
@@ -129,8 +131,13 @@ class LineageSearch:
         if self.on_checkpoint is not None:
             self.on_checkpoint(self)
 
-    @prompt(template="families.j2", output_type=Families)
-    async def discover(self, failures: list[dict], *, generated: Families) -> list[FamilyBrief]:
+    async def discover(self, failures: list[dict], *, provider, record=None) -> list[FamilyBrief]:
+        schema = Families.model_json_schema()
+        context = render("families.j2", instance=self, schema=schema, failures=failures)
+        raw, _ = await provider.acall(context)
+        if record is not None:
+            record["raw"] = raw
+        generated = parse(raw, Families)
         items = generated.families
         if len(items) != self.config.families:
             raise InvalidCandidate(
@@ -141,31 +148,51 @@ class LineageSearch:
                 raise InvalidCandidate(f"Duplicate family {field}")
         return items
 
-    @prompt(template="founders.j2", output_type=Approaches)
-    async def found(self, data: dict, count: int, *, generated: Approaches) -> list[Approach]:
+    async def found(self, data: dict, count: int, *, provider, record=None) -> list[Approach]:
+        schema = Approaches.model_json_schema()
+        context = render("founders.j2", instance=self, schema=schema, data=data, count=count)
+        raw, _ = await provider.acall(context)
+        if record is not None:
+            record["raw"] = raw
+        generated = parse(raw, Approaches)
         return self._check_approaches(generated, count)
 
-    @prompt(template="refine.j2", output_type=Approaches)
-    async def refine(self, data: dict, count: int, *, generated: Approaches) -> list[Approach]:
+    async def refine(self, data: dict, count: int, *, provider, record=None) -> list[Approach]:
+        schema = Approaches.model_json_schema()
+        context = render("refine.j2", instance=self, schema=schema, data=data, count=count)
+        raw, _ = await provider.acall(context)
+        if record is not None:
+            record["raw"] = raw
+        generated = parse(raw, Approaches)
         return self._check_approaches(generated, count)
 
-    @prompt(template="pivot.j2", output_type=Approaches)
-    async def pivot(self, data: dict, count: int, *, generated: Approaches) -> list[Approach]:
+    async def pivot(self, data: dict, count: int, *, provider, record=None) -> list[Approach]:
+        schema = Approaches.model_json_schema()
+        context = render("pivot.j2", instance=self, schema=schema, data=data, count=count)
+        raw, _ = await provider.acall(context)
+        if record is not None:
+            record["raw"] = raw
+        generated = parse(raw, Approaches)
         return self._check_approaches(generated, count)
 
-    @prompt(template="elect.j2", output_type=Vote)
-    async def elect(self, decision: dict, data: dict, *, generated: Vote) -> int:
+    async def elect(self, decision: dict, data: dict, *, provider, record=None) -> int:
+        schema = Vote.model_json_schema()
+        context = render("elect.j2", instance=self, schema=schema, decision=decision, data=data)
+        raw, _ = await provider.acall(context)
+        if record is not None:
+            record["raw"] = raw
+        generated = parse(raw, Vote)
         if not 1 <= generated.candidate <= len(decision["proposals"]):
             raise InvalidCandidate("Vote must identify one of the numbered proposals")
         return generated.candidate - 1
 
-    @prompt(template="implement.j2", output_type=Program)
-    async def implement(self, data: dict, approach: dict, *, generated: Program) -> Program:
-        return generated
-
-    @prompt(template="repair.j2", output_type=Program)
-    async def repair(self, data: dict, trial: dict, failed: str, *, generated: Program) -> Program:
-        return generated
+    async def implement(self, data: dict, approach: dict, *, provider, record=None) -> Program:
+        schema = Program.model_json_schema()
+        context = render("implement.j2", instance=self, schema=schema, data=data, approach=approach)
+        raw, _ = await provider.acall(context)
+        if record is not None:
+            record["raw"] = raw
+        return parse(raw, Program)
 
     @staticmethod
     def _check_approaches(generated, count):
@@ -198,7 +225,7 @@ class LineageSearch:
         try:
             async with self._call_slots:
                 return await asyncio.wait_for(
-                    operation(*args, provider=RecordingProvider(self.provider, call)),
+                    operation(*args, provider=self.provider, record=call),
                     timeout=self.config.generation_timeout,
                 )
         except ValidationError as exc:
@@ -455,7 +482,7 @@ class LineageSearch:
             )
             try:
                 program = await self._call(
-                    self.repair,
+                    self.healer.repair,
                     data,
                     diagnostic,
                     failed,

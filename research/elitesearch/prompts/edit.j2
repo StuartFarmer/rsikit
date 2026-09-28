@@ -14,3 +14,11 @@ Measured mean: {{ parent.score }}; seed rewards: {{ parent.seed_scores | tojson 
 
 Return only JSON matching this schema. No Markdown fences:
 {{ schema | tojson }}
+
+---
+
+# Output Format
+
+Respond with ONLY a JSON value matching this schema — no preamble, no commentary, nothing outside the JSON.
+
+{{ schema_json }}

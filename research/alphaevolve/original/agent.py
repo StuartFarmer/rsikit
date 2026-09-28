@@ -8,15 +8,17 @@ import asyncio
 import logging
 import math
 import random
-from collections.abc import Mapping, Sequence
+from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
+from statistics import fmean
 from typing import Literal
 
 from pydantic import BaseModel, Field, ValidationError
-from slick import prompt
+from slick import parse, render
 from slick.providers import Provider, ProviderError
 
-from rsikit.generation import WORKER_LIBRARIES, RecordingProvider
+from rsikit.episode import Episode
+from rsikit.generation import WORKER_LIBRARIES
 from rsikit.generation.edits import (
     InvalidCandidate,
     Mutation,
@@ -25,7 +27,10 @@ from rsikit.generation.edits import (
     check_program,
     check_rewrite,
 )
+from rsikit.optimization import Optimizer
 from rsikit.policy import Policy
+
+from .healing import SelfHealer
 
 logger = logging.getLogger(__name__)
 
@@ -64,8 +69,8 @@ class Config:
     max_repairs: int = 2
 
 
-class AlphaEvolve:
-    """Generate policies in memory; update selection from Run's measured scores.
+class AlphaEvolve(Optimizer):
+    """Propose policies in memory; update selection from caller-supplied episodes.
 
     Configure Slick's template root once before use. A batch sees only previous
     updates. Proposals run concurrently, with bounded repair and no evaluation.
@@ -87,6 +92,7 @@ class AlphaEvolve:
         self.task, self.context = task, context
         self.models = tuple(ensemble) or ((provider, 1.0),)
         self.variants = tuple(prompt_variants)
+        self.healer = SelfHealer(task, provider, context=context, libraries=self.libraries)
         self.config = config
         self.rng = random.Random(seed)
         self.islands: list[_Candidate | None] = [None] * config.islands
@@ -104,12 +110,17 @@ class AlphaEvolve:
     def best(self) -> type[Policy] | None:
         return None if self._best is None else self._best.policy
 
-    @prompt(template="original/prompts/initialize.j2", output_type=Program)
-    async def initialize(self, proposal: int, *, generated: Program) -> Program:
+    async def initialize(self, proposal: int, *, provider, record=None) -> Program:
         """Create an initial named policy without a hand-written seed program."""
-        return generated
+        schema = Program.model_json_schema()
+        context = render(
+            "original/prompts/initialize.j2", instance=self, schema=schema, proposal=proposal
+        )
+        raw, _ = await provider.acall(context)
+        if record is not None:
+            record["raw"] = raw
+        return parse(raw, Program)
 
-    @prompt(template="original/prompts/mutate.j2", output_type=Mutation)
     async def mutate(
         self,
         parent: _Candidate,
@@ -117,11 +128,24 @@ class AlphaEvolve:
         guidance: str,
         failures: list[dict],
         *,
-        generated: Mutation,
+        provider,
+        record=None,
     ) -> Mutation:
-        return generated
+        schema = Mutation.model_json_schema()
+        context = render(
+            "original/prompts/mutate.j2",
+            instance=self,
+            schema=schema,
+            parent=parent,
+            inspirations=inspirations,
+            guidance=guidance,
+            failures=failures,
+        )
+        raw, _ = await provider.acall(context)
+        if record is not None:
+            record["raw"] = raw
+        return parse(raw, Mutation)
 
-    @prompt(template="original/prompts/rewrite.j2", output_type=Program)
     async def rewrite(
         self,
         parent: _Candidate,
@@ -129,16 +153,23 @@ class AlphaEvolve:
         guidance: str,
         failures: list[dict],
         *,
-        generated: Program,
+        provider,
+        record=None,
     ) -> Program:
-        return generated
-
-    @prompt(template="original/prompts/repair.j2", output_type=Program)
-    async def fix(
-        self, reference: str, failed: str, diagnostic: str, *, generated: Program
-    ) -> Program:
-        """Repair a full policy from validation or sandbox diagnostics."""
-        return generated
+        schema = Program.model_json_schema()
+        context = render(
+            "original/prompts/rewrite.j2",
+            instance=self,
+            schema=schema,
+            parent=parent,
+            inspirations=inspirations,
+            guidance=guidance,
+            failures=failures,
+        )
+        raw, _ = await provider.acall(context)
+        if record is not None:
+            record["raw"] = raw
+        return parse(raw, Program)
 
     async def _repair_valid(self, record, reference, failed, diagnostic) -> type[Policy]:
         # Adapt main's check/repair/recheck loop; count all repairs for this proposal.
@@ -157,11 +188,12 @@ class AlphaEvolve:
             )
             try:
                 proposal = await asyncio.wait_for(
-                    self.fix(
+                    self.healer.repair(
                         reference,
                         failed,
                         diagnostic,
-                        provider=RecordingProvider(provider, call, "raw"),
+                        provider=provider,
+                        record=call,
                     ),
                     self.config.generation_timeout,
                 )
@@ -211,15 +243,22 @@ class AlphaEvolve:
         logger.info("Repaired %s → %s — %s", policy.name, replacement.name, replacement.description)
         return replacement
 
-    @prompt(template="original/prompts/evolve_prompt.j2", output_type=Guidance)
     async def evolve_prompt(
-        self,
-        parent: _Candidate,
-        ideas: list[dict],
-        failures: list[dict],
-        *,
-        generated: Guidance,
+        self, parent: _Candidate, ideas: list[dict], failures: list[dict], *, provider, record=None
     ) -> str:
+        schema = Guidance.model_json_schema()
+        context = render(
+            "original/prompts/evolve_prompt.j2",
+            instance=self,
+            schema=schema,
+            parent=parent,
+            ideas=ideas,
+            failures=failures,
+        )
+        raw, _ = await provider.acall(context)
+        if record is not None:
+            record["meta_raw"] = raw
+        generated = parse(raw, Guidance)
         return generated.instruction
 
     async def generate(self, n: int = 1, *, concurrency: int = 4) -> list[type[Policy]]:
@@ -255,7 +294,19 @@ class AlphaEvolve:
             self._pending.setdefault(record["policy"].id, []).append(record)
         return [record["policy"] for record in records]
 
-    def update(
+    async def propose(self, n: int = 1) -> list[type[Policy]]:
+        return await self.generate(n)
+
+    def update(self, results: Iterable[tuple[type[Policy], Episode]]) -> None:
+        """Rank candidates by mean episode return within this update."""
+        returns = {}
+        for policy, episode in results:
+            if not episode.rewards:
+                raise ValueError("Expected a nonempty episode")
+            returns.setdefault(policy.id, []).append(episode.total_reward)
+        self.update_scores({policy_id: fmean(values) for policy_id, values in returns.items()})
+
+    def update_scores(
         self,
         scores: Mapping[str, float],
         *,
@@ -338,7 +389,7 @@ class AlphaEvolve:
             reference = "" if parent is None else parent.policy._implementation
             try:
                 proposal = await asyncio.wait_for(
-                    operation(*arguments, provider=RecordingProvider(provider, record, "raw")),
+                    operation(*arguments, provider=provider, record=record),
                     self.config.generation_timeout,
                 )
                 if parent is None:
@@ -413,7 +464,8 @@ class AlphaEvolve:
                         parent,
                         ideas,
                         failures,
-                        provider=RecordingProvider(provider, record, "meta_raw"),
+                        provider=provider,
+                        record=record,
                     ),
                     self.config.generation_timeout,
                 )

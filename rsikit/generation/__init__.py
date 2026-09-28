@@ -21,7 +21,7 @@ class _Response(BaseModel, extra="forbid"):
 async def generate(
     task: str, *, libraries: str = WORKER_LIBRARIES, generated: _Response
 ) -> type[Policy]:
-    """Return a Policy definition; Run chooses where its implementation executes."""
+    """Return a Policy definition; the caller chooses where its implementation executes."""
     policy = Policy.from_text(
         generated.implementation, name=generated.name, description=generated.description
     )
@@ -32,15 +32,3 @@ async def generate(
         extra={"event": "policy_generated", "policy_id": policy.id},
     )
     return policy
-
-
-class RecordingProvider:
-    """Retain raw responses even when Slick's structured parsing rejects them."""
-
-    def __init__(self, provider, record, key="raw"):
-        self.provider, self.record, self.key = provider, record, key
-
-    async def acall(self, *args, **kwargs):
-        text, calls = await self.provider.acall(*args, **kwargs)
-        self.record[self.key] = text
-        return text, calls

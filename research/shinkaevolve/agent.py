@@ -15,12 +15,12 @@ from decimal import Decimal
 from typing import Literal
 
 from pydantic import BaseModel, Field, StrictBool, ValidationError
-from slick import prompt
+from slick import parse, render
 from slick.providers import Provider, ProviderError
 from sqlmodel import SQLModel
 
 from rsikit import Policy
-from rsikit.generation import WORKER_LIBRARIES, RecordingProvider
+from rsikit.generation import WORKER_LIBRARIES
 from rsikit.generation.edits import (
     InvalidCandidate,
     Mutation,
@@ -31,6 +31,7 @@ from rsikit.generation.edits import (
     evolution_regions,
 )
 
+from .healing import SelfHealer
 from .records import Evaluation, Generation
 
 logger = logging.getLogger(__name__)
@@ -100,6 +101,7 @@ class ShinkaEvolve:
         novelty_provider: Provider | None = None,
         meta_provider: Provider | None = None,
     ):
+        self.healer = SelfHealer(task, provider, context=context, libraries=self.libraries)
         self.task, self.context, self.config = task, context, config
         self.models = tuple(ensemble) or (provider,)
         self.novelty_provider, self.meta_provider = novelty_provider, meta_provider or provider
@@ -129,38 +131,64 @@ class ShinkaEvolve:
     def best(self) -> type[Policy] | None:
         return None if self._best is None else self._best.policy
 
-    @prompt(template="initialize.j2", output_type=Program)
-    async def initialize(self, proposal: int, *, generated: Program) -> Program:
-        return generated
+    async def initialize(self, proposal: int, *, provider, record=None) -> Program:
+        schema = Program.model_json_schema()
+        context = render("initialize.j2", instance=self, schema=schema, proposal=proposal)
+        raw, _ = await provider.acall(context)
+        if record is not None:
+            record["raw"] = raw
+        return parse(raw, Program)
 
-    @prompt(template="diff.j2", output_type=Mutation)
-    async def diff(self, data: dict, *, generated: Mutation) -> Mutation:
-        return generated
+    async def diff(self, data: dict, *, provider, record=None) -> Mutation:
+        schema = Mutation.model_json_schema()
+        context = render("diff.j2", instance=self, schema=schema, data=data)
+        raw, _ = await provider.acall(context)
+        if record is not None:
+            record["raw"] = raw
+        return parse(raw, Mutation)
 
-    @prompt(template="full.j2", output_type=Program)
-    async def rewrite(self, data: dict, *, generated: Program) -> Program:
-        return generated
+    async def rewrite(self, data: dict, *, provider, record=None) -> Program:
+        schema = Program.model_json_schema()
+        context = render("full.j2", instance=self, schema=schema, data=data)
+        raw, _ = await provider.acall(context)
+        if record is not None:
+            record["raw"] = raw
+        return parse(raw, Program)
 
-    @prompt(template="cross.j2", output_type=Program)
-    async def crossover(self, data: dict, *, generated: Program) -> Program:
-        return generated
+    async def crossover(self, data: dict, *, provider, record=None) -> Program:
+        schema = Program.model_json_schema()
+        context = render("cross.j2", instance=self, schema=schema, data=data)
+        raw, _ = await provider.acall(context)
+        if record is not None:
+            record["raw"] = raw
+        return parse(raw, Program)
 
-    @prompt(template="repair.j2", output_type=Program)
-    async def fix(
-        self, reference: str, failed: str, diagnostic: str, *, generated: Program
-    ) -> Program:
-        return generated
-
-    @prompt(template="novelty.j2", output_type=Novelty)
     async def judge(
-        self, implementation: str, nearest: dict, similarity: float, *, generated: Novelty
+        self, implementation: str, nearest: dict, similarity: float, *, provider, record=None
     ) -> Novelty:
-        return generated
+        schema = Novelty.model_json_schema()
+        context = render(
+            "novelty.j2",
+            instance=self,
+            schema=schema,
+            implementation=implementation,
+            nearest=nearest,
+            similarity=similarity,
+        )
+        raw, _ = await provider.acall(context)
+        if record is not None:
+            record["raw"] = raw
+        return parse(raw, Novelty)
 
-    @prompt(template="meta.j2", output_type=Recommendations)
     async def reflect(
-        self, recent: list[dict], previous: list[str], *, generated: Recommendations
+        self, recent: list[dict], previous: list[str], *, provider, record=None
     ) -> list[str]:
+        schema = Recommendations.model_json_schema()
+        context = render("meta.j2", instance=self, schema=schema, recent=recent, previous=previous)
+        raw, _ = await provider.acall(context)
+        if record is not None:
+            record["raw"] = raw
+        generated = parse(raw, Recommendations)
         if len(generated.recommendations) > self.config.max_recommendations or any(
             not item.strip() for item in generated.recommendations
         ):
@@ -175,7 +203,7 @@ class ShinkaEvolve:
         self.calls.append(call)
         try:
             return await asyncio.wait_for(
-                operation(*args, provider=RecordingProvider(provider, call)),
+                operation(*args, provider=provider, record=call),
                 self.config.generation_timeout,
             )
         except ValidationError as exc:
@@ -393,7 +421,7 @@ class ShinkaEvolve:
             call = {}
             try:
                 proposal = await self._call(
-                    self.fix,
+                    self.healer.repair,
                     reference,
                     failed,
                     diagnostic,

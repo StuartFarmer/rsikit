@@ -10,7 +10,7 @@ from unittest.mock import patch
 import gymnasium as gym
 from jinja2 import Environment, nodes
 from pydantic import ValidationError
-from slick import prompts
+from slick import prompts, render
 from slick.providers import ProviderError
 
 from research import alphaevolve
@@ -56,10 +56,10 @@ class AlphaEvolveTests(unittest.IsolatedAsyncioTestCase):
         details = {p.id: {0: 100.0 + i, 1: -100.0 + i} for i, p in enumerate(policies)}
         invalid = {**details, policies[-1].id: {0: math.nan}}
         with self.assertRaises(ValueError):
-            agent.update(scores, seed_scores=invalid)
+            agent.update_scores(scores, seed_scores=invalid)
         self.assertEqual(agent.completed, 0)
         self.assertTrue(all(island is None for island in agent.islands))
-        agent.update(scores, seed_scores=details)
+        agent.update_scores(scores, seed_scores=details)
         self.assertEqual(
             [p.policy.name for p in agent.islands], [f"Policy {i}" for i in range(4, 8)]
         )
@@ -67,11 +67,26 @@ class AlphaEvolveTests(unittest.IsolatedAsyncioTestCase):
         details[policies[4].id][0] = 999  # Retained evidence must be a snapshot.
         parent, inspiration = agent.islands[:2]
         self.assertEqual(parent.seed_scores, {0: 104.0, 1: -96.0})
-        for method in (AlphaEvolve.mutate, AlphaEvolve.rewrite):
-            prompt = await method.render(agent, parent, [inspiration], "", [])
+        for operation, output in (("mutate", Mutation), ("rewrite", Program)):
+            prompt = render(
+                f"improved/prompts/{operation}.j2",
+                instance=agent,
+                schema=output.model_json_schema(),
+                parent=parent,
+                inspirations=[inspiration],
+                guidance="",
+                failures=[],
+            )
             self.assertIn('"1": -96.0', prompt)
             self.assertIn('"1": -95.0', prompt)
-        prompt = await AlphaEvolve.evolve_prompt.render(agent, parent, [], [])
+        prompt = render(
+            "improved/prompts/evolve_prompt.j2",
+            instance=agent,
+            schema=Guidance.model_json_schema(),
+            parent=parent,
+            ideas=[],
+            failures=[],
+        )
         self.assertIn('"1": -96.0', prompt)
         await agent.generate()
         self.assertIn("Per-seed rewards", provider.calls[-1])
@@ -84,7 +99,7 @@ class AlphaEvolveTests(unittest.IsolatedAsyncioTestCase):
             "task", provider, config=Config(islands=3, max_repairs=0, reset_interval=0)
         )
         initial = await agent.generate(n=3)
-        agent.update({p.id: 0 for p in initial})
+        agent.update_scores({p.id: 0 for p in initial})
         self.assertEqual(sum(island is not None for island in agent.islands), 1)
         agent.reset_islands()
         self.assertEqual(sum(island is not None for island in agent.islands), 1)
@@ -92,7 +107,7 @@ class AlphaEvolveTests(unittest.IsolatedAsyncioTestCase):
         self.assertIs(parent, agent.islands[island])
         remaining = await agent.generate(n=2)
         self.assertTrue(all("Initial proposal" in call for call in provider.calls))
-        agent.update({p.id: i + 1 for i, p in enumerate(remaining)})
+        agent.update_scores({p.id: i + 1 for i, p in enumerate(remaining)})
         self.assertEqual(len({island.policy.id for island in agent.islands}), 3)
         agent.reset_islands()
         self.assertEqual(len(agent.events), 1)
@@ -131,7 +146,7 @@ class AlphaEvolveTests(unittest.IsolatedAsyncioTestCase):
                     self.assertIsNone(agent.best)
                 else:
                     self.assertEqual(agent.best.name, "Policy 9")
-                agent.update(scores)
+                agent.update_scores(scores)
                 self.assertEqual(agent.best.id, policies[-1].id)
                 self.assertEqual(len(list(run.path.rglob("*.py"))), (generation + 1) * 10)
                 self.assertEqual(len(list(run.path.rglob("result.txt"))), (generation + 1) * 10)
@@ -139,7 +154,7 @@ class AlphaEvolveTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(sandbox.start.await_count, 2)
         self.assertGreater(len({row["parent"].policy.id for row in agent.attempts[10:]}), 1)
         with self.assertRaises(KeyError):
-            agent.update(scores)
+            agent.update_scores(scores)
 
     async def test_invalid_generation_is_recorded_without_retry_or_execution(self):
         provider = ScriptedProvider(
@@ -161,7 +176,7 @@ class AlphaEvolveTests(unittest.IsolatedAsyncioTestCase):
         )
         agent = AlphaEvolve("task", provider, config=Config(islands=1, max_repairs=0))
         initial = await agent.generate()
-        agent.update({initial[0].id: 0})
+        agent.update_scores({initial[0].id: 0})
         self.assertEqual(await agent.generate(), [])
         self.assertEqual(await agent.generate(), [])
         # Switch operation to test interface validation after a full rewrite.
@@ -174,11 +189,11 @@ class AlphaEvolveTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("not json", provider.calls[-1])
         self.assertEqual(agent.generation_calls, 5)
         with self.assertRaises(ValueError):
-            agent.update({child.id: math.nan})
+            agent.update_scores({child.id: math.nan})
         with self.assertRaises(KeyError):
-            agent.update({child.id: 1, "unknown": 2})
+            agent.update_scores({child.id: 1, "unknown": 2})
         self.assertEqual(agent.completed, 1)
-        agent.update({child.id: 1})
+        agent.update_scores({child.id: 1})
         self.assertEqual(agent.best, child)
         self.assertEqual(await agent.generate(n=0), [])
 
@@ -203,7 +218,7 @@ class AlphaEvolveTests(unittest.IsolatedAsyncioTestCase):
         for score in [0, 2, 2, 3]:
             policy = (await agent.generate())[0]
             prior = agent.best
-            agent.update({policy.id: score})
+            agent.update_scores({policy.id: score})
             if policy.name == "Policy 2":
                 self.assertEqual(agent.best, prior)  # Preserve incumbent on a tie.
         self.assertEqual(unused.calls, [])
@@ -360,9 +375,9 @@ class AlphaEvolveTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(agent._pending, {})
         self.assertEqual(agent.attempts[-1]["status"], "discarded")
         initial = (await agent.generate())[0]
-        agent.update({initial.id: 0})
+        agent.update_scores({initial.id: 0})
         child = (await agent.generate())[0]
-        agent.update({child.id: 1})
+        agent.update_scores({child.id: 1})
         self.assertEqual(agent.best, child)
 
     async def test_typed_edit_boundaries_and_prompt_contracts(self):
@@ -387,15 +402,41 @@ class AlphaEvolveTests(unittest.IsolatedAsyncioTestCase):
             Program(description="Test policy approach.", name=" ", implementation=SOURCE)
         agent = AlphaEvolve("task", ScriptedProvider([program(0)]))
         policy = (await agent.generate())[0]
-        agent.update({policy.id: 1})
+        agent.update_scores({policy.id: 1})
         parent = agent.islands[0]
-        for method in (AlphaEvolve.mutate, AlphaEvolve.rewrite):
-            text = await method.render(agent, parent, [], "guidance", [])
+        for operation, output in (("mutate", Mutation), ("rewrite", Program)):
+            text = render(
+                f"improved/prompts/{operation}.j2",
+                instance=agent,
+                schema=output.model_json_schema(),
+                parent=parent,
+                inspirations=[],
+                guidance="guidance",
+                failures=[],
+            )
             self.assertIn("guidance", text)
             self.assertIn('"properties"', text)
             self.assertIn("Solution", text)
-        self.assertIn('"properties"', await AlphaEvolve.initialize.render(agent, 1))
-        self.assertIn('"properties"', await AlphaEvolve.evolve_prompt.render(agent, parent, [], []))
+        self.assertIn(
+            '"properties"',
+            render(
+                "original/prompts/initialize.j2",
+                instance=agent,
+                schema=Program.model_json_schema(),
+                proposal=1,
+            ),
+        )
+        self.assertIn(
+            '"properties"',
+            render(
+                "improved/prompts/evolve_prompt.j2",
+                instance=agent,
+                schema=Guidance.model_json_schema(),
+                parent=parent,
+                ideas=[],
+                failures=[],
+            ),
+        )
         for path in ROOT.rglob("*.j2"):
             self.assertEqual(
                 list(Environment().parse(path.read_text()).find_all((nodes.If, nodes.CondExpr))), []

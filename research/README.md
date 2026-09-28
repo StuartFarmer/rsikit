@@ -33,7 +33,6 @@ prompts.TEMPLATE_ROOT = Path(elitesearch.__file__).parent / "prompts"
 Shared modules available to every algorithm and runner:
 
 - `rsikit.generation.edits`: candidate contracts, source validation, and exact edits.
-- `rsikit.generation.RecordingProvider`: raw response capture before structured parsing.
 - `rsikit.Evaluator` and `rsikit.Episode`: rollout execution and raw trajectories.
 - `research.rollouts.Rollouts`: execution, episode persistence, and experiment-local reuse.
 - `research.rewards`: cumulative-reward fitness callbacks and per-seed measurements.
@@ -43,6 +42,13 @@ Shared modules available to every algorithm and runner:
 - `rsikit.envs.tasks`: environment presets and `make_environment`.
 - `rsikit.progress`: `ProgressHandler` and `show_scores`.
 - `rsikit`: `Policy`, `Run`, and `Executor` with Docker evaluation.
+
+Each optimizer composes its own `SelfHealer` in `healing.py`, with task context,
+provider, and a local repair prompt. It proposes a repair; the optimizer owns
+retry budgets, validation, and candidate acceptance. AlphaEvolve variants share
+the original variant's healer. Prompt operations use Slick's `render` and `parse`
+with the provider's `acall`; raw responses go into optimizer attempt records
+before parsing, including malformed responses.
 
 The dependency boundary is checked with
 `python -m unittest tests.test_package_boundaries -v`.

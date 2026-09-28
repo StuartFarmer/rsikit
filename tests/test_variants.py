@@ -10,7 +10,7 @@ from unittest.mock import patch
 
 import gymnasium as gym
 from rich.console import Console
-from slick import prompts
+from slick import prompts, render
 from sqlmodel import select
 
 import examples.alphaevolve as example
@@ -18,9 +18,11 @@ from examples.alphaevolve import run_search
 from research import alphaevolve
 from research.alphaevolve import improved, original, paper
 from research.alphaevolve.history import Evaluation, Generation
+from research.alphaevolve.original.agent import Guidance
 from research.rewards import mean_rewards
 from rsikit import Executor
 from rsikit.evaluation import PolicyError
+from rsikit.generation.edits import Mutation, Program
 from rsikit.policy import Policy
 from tests.helpers import recorded_run
 from tests.providers import ScriptedProvider
@@ -662,7 +664,7 @@ class VariantTests(unittest.IsolatedAsyncioTestCase):
                 policies = await agent.generate(n=8)
                 scores = {p.id: float(i) for i, p in enumerate(policies)}
                 details = {p.id: {0: 100.0 + i, 1: -100.0 + i} for i, p in enumerate(policies)}
-                agent.update(scores, seed_scores=details)
+                agent.update_scores(scores, seed_scores=details)
                 expected = [7] * 4 if variant is original else list(range(4, 8))
                 self.assertEqual(
                     [p.policy.name for p in agent.islands], [f"Policy {i}" for i in expected]
@@ -670,18 +672,36 @@ class VariantTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(agent.best, policies[7])
                 parent = agent.islands[-1]
                 texts = {}
-                for operation in ("mutate", "rewrite"):
-                    method = getattr(variant.AlphaEvolve, operation)
-                    texts[operation] = await method.render(agent, parent, [parent], "", [])
-                texts["guidance"] = await variant.AlphaEvolve.evolve_prompt.render(
-                    agent, parent, [], []
+                variant_name = variant.__name__.rsplit(".", 1)[-1]
+                for operation, output in (("mutate", Mutation), ("rewrite", Program)):
+                    texts[operation] = render(
+                        f"{variant_name}/prompts/{operation}.j2",
+                        instance=agent,
+                        schema=output.model_json_schema(),
+                        parent=parent,
+                        inspirations=[parent],
+                        guidance="",
+                        failures=[],
+                    )
+                texts["guidance"] = render(
+                    f"{variant_name}/prompts/evolve_prompt.j2",
+                    instance=agent,
+                    schema=Guidance.model_json_schema(),
+                    parent=parent,
+                    ideas=[],
+                    failures=[],
                 )
                 for text in texts.values():
                     self.assertEqual("Per-seed rewards" in text, variant is improved)
                     self.assertEqual('"1": -93.0' in text, variant is improved)
                 texts["initialize"] = provider.calls[0]
-                texts["repair"] = await variant.AlphaEvolve.fix.render(
-                    agent, "", "broken", "syntax"
+                texts["repair"] = render(
+                    "original/prompts/repair.j2",
+                    instance=agent.healer,
+                    schema=Program.model_json_schema(),
+                    reference="",
+                    failed="broken",
+                    diagnostic="syntax",
                 )
                 rendered[variant.__name__] = texts
                 output = io.StringIO()

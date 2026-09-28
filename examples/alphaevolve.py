@@ -174,7 +174,7 @@ async def run_search(
                                 for policy in policies
                                 if (replacement := replacements.get(policy.id, policy)) is not None
                             ]
-                    generator.update(
+                    generator.update_scores(
                         scores,
                         seed_scores={
                             policy.id: {

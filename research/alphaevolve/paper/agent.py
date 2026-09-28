@@ -1,10 +1,16 @@
 """Published AlphaEvolve mechanisms with explicitly documented local archive rules."""
 
+import json
+import math
+from collections.abc import Iterable
 from dataclasses import asdict, dataclass, field
+from statistics import fmean, pstdev
 
-from slick import prompt
+from slick import parse, render
 
+from rsikit.episode import Episode
 from rsikit.generation.edits import Mutation, Program, check_program
+from rsikit.policy import Policy
 
 from ..improved.agent import AlphaEvolve as Baseline
 from ..original.agent import Config as BaselineConfig
@@ -184,8 +190,35 @@ class AlphaEvolve(Baseline):
         self._sync()
         self.checkpoint()
 
-    def update(self, scores, *, seed_scores=None):
-        """Scalar compatibility for tasks that configure no descriptor dimensions."""
+    def update(self, results: Iterable[tuple[type[Policy], Episode]]) -> None:
+        """Derive reward fitness from episodes before updating the archive.
+
+        Repeated policy IDs aggregate episode returns in this update. Episodes
+        carry no seed IDs, so no seed labels are invented. Custom metrics and
+        externally graded feedback can still be supplied through update_results.
+        """
+        unknown = self.config.features.keys() - {"mean_reward", "reward_std"}
+        if unknown:
+            raise ValueError(f"Episode reward descriptors unavailable: {sorted(unknown)}")
+        returns = {}
+        for policy, episode in results:
+            if not isinstance(episode, Episode):
+                raise TypeError("Expected an Episode")
+            if not episode.rewards or not math.isfinite(episode.total_reward):
+                raise ValueError("Expected a nonempty episode with a finite return")
+            returns.setdefault(policy.id, []).append(episode.total_reward)
+        assessed = {}
+        for policy_id, values in returns.items():
+            mean, std = fmean(values), pstdev(values)
+            descriptors = {"mean_reward": mean, "reward_std": std}
+            assessed[policy_id] = EvaluationResult(
+                metrics={"reward": mean, "worst_reward": min(values), "stability": -std},
+                features={name: descriptors[name] for name in self.config.features},
+            )
+        self.update_results(assessed)
+
+    def update_scores(self, scores, *, seed_scores=None):
+        """Scalar feedback for tasks without descriptor dimensions."""
         self.update_results(
             {
                 policy_id: EvaluationResult(
@@ -196,14 +229,57 @@ class AlphaEvolve(Baseline):
             }
         )
 
-    @prompt(template="paper/prompts/mutate.j2", output_type=Mutation)
-    async def mutate(self, parent, inspirations, guidance, failures, *, generated: Mutation):
-        return generated
+    async def mutate(
+        self, parent, inspirations, guidance, failures, *, provider, record=None
+    ) -> Mutation:
+        schema = Mutation.model_json_schema()
+        context = render(
+            "paper/prompts/mutate.j2",
+            instance=self,
+            schema=schema,
+            schema_json=json.dumps(schema, indent=2),
+            parent=parent,
+            inspirations=inspirations,
+            guidance=guidance,
+            failures=failures,
+        )
+        raw, _ = await provider.acall(context)
+        if record is not None:
+            record["raw"] = raw
+        return parse(raw, Mutation)
 
-    @prompt(template="paper/prompts/rewrite.j2", output_type=Program)
-    async def rewrite(self, parent, inspirations, guidance, failures, *, generated: Program):
-        return generated
+    async def rewrite(
+        self, parent, inspirations, guidance, failures, *, provider, record=None
+    ) -> Program:
+        schema = Program.model_json_schema()
+        context = render(
+            "paper/prompts/rewrite.j2",
+            instance=self,
+            schema=schema,
+            schema_json=json.dumps(schema, indent=2),
+            parent=parent,
+            inspirations=inspirations,
+            guidance=guidance,
+            failures=failures,
+        )
+        raw, _ = await provider.acall(context)
+        if record is not None:
+            record["raw"] = raw
+        return parse(raw, Program)
 
-    @prompt(template="paper/prompts/evolve_prompt.j2", output_type=Guidance)
-    async def evolve_prompt(self, parent, ideas, failures, *, generated: Guidance):
+    async def evolve_prompt(self, parent, ideas, failures, *, provider, record=None) -> str:
+        schema = Guidance.model_json_schema()
+        context = render(
+            "paper/prompts/evolve_prompt.j2",
+            instance=self,
+            schema=schema,
+            schema_json=json.dumps(schema, indent=2),
+            parent=parent,
+            ideas=ideas,
+            failures=failures,
+        )
+        raw, _ = await provider.acall(context)
+        if record is not None:
+            record["meta_raw"] = raw
+        generated = parse(raw, Guidance)
         return generated.instruction

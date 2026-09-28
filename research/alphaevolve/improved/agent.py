@@ -1,6 +1,6 @@
 """Independent island founders and per-seed feedback over the local baseline."""
 
-from slick import prompt
+from slick import parse, render
 
 from rsikit.generation.edits import Mutation, Program
 
@@ -27,7 +27,6 @@ class AlphaEvolve(OriginalAlphaEvolve):
         if all(island is not None for island in self.islands):
             super().reset_islands()
 
-    @prompt(template="improved/prompts/mutate.j2", output_type=Mutation)
     async def mutate(
         self,
         parent: _Candidate,
@@ -35,11 +34,24 @@ class AlphaEvolve(OriginalAlphaEvolve):
         guidance: str,
         failures: list[dict],
         *,
-        generated: Mutation,
+        provider,
+        record=None,
     ) -> Mutation:
-        return generated
+        schema = Mutation.model_json_schema()
+        context = render(
+            "improved/prompts/mutate.j2",
+            instance=self,
+            schema=schema,
+            parent=parent,
+            inspirations=inspirations,
+            guidance=guidance,
+            failures=failures,
+        )
+        raw, _ = await provider.acall(context)
+        if record is not None:
+            record["raw"] = raw
+        return parse(raw, Mutation)
 
-    @prompt(template="improved/prompts/rewrite.j2", output_type=Program)
     async def rewrite(
         self,
         parent: _Candidate,
@@ -47,12 +59,38 @@ class AlphaEvolve(OriginalAlphaEvolve):
         guidance: str,
         failures: list[dict],
         *,
-        generated: Program,
+        provider,
+        record=None,
     ) -> Program:
-        return generated
+        schema = Program.model_json_schema()
+        context = render(
+            "improved/prompts/rewrite.j2",
+            instance=self,
+            schema=schema,
+            parent=parent,
+            inspirations=inspirations,
+            guidance=guidance,
+            failures=failures,
+        )
+        raw, _ = await provider.acall(context)
+        if record is not None:
+            record["raw"] = raw
+        return parse(raw, Program)
 
-    @prompt(template="improved/prompts/evolve_prompt.j2", output_type=Guidance)
     async def evolve_prompt(
-        self, parent: _Candidate, ideas: list[dict], failures: list[dict], *, generated: Guidance
+        self, parent: _Candidate, ideas: list[dict], failures: list[dict], *, provider, record=None
     ) -> str:
+        schema = Guidance.model_json_schema()
+        context = render(
+            "improved/prompts/evolve_prompt.j2",
+            instance=self,
+            schema=schema,
+            parent=parent,
+            ideas=ideas,
+            failures=failures,
+        )
+        raw, _ = await provider.acall(context)
+        if record is not None:
+            record["meta_raw"] = raw
+        generated = parse(raw, Guidance)
         return generated.instruction

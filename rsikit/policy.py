@@ -25,7 +25,8 @@ class Policy(ABC, Generic[Observation, Action]):
 
         Serialized metadata supplies the name/description unless overridden.
         Raw Python defaults to name='Solution' and an empty description.
-        The returned definition is evaluated by Run inside its sandbox.
+        The ID hashes the name and exact source; description edits do not change it.
+        Execution creates a fresh instance from the returned definition in its sandbox.
         """
         # Generation imports Policy, so load its validator only when called.
         from .generation.edits import check_program

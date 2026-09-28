@@ -160,7 +160,7 @@ class RepairTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual([p.name for p in policies], ["Policy 1"])
         self.assertEqual((agent.generation_calls, agent.repair_calls), (2, 1))
         self.assertEqual(agent.attempts[0]["status"], "discarded")
-        agent.update({policies[0].id: 7})
+        agent.update_scores({policies[0].id: 7})
         self.assertEqual(agent.completed, 1)
         self.assertEqual(agent._pending, {})
 
@@ -267,7 +267,7 @@ class RepairTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("not json", provider.calls[2])
         self.assertEqual(len(agent.attempts[0]["repairs"]), 2)
         self.assertIsNone(agent.best)
-        agent.update({p.id: 1 for p in policies})
+        agent.update_scores({p.id: 1 for p in policies})
         self.assertEqual(agent.completed, 2)
 
     async def test_repair_preserves_original_parent_boundaries(self):
@@ -290,7 +290,7 @@ class RepairTests(unittest.IsolatedAsyncioTestCase):
         )
         agent = AlphaEvolve("task", provider, config=Config(islands=1, mode="rewrite"))
         initial = (await agent.generate())[0]
-        agent.update({initial.id: 0})
+        agent.update_scores({initial.id: 0})
         child = (await agent.generate())[0]
         self.assertEqual(child._implementation, program(2).implementation)
         self.assertIn(SOURCE, provider.calls[-1])
