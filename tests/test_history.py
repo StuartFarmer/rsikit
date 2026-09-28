@@ -17,9 +17,11 @@ from examples.alphaevolve import run_search
 from research import alphaevolve
 from research.alphaevolve import improved, original
 from research.alphaevolve.history import Evaluation, Generation
-from rsikit import Executor, Run
+from rsikit import Executor
+from tests.helpers import recorded_run
 from tests.providers import ScriptedProvider
 from tests.test_alphaevolve import program
+from tests.test_episode_storage import trajectory
 from tests.test_run import FakeSandbox
 
 
@@ -36,7 +38,9 @@ class HistoryTests(unittest.IsolatedAsyncioTestCase):
                 sandbox = FakeSandbox()
 
                 async def evaluate(implementation, environment, seed, call_timeout):
-                    return float(implementation.split("return ")[1].split()[0]) + seed, {}
+                    return trajectory(
+                        float(implementation.split("return ")[1].split()[0]) + seed, {}
+                    )
 
                 sandbox.evaluate.side_effect = evaluate
                 agent = variant.AlphaEvolve(
@@ -44,12 +48,13 @@ class HistoryTests(unittest.IsolatedAsyncioTestCase):
                     ScriptedProvider([program(i) for i in range(5)]),
                     config=variant.Config(islands=2, mode="rewrite", reset_interval=3),
                 )
-                with Run.create(
+                with recorded_run(
                     name="history", path=path, environment=env, executor=Executor(sandbox=sandbox)
-                ) as run:
+                ) as (run, rollouts):
                     await run_search(
                         agent,
                         run,
+                        rollouts,
                         generations=2,
                         batch_size=2,
                         seeds=(0, 1),
@@ -58,12 +63,13 @@ class HistoryTests(unittest.IsolatedAsyncioTestCase):
                     await run_search(
                         agent,
                         run,
+                        rollouts,
                         generations=1,
                         batch_size=1,
                         seeds=(0, 1),
                         console=Console(file=io.StringIO()),
                     )
-                with Run.open(path, environment=env) as run, run.database() as db:
+                with recorded_run(path, environment=env) as (run, rollouts), run.database() as db:
                     generations = db.exec(select(Generation).order_by(Generation.number)).all()
                     evaluations = db.exec(
                         select(Evaluation).order_by(Evaluation.generation, Evaluation.attempt)
@@ -109,16 +115,17 @@ class HistoryTests(unittest.IsolatedAsyncioTestCase):
 
                 if cancelled:
                     sandbox.evaluate.side_effect = blocked
-                with Run.create(
+                with recorded_run(
                     name="interrupted",
                     path=path,
                     environment=env,
                     executor=Executor(sandbox=sandbox),
-                ) as run:
+                ) as (run, rollouts):
                     task = asyncio.create_task(
                         run_search(
                             agent,
                             run,
+                            rollouts,
                             generations=2,
                             batch_size=1,
                             console=Console(file=io.StringIO()),
@@ -129,7 +136,7 @@ class HistoryTests(unittest.IsolatedAsyncioTestCase):
                         task.cancel()
                     with self.assertRaises(asyncio.CancelledError if cancelled else ProviderError):
                         await task
-                with Run.open(path, environment=env) as run, run.database() as db:
+                with recorded_run(path, environment=env) as (run, rollouts), run.database() as db:
                     rows = db.exec(select(Generation).order_by(Generation.number)).all()
                     self.assertFalse(rows[-1].complete)
                     if not cancelled:

@@ -29,6 +29,7 @@ from sqlmodel import select
 from examples.elitesearch import measure, run_search
 from research import elitesearch
 from research.elitesearch import Config, EliteSearch, Generation, Organism
+from research.rollouts import Rollouts
 from rsikit import Executor, Run
 from rsikit.policy import Policy
 from rsikit.sandbox.docker import DockerSandbox
@@ -165,6 +166,8 @@ def snapshot(path):
         ROOT / "uv.lock",
         ROOT / "rsikit/sandbox/Dockerfile",
         ROOT / "research/__init__.py",
+        ROOT / "research/rollouts.py",
+        ROOT / "research/rewards.py",
         ROOT / "examples/elitesearch.py",
     ]
     for package in ("rsikit", "research/elitesearch"):
@@ -179,7 +182,7 @@ def snapshot(path):
             archive.write(file, file.relative_to(ROOT))
 
 
-async def export_curves(agent, run, heldout_seeds):
+async def export_curves(agent, run, rollouts, heldout_seeds):
     """Evaluate fixed historical winners after search; never select on test scores."""
     organisms = {row.id: row for row in agent.organisms}
     policies = {policy.id: policy for policy in run.policies()}
@@ -190,7 +193,7 @@ async def export_curves(agent, run, heldout_seeds):
     }
     random_policy = Policy.from_text(RANDOM_SOURCE, name="Random action reference")
     measurements = await measure(
-        run, [policies[key] for key in sorted(winners)] + [random_policy], heldout_seeds
+        rollouts, [policies[key] for key in sorted(winners)] + [random_policy], heldout_seeds
     )
     evidence = {
         key: dict(scores=result.scores, failure=result.failure)
@@ -412,15 +415,14 @@ async def main(argv=None):
         )
         try:
             run_context = (
-                Run.open(args.resume, environment=env, executor=executor)
+                Run.open(args.resume)
                 if args.resume
-                else Run.create(
-                    name=f"paper1-{args.env}", environment=env, path=args.output, executor=executor
-                )
+                else Run.create(name=f"paper1-{args.env}", path=args.output)
             )
         except BlockingIOError:
             parser.error("Run is locked by another process; stop that process before resuming")
-        async with run_context as run:
+        async with executor, run_context as run:
+            rollouts = Rollouts(env, executor, run)
             provider = LoggedOpenRouter(
                 output=run.path / "llm_calls.jsonl",
                 model=args.model,
@@ -429,7 +431,7 @@ async def main(argv=None):
             )
 
             async def evaluate(policies):
-                return await measure(run, policies, args.seeds)
+                return await measure(rollouts, policies, args.seeds)
 
             agent = EliteSearch(
                 "Maximize cumulative episode reward in the described environment.",
@@ -538,11 +540,12 @@ async def main(argv=None):
                 await run_search(
                     agent,
                     run,
+                    rollouts,
                     seeds=args.seeds,
                     heldout_seeds=args.heldout_seeds,
                     console=Console(),
                 )
-                await export_curves(agent, run, args.heldout_seeds)
+                await export_curves(agent, run, rollouts, args.heldout_seeds)
                 state["status"] = "completed"
             except BaseException as exc:
                 state.update(status="failed", error=f"{type(exc).__name__}: {exc}")

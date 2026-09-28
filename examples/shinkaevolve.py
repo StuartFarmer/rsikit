@@ -21,6 +21,8 @@ from slick import prompts
 from slick.providers import OpenRouterAPI
 
 from research import shinkaevolve
+from research.rewards import mean_rewards
+from research.rollouts import Rollouts
 from research.shinkaevolve import Config, ShinkaEvolve
 from rsikit import Executor, Run
 from rsikit.envs.tasks import TASKS, make_environment
@@ -29,12 +31,20 @@ from rsikit.progress import ProgressHandler, show_scores
 
 
 async def run_search(
-    generator, run, *, generations, batch_size, generation_concurrency=4, seeds=(0,), console=None
+    generator,
+    run,
+    rollouts,
+    *,
+    generations,
+    batch_size,
+    generation_concurrency=4,
+    seeds=(0,),
+    console=None,
 ):
     seeds = tuple(seeds)
     console = console or Console()
     logger = logging.getLogger("research.shinkaevolve")
-    loggers = (logger, logging.getLogger("rsikit"))
+    loggers = (logger, logging.getLogger("rsikit"), logging.getLogger("research.rewards"))
     old_settings = [(item.level, item.propagate) for item in loggers]
     with Progress(
         SpinnerColumn(),
@@ -67,7 +77,7 @@ async def run_search(
                     while policies:
                         run.save(*generator.records(seeds=seeds))
                         try:
-                            scores = await run.evaluate(policies, seeds=seeds)
+                            scores = await mean_rewards(rollouts, policies, seeds=seeds)
                             break
                         except PolicyError as exc:
                             if not exc.failures:
@@ -138,14 +148,14 @@ async def main():
     models = [OpenRouterAPI(model=name, max_output_tokens=8192, timeout=120) for name in args.model]
     async with AsyncExitStack() as stack:
         environment = stack.enter_context(make_environment(args.env, max_steps=args.max_steps))
+        executor = await stack.enter_async_context(Executor(concurrency=args.concurrency))
         run = await stack.enter_async_context(
             Run.create(
                 name=f"{args.env.lower()}-shinkaevolve",
-                environment=environment,
-                executor=Executor(concurrency=args.concurrency),
                 path=args.output,
             )
         )
+        rollouts = Rollouts(environment, executor, run)
         generator = ShinkaEvolve(
             task="Maximize cumulative episode reward in the described environment.",
             context=environment.instructions,
@@ -169,6 +179,7 @@ async def main():
             await run_search(
                 generator,
                 run,
+                rollouts,
                 generations=args.generations,
                 batch_size=args.batch_size,
                 generation_concurrency=args.generation_concurrency,

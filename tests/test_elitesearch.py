@@ -16,7 +16,8 @@ from slick.providers import ProviderError
 from sqlmodel import select
 
 from research.elitesearch import Config, EliteSearch, Generation, Measurement, Organism
-from rsikit import EvaluationResult, Executor, Policy, Run
+from rsikit import Executor, Policy
+from tests.helpers import recorded_run
 from tests.providers import ScriptedProvider
 from tests.test_run import FakeSandbox
 
@@ -116,7 +117,7 @@ class EliteSearchTests(unittest.IsolatedAsyncioTestCase):
         async def evaluate(policies):
             evaluated.extend(p.name for p in policies)
             return {
-                p.id: Measurement({}, "invalid action")
+                p.id: Measurement({}, failure="invalid action")
                 if p.name == "Policy 0"
                 else Measurement({0: 12})
                 for p in policies
@@ -191,9 +192,9 @@ class EliteSearchTests(unittest.IsolatedAsyncioTestCase):
     async def test_screening_rejection_does_not_promote_or_repair(self):
         async def evaluate(policies):
             return {
-                p.id: EvaluationResult(seed_scores={99: 100}, accepted=False, feedback="screened")
+                p.id: Measurement(scores={99: 100}, accepted=False, feedback="screened")
                 if p.name == "Policy 0"
-                else EvaluationResult(seed_scores={0: 3})
+                else Measurement(scores={0: 3})
                 for p in policies
             }
 
@@ -239,7 +240,7 @@ class EliteSearchTests(unittest.IsolatedAsyncioTestCase):
             return {
                 p.id: Measurement({0: 7})
                 if p.name == "Policy 0"
-                else Measurement({}, "broken policy")
+                else Measurement({}, failure="broken policy")
                 for p in policies
             }
 
@@ -343,7 +344,10 @@ class EliteSearchTests(unittest.IsolatedAsyncioTestCase):
             )
             self.assertIn("Elite leaderboard", terminal.getvalue())
             self.assertIn("promotions", (output / "run.log").read_text())
-            with gym.make("CartPole-v1") as env, Run.open(output, environment=env) as run:
+            with (
+                gym.make("CartPole-v1") as env,
+                recorded_run(output, environment=env) as (run, rollouts),
+            ):
                 with run.database() as db:
                     generations = db.exec(select(Generation).order_by(Generation.number)).all()
                     rows = db.exec(select(Organism).order_by(Organism.id)).all()

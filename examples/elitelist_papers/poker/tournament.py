@@ -206,7 +206,7 @@ class Tournament:
                 skipped,
             )
             # Do not rank an incomplete field. Unchanged table results remain reusable.
-            return {pid: Measurement({}, failures.get(pid)) for pid in ids}
+            return {pid: Measurement({}, failure=failures.get(pid)) for pid in ids}
         chips = {pid: [0] * config.rounds for pid in ids}
         hands = {pid: [0] * config.rounds for pid in ids}
         for block in blocks:

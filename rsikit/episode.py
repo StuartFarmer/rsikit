@@ -18,6 +18,7 @@ class Episode:
     terminations: list[bool] = field(default_factory=list)
     truncations: list[bool] = field(default_factory=list)
     infos: list[dict[str, Any]] = field(default_factory=list)
+    artifacts: dict[str, bytes] = field(default_factory=dict)
 
     def __len__(self) -> int:
         return len(self.rewards)

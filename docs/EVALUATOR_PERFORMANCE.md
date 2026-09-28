@@ -1,5 +1,10 @@
 # Evaluation throughput — 2026-09-24
 
+This report describes the API and scalar-result protocol at measurement time.
+Current execution returns full Episodes; use the [current run API](RUNS.md).
+The current benchmark requires both images to support the Episode protocol;
+use the historical checkout to reproduce the archived image comparison.
+
 The target is enough evaluation capacity to keep up with generated candidates,
 including all requested seeds. Environment computation is only one part of that
 cost. This change addresses worker feeding and per-action communication before

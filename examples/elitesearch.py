@@ -27,9 +27,10 @@ from slick.providers import OpenRouterAPI
 
 from research import elitesearch
 from research.elitesearch import Config, EliteSearch
+from research.rewards import measure_rewards as measure
+from research.rollouts import Rollouts
 from rsikit import Executor, Run
 from rsikit.envs.tasks import TASKS, make_environment
-from rsikit.measurements import evaluate_gym as measure
 from rsikit.progress import ProgressHandler
 from rsikit.sandbox.docker import DockerSandbox
 
@@ -73,10 +74,14 @@ async def generation_videos(queue, path, top, workers):
 
 
 async def run_search(
-    agent, run, *, seeds, heldout_seeds, console=None, video_top=0, video_workers=2
+    agent, run, rollouts, *, seeds, heldout_seeds, console=None, video_top=0, video_workers=2
 ):
     console = console or Console()
-    loggers = [logging.getLogger("research.elitesearch"), logging.getLogger("rsikit")]
+    loggers = [
+        logging.getLogger("research.elitesearch"),
+        logging.getLogger("rsikit"),
+        logging.getLogger("research.rewards"),
+    ]
     settings = [(item.level, item.propagate) for item in loggers]
     previous = agent.on_checkpoint
     reported = 0
@@ -170,7 +175,7 @@ async def run_search(
             if agent.best is not None:
                 agent.best.to_file(run.path / "best.py")
                 loggers[0].info("Evaluating best elite on held-out seeds")
-                result = (await measure(run, [agent.best], heldout_seeds))[agent.best.id]
+                result = (await measure(rollouts, [agent.best], heldout_seeds))[agent.best.id]
                 summary["heldout"] = dict(scores=result.scores, failure=result.failure)
             if video_task is not None:
                 video_queue.put_nowait(None)
@@ -287,23 +292,25 @@ async def main(argv=None):
                 args.env, max_steps=args.max_steps, shoes_per_episode=args.shoes_per_seed
             )
         )
+        executor = await stack.enter_async_context(
+            Executor(
+                concurrency=args.concurrency,
+                sandbox=DockerSandbox(episode_timeout=args.episode_timeout),
+            )
+        )
         run = await stack.enter_async_context(
             Run.create(
                 name=f"{args.env.lower()}-elitesearch",
-                environment=environment,
-                executor=Executor(
-                    concurrency=args.concurrency,
-                    sandbox=DockerSandbox(episode_timeout=args.episode_timeout),
-                ),
                 path=args.output,
             )
         )
+        rollouts = Rollouts(environment, executor, run)
         (run.path / "experiment.json").write_text(
             json.dumps(vars(args), default=str, indent=2) + "\n"
         )
 
         async def evaluate(policies):
-            return await measure(run, policies, args.seeds)
+            return await measure(rollouts, policies, args.seeds)
 
         agent = EliteSearch(
             "Maximize cumulative episode reward in the described environment.",
@@ -326,6 +333,7 @@ async def main(argv=None):
         await run_search(
             agent,
             run,
+            rollouts,
             seeds=args.seeds,
             heldout_seeds=args.heldout_seeds,
             video_top=args.video_top,

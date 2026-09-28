@@ -15,7 +15,9 @@ from time import perf_counter
 import gymnasium as gym
 
 from examples.benchmark_docker import CARTPOLE, PACKING, command
-from rsikit import Executor, Run
+from research.rewards import mean_rewards
+from research.rollouts import Rollouts
+from rsikit import Episode, Executor, Run
 from rsikit.envs import BitcoinEnv, BlackjackEnv, CirclePackingEnv
 from rsikit.policy import Policy
 from rsikit.sandbox.docker import DockerSandbox, InProcessDockerSandbox
@@ -89,19 +91,21 @@ async def scheduling(samples):
                     peak = max(peak, active)
                     try:
                         await asyncio.sleep(0.08 if seed == 0 else 0.008)
-                        return 0.5, {}
+                        return Episode([0, 1], [0], [0.5], [True], [False], [{}, {}])
                     finally:
                         active -= 1
                         durations.append(perf_counter() - start)
 
             with tempfile.TemporaryDirectory() as directory:
-                async with Run.create(
-                    name="benchmark",
-                    environment=CirclePackingEnv(1),
-                    export=False,
-                    path=Path(directory) / "run",
-                    executor=Executor(sandbox=Sandbox(), concurrency=4),
-                ) as run:
+                async with (
+                    Executor(sandbox=Sandbox(), concurrency=4) as executor,
+                    Run.create(
+                        name="benchmark",
+                        export=False,
+                        path=Path(directory) / "run",
+                    ) as run,
+                ):
+                    rollouts = Rollouts(CirclePackingEnv(1), executor, run)
                     queue = asyncio.Queue()
 
                     async def produce():
@@ -125,12 +129,14 @@ async def scheduling(samples):
                                             finished = True
                                             break
                                         batch.append(policy)
-                                    await run.evaluate(batch, seeds=(0, 1))
+                                    await mean_rewards(rollouts, batch, seeds=(0, 1))
                                     if finished:
                                         break
                                 else:
                                     tasks.append(
-                                        asyncio.create_task(run.evaluate([policy], seeds=(0, 1)))
+                                        asyncio.create_task(
+                                            mean_rewards(rollouts, [policy], seeds=(0, 1))
+                                        )
                                     )
                             await asyncio.gather(*tasks)
                         finally:
@@ -219,7 +225,7 @@ async def main(samples, output, image, compare_image=None, in_process=False):
                 policy_time = json.loads(result.artifacts["policy-timing.json"])
                 assert env_time["steps"] == policy_time["steps"] > 0
                 if values:
-                    assert result.score == values[0]["score"]
+                    assert result.total_reward == values[0]["score"]
                 if repeat:
                     values.append(
                         dict(
@@ -227,7 +233,7 @@ async def main(samples, output, image, compare_image=None, in_process=False):
                             environment_seconds=env_time["seconds"],
                             policy_seconds=policy_time["seconds"],
                             steps=env_time["steps"],
-                            score=result.score,
+                            score=result.total_reward,
                         )
                     )
             medians = {key: statistics.median(row[key] for row in values) for key in values[0]}
@@ -249,7 +255,7 @@ async def main(samples, output, image, compare_image=None, in_process=False):
                             )
                         ]
                         elapsed = perf_counter() - start
-                        assert len(results) == 1 and results[0].score == medians["score"]
+                        assert len(results) == 1 and results[0].total_reward == medians["score"]
                         assert not results[0].artifacts
                         if repeat:
                             times[name].append(elapsed)

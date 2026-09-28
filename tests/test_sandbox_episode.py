@@ -13,10 +13,12 @@ import gymnasium as gym
 import numpy as np
 from gymnasium import spaces
 
-from rsikit.evaluation import InfrastructureError, PolicyError, PolicyTimeout, run_episode
+from research.rewards import mean_rewards
+from rsikit.evaluation import InfrastructureError, PolicyError, PolicyTimeout
 from rsikit.policy import Policy
 from rsikit.sandbox import SandboxPolicy, run_program
 from rsikit.sandbox.codec import decode, decode_space, dumps, encode, encode_space, loads
+from tests.helpers import finish_pending, recorded_run, run_episode
 
 INSTRUCTIONS = "Count from zero.\nPreserve café and π exactly."
 COUNTER_SOURCE = """
@@ -147,9 +149,10 @@ class SandboxEpisodeSmoke(unittest.IsolatedAsyncioTestCase):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "solution.py"
             path.write_text(source, encoding="utf-8")
-            return await run_program(
+            episode = await run_program(
                 path, CounterEnv, env_seed=1, policy_seed=2, max_steps=5, call_timeout=timeout
             )
+            return episode.final_step
 
     async def test_state_instructions_and_examples(self):
         local = await run_episode(CounterEnv, CounterPolicy, env_seed=1, policy_seed=2, max_steps=5)
@@ -165,8 +168,8 @@ class SandboxEpisodeSmoke(unittest.IsolatedAsyncioTestCase):
         packing = await run_program(
             Path(initial.__file__), CirclePackingEnv, env_seed=1, policy_seed=2, max_steps=5
         )
-        self.assertTrue(packing[2])
-        self.assertAlmostEqual(packing[4]["episode"]["r"], 1.0)
+        self.assertTrue(packing.terminations[-1])
+        self.assertAlmostEqual(packing.infos[-1]["episode"]["r"], 1.0)
         cart = await run_program(
             Path(cartpole.__file__),
             "CartPole-v1",
@@ -174,8 +177,8 @@ class SandboxEpisodeSmoke(unittest.IsolatedAsyncioTestCase):
             policy_seed=2,
             max_steps=8,
         )
-        self.assertTrue(cart[2] or cart[3])
-        self.assertGreater(cart[4]["episode"]["l"], 1)
+        self.assertTrue(cart.terminations[-1] or cart.truncations[-1])
+        self.assertGreater(cart.infos[-1]["episode"]["l"], 1)
 
     async def test_scientific_libraries_in_restricted_policy(self):
         source = COUNTER_SOURCE.replace(
@@ -199,7 +202,6 @@ class SandboxEpisodeSmoke(unittest.IsolatedAsyncioTestCase):
         from examples.alphaevolve import run_search
         from research import alphaevolve
         from research.alphaevolve.improved import AlphaEvolve
-        from rsikit import Run
         from rsikit.envs.tasks import make_environment
         from rsikit.generation.edits import Program
         from tests.providers import ScriptedProvider
@@ -218,9 +220,9 @@ class SandboxEpisodeSmoke(unittest.IsolatedAsyncioTestCase):
                     tempfile.TemporaryDirectory() as directory,
                     make_environment(name, max_steps=3) as env,
                     cloudpickle.loads(cloudpickle.dumps(env)) as restored,
-                    Run.create(
+                    recorded_run(
                         name="box2d", path=Path(directory) / "run", environment=restored
-                    ) as run,
+                    ) as (run, rollouts),
                     patch.object(prompts, "TEMPLATE_ROOT", Path(alphaevolve.__file__).parent),
                 ):
                     self.assertEqual(restored.instructions, env.instructions)
@@ -245,6 +247,7 @@ class Solution(Policy):
                     await run_search(
                         agent,
                         run,
+                        rollouts,
                         generations=1,
                         batch_size=1,
                         seeds=[0, 1],
@@ -268,7 +271,7 @@ class Solution(Policy):
         from examples.shinkaevolve import run_search
         from research import shinkaevolve
         from research.shinkaevolve import Config, Evaluation, Generation, ShinkaEvolve
-        from rsikit import Executor, Run
+        from rsikit import Executor
         from rsikit.envs.tasks import make_environment
         from rsikit.generation.edits import Program
         from tests.providers import ScriptedProvider
@@ -290,12 +293,12 @@ class Solution(Policy):
                 patch.object(
                     prompts, "TEMPLATE_ROOT", Path(shinkaevolve.__file__).parent / "prompts"
                 ),
-                Run.create(
+                recorded_run(
                     name="shinka-smoke",
                     path=Path(directory) / "run",
                     environment=environment,
                     executor=Executor(concurrency=2),
-                ) as run,
+                ) as (run, rollouts),
             ):
                 provider = ScriptedProvider(
                     [
@@ -320,6 +323,7 @@ class Solution(Policy):
                 await run_search(
                     agent,
                     run,
+                    rollouts,
                     generations=2,
                     batch_size=1,
                     seeds=(0, 1),
@@ -353,7 +357,7 @@ class Solution(Policy):
         from examples.alphaevolve import run_search
         from research import alphaevolve
         from research.alphaevolve.improved import AlphaEvolve, Config
-        from rsikit import Executor, Run
+        from rsikit import Executor
         from rsikit.generation.edits import Program
         from tests.providers import ScriptedProvider
 
@@ -372,12 +376,12 @@ class Solution(Policy):
             tempfile.TemporaryDirectory() as folder,
             gym.make("CartPole-v1", max_episode_steps=50) as environment,
             patch.object(prompts, "TEMPLATE_ROOT", Path(alphaevolve.__file__).parent),
-            Run.create(
+            recorded_run(
                 name="evolution",
                 environment=environment,
                 path=Path(folder) / "run",
                 executor=Executor(concurrency=2),
-            ) as run,
+            ) as (run, rollouts),
         ):
             agent = AlphaEvolve(
                 "Balance CartPole", provider, config=Config(mode="rewrite", islands=1)
@@ -386,6 +390,7 @@ class Solution(Policy):
             await run_search(
                 agent,
                 run,
+                rollouts,
                 generations=2,
                 batch_size=1,
                 console=Console(file=output, width=120, force_terminal=False),
@@ -411,7 +416,7 @@ class Solution(Policy):
         from examples.alphaevolve import run_search
         from research import alphaevolve
         from research.alphaevolve.improved import AlphaEvolve
-        from rsikit import Executor, Run
+        from rsikit import Executor
         from rsikit.generation.edits import Program
         from tests.providers import ScriptedProvider
 
@@ -440,15 +445,16 @@ class Solution(Policy):
             tempfile.TemporaryDirectory() as directory,
             gym.make("CartPole-v1", max_episode_steps=5) as env,
             patch.object(prompts, "TEMPLATE_ROOT", Path(alphaevolve.__file__).parent),
-            Run.create(
+            recorded_run(
                 name="healing", path=Path(directory) / "run", environment=env, executor=Executor()
-            ) as run,
+            ) as (run, rollouts),
         ):
             generator = AlphaEvolve("Balance CartPole", provider)
             output = io.StringIO()
             await run_search(
                 generator,
                 run,
+                rollouts,
                 generations=1,
                 batch_size=1,
                 console=Console(file=output, force_terminal=False, width=120),
@@ -473,7 +479,6 @@ class Solution(Policy):
 
         import examples.inner_loop as demo
         import rsikit.generation as generation
-        from rsikit import Run
         from tests.providers import ScriptedProvider
 
         def response(name, action):
@@ -512,12 +517,12 @@ class Solution(Policy):
             self.assertIsNone(result[3]["mean_score"])
             with (
                 gym.make("CartPole-v1", max_episode_steps=30) as env,
-                Run.open(output, environment=env) as run,
+                recorded_run(output, environment=env) as (run, rollouts),
             ):
                 self.assertEqual(len(run.policies()), 5)
                 self.assertEqual(sum(len(run.scores(p)) for p in run.policies()), 10)
                 with self.assertRaises(PolicyError):
-                    await run.resume()
+                    await finish_pending(rollouts)
 
     async def test_run_records_real_video_artifact(self):
         import json
@@ -526,7 +531,7 @@ class Solution(Policy):
         from slick import prompts
 
         import rsikit.generation as generation
-        from rsikit import Run, generate
+        from rsikit import generate
         from tests.providers import ScriptedProvider
 
         if find_spec("moviepy") is None or find_spec("pygame") is None:
@@ -557,8 +562,10 @@ class Solution(Policy):
                 str(Path(directory) / "recordings"),
                 episode_trigger=lambda _: True,
             )
-            with env, Run.create(name="video", path=output, environment=env) as run:
-                self.assertEqual(await run.evaluate([policy], seeds=[1]), {policy.id: 5.0})
+            with env, recorded_run(name="video", path=output, environment=env) as (run, rollouts):
+                self.assertEqual(
+                    await mean_rewards(rollouts, [policy], seeds=[1]), {policy.id: 5.0}
+                )
                 videos = list((output / "artifacts" / policy.id / "1").rglob("*.mp4"))
                 self.assertEqual(len(videos), 1)
                 video = videos[0]
@@ -570,7 +577,7 @@ class Solution(Policy):
                     self.assertEqual(clip.get_frame(0).shape[2], 3)
             with (
                 gym.make("CartPole-v1", max_episode_steps=5) as env,
-                Run.open(output, environment=env) as run,
+                recorded_run(output, environment=env) as (run, rollouts),
             ):
                 self.assertEqual(run.scores(run.policies()[0]), {1: 5.0})
                 self.assertTrue(video.exists())
@@ -582,8 +589,9 @@ class Solution(Policy):
         from rich.console import Console
 
         from examples.replay import record_best
-        from rsikit import Executor, Run
+        from rsikit import Executor
         from rsikit.policy import Policy
+        from tests.test_episode_storage import trajectory
         from tests.test_run import RESPONSE, FakeSandbox
 
         if find_spec("moviepy") is None or find_spec("pygame") is None:
@@ -593,21 +601,25 @@ class Solution(Policy):
             for name in ("Low", "Best", "Failed")
         ]
         sandbox = FakeSandbox()
-        sandbox.evaluate.side_effect = [(2.0, {}), (30.0, {}), PolicyError("bad policy")]
+        sandbox.evaluate.side_effect = [
+            trajectory(2.0),
+            trajectory(30.0),
+            PolicyError("bad policy"),
+        ]
         with tempfile.TemporaryDirectory() as directory:
             original = Path(directory) / "original"
             output = Path(directory) / "replay"
             with (
                 gym.make("CartPole-v1", max_episode_steps=3) as env,
-                Run.create(
+                recorded_run(
                     name="search",
                     path=original,
                     environment=env,
                     executor=Executor(sandbox=sandbox),
-                ) as source,
+                ) as (source, source_rollouts),
             ):
                 with self.assertRaises(PolicyError):
-                    await source.evaluate(policies)
+                    await mean_rewards(source_rollouts, policies)
             env = gym.wrappers.RecordVideo(
                 gym.make("CartPole-v1", max_episode_steps=3, render_mode="rgb_array"),
                 str(Path(directory) / "recordings"),
@@ -625,8 +637,8 @@ class Solution(Policy):
                 )
             with (
                 gym.make("CartPole-v1", max_episode_steps=3) as env,
-                Run.open(original, environment=env) as source,
-                Run.open(path, environment=env) as replay,
+                recorded_run(original, environment=env) as (source, source_rollouts),
+                recorded_run(path, environment=env) as (replay, replay_rollouts),
             ):
                 self.assertEqual([source.scores(p)[0] for p in policies], [2.0, 30.0, None])
                 self.assertEqual([p.id for p in replay.policies()], [policies[1].id])
@@ -685,7 +697,7 @@ class Solution(Policy):
         from slick import prompts
 
         import rsikit.generation as generation
-        from rsikit import DockerSandbox, Executor, Run, generate
+        from rsikit import DockerSandbox, Executor, generate
         from tests.providers import ScriptedProvider
 
         class Environment(gym.Env):
@@ -736,16 +748,16 @@ class Solution(Policy):
             gym.wrappers.TimeLimit(Environment(), max_episode_steps=2) as env,
             patch.object(sandbox, "start", wraps=sandbox.start) as start,
         ):
-            async with Run.create(
+            async with recorded_run(
                 name="pool",
                 path=Path(directory) / "run",
                 environment=env,
                 executor=Executor(sandbox=sandbox, concurrency=2),
-            ) as run:
-                result = await run.evaluate([policy], seeds=[0, 1])
+            ) as (run, rollouts):
+                result = await mean_rewards(rollouts, [policy], seeds=[0, 1])
                 container = sandbox.name
                 self.assertIsNotNone(container)
-                result = await run.evaluate([policy], seeds=[2, 3])
+                result = await mean_rewards(rollouts, [policy], seeds=[2, 3])
                 self.assertEqual(result, {policy.id: 2.0})
                 self.assertEqual(sandbox.name, container)
                 start.assert_awaited_once_with(2)
@@ -765,7 +777,7 @@ class Solution(Policy):
             self.assertNotEqual(await inspected.wait(), 0)
 
     async def test_batch_timeout_and_cancellation_remove_shared_container(self):
-        from rsikit import DockerSandbox, Executor, Run
+        from rsikit import DockerSandbox, Executor
         from rsikit.policy import Policy
 
         loop = asyncio.get_running_loop()
@@ -782,15 +794,15 @@ class Solution(Policy):
         with (
             tempfile.TemporaryDirectory() as directory,
             gym.make("CartPole-v1") as env,
-            Run.create(
+            recorded_run(
                 name="cleanup",
                 path=Path(directory) / "run",
                 environment=env,
                 executor=executor,
-            ) as run,
+            ) as (run, rollouts),
         ):
             with self.assertRaises(PolicyTimeout):
-                await run.evaluate([policy])
+                await mean_rewards(rollouts, [policy])
             self.assertEqual(run.scores(policy), {0: None})
             self.assertIsNone(sandbox.name)
 
@@ -812,7 +824,7 @@ class Solution(Policy):
 
             executor.call_timeout = 60
             with patch("rsikit.sandbox.docker.asyncio.create_subprocess_exec", delayed_create):
-                pending = asyncio.create_task(run.resume())
+                pending = asyncio.create_task(finish_pending(rollouts))
                 await asyncio.wait_for(started.wait(), 10)
                 name = sandbox.name
                 pending.cancel()

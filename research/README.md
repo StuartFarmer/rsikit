@@ -2,7 +2,8 @@
 
 Each algorithm builds on the shared `rsikit` library and owns its search logic,
 records, and prompts. Algorithms must not import another research algorithm;
-shared functionality belongs in `rsikit`. The core must not import research or
+generic library functionality belongs in `rsikit`; experiment-specific reward
+callbacks and rollout orchestration live in shared `research` modules. The core must not import research or
 examples. Variants within one algorithm may reuse that algorithm's internals.
 
 | Package | Guide | Example command |
@@ -33,8 +34,10 @@ Shared modules available to every algorithm and runner:
 
 - `rsikit.generation.edits`: candidate contracts, source validation, and exact edits.
 - `rsikit.generation.RecordingProvider`: raw response capture before structured parsing.
-- `rsikit.EvaluationResult` and `rsikit.evaluate_gym`: shared evaluation evidence,
-  candidate failures, optional screening, and cached Gym measurements.
+- `rsikit.Evaluator` and `rsikit.Episode`: rollout execution and raw trajectories.
+- `research.rollouts.Rollouts`: execution, episode persistence, and experiment-local reuse.
+- `research.rewards`: cumulative-reward fitness callbacks and per-seed measurements.
+  AlphaEvolve owns its richer `EvaluationResult` and screening in its own package.
 - `rsikit.Policy.from_text` / `from_file` and `to_text` / `to_file`: canonical solution
   loading and saving, preserving source and identity without host execution.
 - `rsikit.envs.tasks`: environment presets and `make_environment`.

@@ -26,16 +26,21 @@ from slick.providers import OpenRouterAPI
 
 from research import lineagesearch
 from research.lineagesearch import Config, LineageSearch
+from research.rewards import measure_rewards as measure
+from research.rollouts import Rollouts
 from rsikit import Executor, Run
 from rsikit.envs.tasks import TASKS, make_environment
-from rsikit.measurements import evaluate_gym as measure
 from rsikit.progress import ProgressHandler, show_scores
 
 
-async def run_search(agent, run, *, seeds, heldout_seeds, console=None):
+async def run_search(agent, run, rollouts, *, seeds, heldout_seeds, console=None):
     """Show generation, repair, evaluation and family progress; retain messages in run.log."""
     console = console or Console()
-    loggers = (logging.getLogger("research.lineagesearch"), logging.getLogger("rsikit"))
+    loggers = (
+        logging.getLogger("research.lineagesearch"),
+        logging.getLogger("rsikit"),
+        logging.getLogger("research.rewards"),
+    )
     logger = loggers[0]
     settings = [(item.level, item.propagate) for item in loggers]
     previous_checkpoint = agent.on_checkpoint
@@ -148,7 +153,7 @@ async def run_search(agent, run, *, seeds, heldout_seeds, console=None):
             console.print(table)
             if agent.best is not None:
                 logger.info("Evaluating final incumbent on held-out seeds")
-                heldout = (await measure(run, [agent.best], heldout_seeds))[agent.best.id]
+                heldout = (await measure(rollouts, [agent.best], heldout_seeds))[agent.best.id]
                 summary["heldout"] = dict(scores=heldout.scores, failure=heldout.failure)
                 destination.write_text(json.dumps(summary, indent=2) + "\n", encoding="utf-8")
                 show_scores([agent.best], run, console, seeds=heldout_seeds)
@@ -272,20 +277,20 @@ async def main():
     )
     async with AsyncExitStack() as stack:
         environment = stack.enter_context(make_environment(args.env, max_steps=args.max_steps))
+        executor = await stack.enter_async_context(Executor(concurrency=args.concurrency))
         run = await stack.enter_async_context(
             Run.create(
                 name=f"{args.env.lower()}-lineagesearch",
-                environment=environment,
-                executor=Executor(concurrency=args.concurrency),
                 path=args.output,
             )
         )
+        rollouts = Rollouts(environment, executor, run)
         (run.path / "experiment.json").write_text(
             json.dumps(vars(args), default=str, indent=2) + "\n", encoding="utf-8"
         )
 
         async def evaluate(policies):
-            return await measure(run, policies, args.seeds)
+            return await measure(rollouts, policies, args.seeds)
 
         agent = LineageSearch(
             "Maximize cumulative episode reward in the described environment.",
@@ -311,7 +316,7 @@ async def main():
             ),
             seed=args.search_seed,
         )
-        await run_search(agent, run, seeds=args.seeds, heldout_seeds=args.heldout_seeds)
+        await run_search(agent, run, rollouts, seeds=args.seeds, heldout_seeds=args.heldout_seeds)
 
 
 if __name__ == "__main__":

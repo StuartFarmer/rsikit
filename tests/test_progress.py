@@ -16,11 +16,13 @@ from slick import prompts
 import examples.alphaevolve as example
 from research import alphaevolve
 from research.alphaevolve.improved import AlphaEvolve, Config
-from rsikit import Executor, Run
+from rsikit import Executor
 from rsikit.evaluation import PolicyError
 from rsikit.generation.edits import Program
 from rsikit.progress import ProgressHandler
+from tests.helpers import recorded_run
 from tests.providers import ScriptedProvider
+from tests.test_episode_storage import trajectory
 from tests.test_run import RESPONSE, FakeSandbox
 
 
@@ -87,23 +89,25 @@ class ProgressTests(unittest.IsolatedAsyncioTestCase):
                 second_started.set()
                 await release.wait()
                 raise PolicyError("bad action")
-            return 7.0, {}
+            return trajectory(7.0, {})
 
         sandbox.evaluate.side_effect = evaluate
         with (
             tempfile.TemporaryDirectory() as directory,
             gym.make("CartPole-v1", max_episode_steps=3) as env,
             patch.object(prompts, "TEMPLATE_ROOT", Path(alphaevolve.__file__).parent),
-            Run.create(
+            recorded_run(
                 name="progress",
                 path=Path(directory) / "run",
                 environment=env,
                 executor=Executor(sandbox=sandbox, concurrency=2),
-            ) as run,
+            ) as (run, rollouts),
         ):
             agent = AlphaEvolve("task", provider, config=Config(max_repairs=0))
             task = asyncio.create_task(
-                example.run_search(agent, run, generations=1, batch_size=2, console=console)
+                example.run_search(
+                    agent, run, rollouts, generations=1, batch_size=2, console=console
+                )
             )
             try:
                 await asyncio.wait_for(generation_started.wait(), 2)

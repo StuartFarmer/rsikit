@@ -127,18 +127,15 @@ class EvaluationTests(unittest.IsolatedAsyncioTestCase):
 
 class PipelineTests(unittest.IsolatedAsyncioTestCase):
     async def test_result_failures_are_repaired_but_screened_candidates_are_discarded(self):
-        import rsikit
-
-        self.assertTrue(hasattr(rsikit, "EvaluationResult"), "Expose the shared evaluation result")
         generator = Generator()
         batches = []
 
         async def evaluate(policies):
             batches.append([p.id for p in policies])
             return {
-                p.id: rsikit.EvaluationResult(failure="bad action")
+                p.id: EvaluationResult(failure="bad action")
                 if p.id == "0"
-                else rsikit.EvaluationResult({"reward": 2}, accepted=p.id != "1")
+                else EvaluationResult({"reward": 2}, accepted=p.id != "1")
                 for p in policies
             }
 

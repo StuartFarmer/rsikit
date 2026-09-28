@@ -19,11 +19,13 @@ from research import alphaevolve
 from research.alphaevolve import improved, original, paper
 from research.alphaevolve.history import Evaluation, Generation
 from research.alphaevolve.improved import AlphaEvolve, Config
-from rsikit import Executor, Run
+from rsikit import Executor
 from rsikit.evaluation import InfrastructureError, PolicyError
 from rsikit.generation.edits import Program
+from tests.helpers import recorded_run
 from tests.providers import ScriptedProvider
 from tests.test_alphaevolve import SOURCE, program
+from tests.test_episode_storage import trajectory
 from tests.test_run import FakeSandbox
 
 ROOT = Path(alphaevolve.__file__).parent
@@ -68,22 +70,23 @@ class RepairTests(unittest.IsolatedAsyncioTestCase):
                 async def evaluate(source, environment, seed, timeout):
                     if any(f"return {i}" in source for i in (9, 8, 7)):
                         raise PolicyError("bad action")
-                    return 7.0, {}
+                    return trajectory(7.0, {})
 
                 sandbox.evaluate.side_effect = evaluate
                 with (
                     gym.make("CartPole-v1") as env,
-                    Run.create(
+                    recorded_run(
                         name="concurrent-repairs",
                         path=Path(directory) / "run",
                         environment=env,
                         executor=Executor(sandbox=sandbox, concurrency=3),
-                    ) as run,
+                    ) as (run, rollouts),
                 ):
                     task = asyncio.create_task(
                         run_search(
                             agent,
                             run,
+                            rollouts,
                             generations=1,
                             batch_size=4,
                             generation_concurrency=2,
@@ -188,24 +191,25 @@ class RepairTests(unittest.IsolatedAsyncioTestCase):
             if "return 9" in implementation or "return 8" in implementation:
                 if seed == 1:
                     raise PolicyError("Action outside action_space")
-                return 100.0, {}  # A partial success must never enter selection.
-            return (8.0 if "return 1" in implementation else 7.0), {}
+                return trajectory(100.0, {})  # A partial success must never enter selection.
+            return trajectory(8.0 if "return 1" in implementation else 7.0, {})
 
         sandbox.evaluate.side_effect = evaluate
         output = io.StringIO()
         with (
             tempfile.TemporaryDirectory() as directory,
             gym.make("CartPole-v1", max_episode_steps=3) as env,
-            Run.create(
+            recorded_run(
                 name="discard",
                 path=Path(directory) / "run",
                 environment=env,
                 executor=Executor(sandbox=sandbox, concurrency=2),
-            ) as run,
+            ) as (run, rollouts),
         ):
             await run_search(
                 agent,
                 run,
+                rollouts,
                 generations=3,
                 batch_size=2,
                 generation_concurrency=1,
@@ -337,23 +341,24 @@ class RepairTests(unittest.IsolatedAsyncioTestCase):
             checked.append(implementation)
             if "return 9" in implementation:
                 raise PolicyError("Action outside action_space")
-            return 7.0, {}
+            return trajectory(7.0, {})
 
         sandbox.evaluate.side_effect = evaluate
         with (
             tempfile.TemporaryDirectory() as directory,
             gym.make("CartPole-v1", max_episode_steps=3) as env,
-            Run.create(
+            recorded_run(
                 name="repair",
                 path=Path(directory) / "run",
                 environment=env,
                 executor=Executor(sandbox=sandbox, concurrency=2),
-            ) as run,
+            ) as (run, rollouts),
         ):
             output = io.StringIO()
             await run_search(
                 agent,
                 run,
+                rollouts,
                 generations=1,
                 batch_size=2,
                 console=Console(file=output, force_terminal=False, width=140),

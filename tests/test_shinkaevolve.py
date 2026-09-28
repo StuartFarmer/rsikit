@@ -20,11 +20,13 @@ import examples.shinkaevolve as example
 from examples.shinkaevolve import run_search
 from research import shinkaevolve
 from research.shinkaevolve import Config, Evaluation, Generation, ShinkaEvolve
-from rsikit import Executor, Run
+from rsikit import Executor
 from rsikit.evaluation import PolicyError
 from rsikit.generation.edits import Edit, Mutation
+from tests.helpers import recorded_run
 from tests.providers import ScriptedProvider
 from tests.test_alphaevolve import SOURCE, program
+from tests.test_episode_storage import trajectory
 from tests.test_run import FakeSandbox
 
 ROOT = Path(shinkaevolve.__file__).parent / "prompts"
@@ -80,7 +82,7 @@ class ShinkaTests(unittest.IsolatedAsyncioTestCase):
             self.assertIn("Generated Policy", (output / "run.log").read_text())
             with (
                 gym.make("CartPole-v1") as env,
-                Run.open(output, environment=env) as run,
+                recorded_run(output, environment=env) as (run, rollouts),
                 run.database() as db,
             ):
                 self.assertEqual(len(db.exec(select(Evaluation)).all()), 2)
@@ -258,25 +260,26 @@ class ShinkaTests(unittest.IsolatedAsyncioTestCase):
             if "return 9" in implementation or "return 8" in implementation:
                 if seed == 1:
                     raise PolicyError("Action outside action_space")
-                return 100.0, {}
-            return (8.0 if "return 1" in implementation else 7.0), {}
+                return trajectory(100.0, {})
+            return trajectory(8.0 if "return 1" in implementation else 7.0, {})
 
         sandbox.evaluate.side_effect = evaluate
         with tempfile.TemporaryDirectory() as directory, gym.make("CartPole-v1") as env:
             path = Path(directory) / "run"
-            with Run.create(
+            with recorded_run(
                 name="shinka", path=path, environment=env, executor=Executor(sandbox=sandbox)
-            ) as run:
+            ) as (run, rollouts):
                 await run_search(
                     agent,
                     run,
+                    rollouts,
                     generations=3,
                     batch_size=2,
                     generation_concurrency=1,
                     seeds=(0, 1),
                     console=Console(file=io.StringIO()),
                 )
-            with Run.open(path, environment=env) as run, run.database() as db:
+            with recorded_run(path, environment=env) as (run, rollouts), run.database() as db:
                 rows = db.exec(
                     select(Evaluation).order_by(Evaluation.attempt, Evaluation.revision)
                 ).all()

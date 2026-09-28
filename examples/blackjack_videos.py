@@ -299,12 +299,12 @@ async def export(
                 if (
                     verify_search
                     and expected is not None
-                    and not math.isclose(result.score, expected, abs_tol=1e-8)
+                    and not math.isclose(result.total_reward, expected, abs_tol=1e-8)
                 ):
                     raise ValueError(f"Training replay score differs: {pid}, seed {seed}")
                 data = {
                     "actions": json.loads(result.artifacts["actions.json"]),
-                    "reward": result.score,
+                    "reward": result.total_reward,
                 }
                 (traces / pid / f"{seed}.json").write_text(json.dumps(data))
                 completed += 1

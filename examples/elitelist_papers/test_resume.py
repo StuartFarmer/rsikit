@@ -13,10 +13,12 @@ from slick import prompts
 from examples.elitelist_papers import run as runner
 from research import elitesearch
 from research.elitesearch import Config, EliteSearch, Generation, Measurement, Organism
-from rsikit import Executor, Run
+from rsikit import Executor
 from rsikit.evaluation import InfrastructureError
+from tests.helpers import recorded_run
 from tests.providers import ScriptedProvider
 from tests.test_elitesearch import program
+from tests.test_episode_storage import trajectory
 from tests.test_run import FakeSandbox
 
 
@@ -126,7 +128,7 @@ class ResumeTests(unittest.IsolatedAsyncioTestCase):
         async def interrupted(source, environment, seed, call_timeout):
             if seed == 1:
                 raise InfrastructureError("interrupted worker")
-            return 7.0, {}
+            return trajectory(7.0)
 
         first.evaluate.side_effect = interrupted
         second = FakeSandbox()
@@ -134,7 +136,7 @@ class ResumeTests(unittest.IsolatedAsyncioTestCase):
 
         async def finish(source, environment, seed, call_timeout):
             jobs.append((seed, call_timeout))
-            return 7.0, {}
+            return trajectory(7.0)
 
         second.evaluate.side_effect = finish
         with tempfile.TemporaryDirectory() as directory:
@@ -247,7 +249,7 @@ class ResumeTests(unittest.IsolatedAsyncioTestCase):
                     await runner.main(["--resume", str(output), "--env", "Pendulum-v1"])
                 with (
                     runner.make_environment("CartPole-v1") as env,
-                    Run.open(output, environment=env),
+                    recorded_run(output, environment=env),
                 ):
                     with self.assertRaises(SystemExit):
                         await runner.main(["--resume", str(output), "--policy-timeout", "1"])

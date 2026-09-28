@@ -80,7 +80,7 @@ class PopulationTests(unittest.IsolatedAsyncioTestCase):
             async def __call__(self, policies):
                 self.scored.append([p.name for p in policies])
                 return {
-                    p.id: Measurement({}, "broken")
+                    p.id: Measurement({}, failure="broken")
                     if p.name in ("Policy 0", "Policy 1")
                     else Measurement({0: 1})
                     for p in policies
@@ -332,7 +332,9 @@ class PopulationTests(unittest.IsolatedAsyncioTestCase):
     async def test_resume_keeps_consumed_repair_budget(self):
         async def evaluate(policies):
             return {
-                p.id: Measurement({}, "illegal") if p.name == "Policy 0" else Measurement({0: 1})
+                p.id: Measurement({}, failure="illegal")
+                if p.name == "Policy 0"
+                else Measurement({0: 1})
                 for p in policies
             }
 
@@ -440,7 +442,9 @@ class PopulationTests(unittest.IsolatedAsyncioTestCase):
         async def evaluate(policies):
             calls.append([p.name for p in policies])
             return {
-                p.id: Measurement({}, "illegal") if p.name == "Policy 0" else Measurement({0: 1})
+                p.id: Measurement({}, failure="illegal")
+                if p.name == "Policy 0"
+                else Measurement({0: 1})
                 for p in policies
             }
 

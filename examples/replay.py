@@ -13,6 +13,8 @@ from rich.logging import RichHandler
 from rich.table import Table
 from rich.text import Text
 
+from research.rewards import mean_rewards
+from research.rollouts import Rollouts
 from rsikit import Executor, Run
 from rsikit.envs.tasks import TASKS, make_environment
 
@@ -22,7 +24,7 @@ async def record_best(
 ) -> Path:
     """Rank complete saved scores, then evaluate selected policies in a fresh run."""
     console = console or Console()
-    with Run.open(path, environment=environment) as source:
+    with Run.open(path) as source:
         ranked = []
         for policy in source.policies():
             scores = list(source.scores(policy).values())
@@ -35,11 +37,11 @@ async def record_best(
         name = f"{source.name}-videos"
         console.print(f"Source run: {source.path}", markup=False)
 
-    async with Run.create(
-        name=name, environment=environment, path=output, executor=executor
-    ) as replay:
+    async with executor or Executor() as executor, Run.create(name=name, path=output) as replay:
         console.print(f"Video run: {replay.path}", markup=False)
-        scores = await replay.evaluate([policy for _, policy in selected], seeds=seeds)
+        scores = await mean_rewards(
+            Rollouts(environment, executor, replay), [policy for _, policy in selected], seeds=seeds
+        )
         table = Table("Policy", "Original mean", "Replay mean")
         for original, policy in selected:
             table.add_row(Text(policy.name), f"{original:.1f}", f"{scores[policy.id]:.1f}")

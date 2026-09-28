@@ -14,13 +14,14 @@ async def main():
         "program", nargs="?", type=Path, default=Path(__file__).with_name("initial.py")
     )
     args = parser.parse_args()
-    _, _, _, _, info = await run_program(
+    episode = await run_program(
         args.program,
         CirclePackingEnv,
         env_seed=1,
         policy_seed=2,
         max_steps=1,
     )
+    info = episode.infos[-1]
     print(info)
 
 

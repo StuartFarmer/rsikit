@@ -45,6 +45,8 @@ from research import shinkaevolve
 from research.shinkaevolve import Config, ShinkaEvolve
 from rsikit.envs.tasks import make_environment
 from rsikit import Executor, Run
+from research.rollouts import Rollouts
+from research.rewards import mean_rewards
 
 # Configure Slick once at application startup.
 prompts.TEMPLATE_ROOT = Path(shinkaevolve.__file__).parent / "prompts"
@@ -58,10 +60,11 @@ with make_environment("LunarLander-v3") as env:
         provider=provider,
         config=Config(islands=2),
     )
-    async with Run.create(name="shinka-lander", environment=env, executor=Executor()) as run:
+    async with Executor() as executor, Run.create(name="shinka-lander") as run:
+        rollouts = Rollouts(env, executor, run)
         for _ in range(10):
             policies = await generator.generate(n=25, concurrency=4)
-            scores = await run.evaluate(policies, seeds=[0, 1, 2])
+            scores = await mean_rewards(rollouts, policies, seeds=[0, 1, 2])
             generator.update(scores)
             run.save(*generator.records(seeds=[0, 1, 2], complete=True))
 ```

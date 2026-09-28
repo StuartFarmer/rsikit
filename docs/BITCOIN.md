@@ -104,12 +104,20 @@ or `info`. Policies maintain their own history in memory. The environment's
 `instructions` describes the complete contract for generated policies.
 
 ```python
-import asyncio
-from examples.bitcoin import Solution  # Buy-and-hold baseline
-from rsikit.evaluation import run_episode
+from copy import deepcopy
+from examples.bitcoin import Solution
+from rsikit import Evaluator
 
-result = asyncio.run(run_episode(BitcoinEnv, Solution))
-print(result[4]["episode"])  # Net USD profit and daily steps
+# Inside an async function:
+with BitcoinEnv() as env:
+    policy = Solution(deepcopy(env.observation_space), deepcopy(env.action_space))
+    try:
+        observation, info = env.reset(seed=0)
+        await policy.reset(seed=1)
+        episode = await Evaluator(env, policy).run(observation, info=info)
+    finally:
+        await policy.close()
+print(episode.total_reward, len(episode))
 ```
 
 The existing AlphaEvolve, ShinkaEvolve, LineageSearch and EliteSearch CLIs accept
@@ -139,9 +147,9 @@ from functools import partial
 
 make_validation_env = partial(BitcoinEnv, data_path="data/bitcoin/validation.csv")
 # Only after freezing the policy:
-# result = await run_episode(make_validation_env, FrozenPolicy)
+# Create/reset fresh policy and environment instances, then use Evaluator.
 # For isolated execution, construct this environment on the host and pass it
-# to a separate Run; its loaded price tuples serialize with the environment.
+# to Executor with a separate Run for storage; loaded price tuples serialize.
 ```
 
 The validation panel starts with fresh portfolio and policy state, without

@@ -7,7 +7,10 @@ from pathlib import Path
 import gymnasium as gym
 
 import rsikit
+from research.alphaevolve.paper.evaluation import assess
+from research.rollouts import Rollouts
 from rsikit.evaluation import InfrastructureError, PolicyError
+from tests.test_episode_storage import trajectory
 from tests.test_run import FakeSandbox
 
 SOURCE = "from rsikit import Policy\nclass Solution(Policy):\n    async def act(self, observation): return 0\n"
@@ -15,8 +18,6 @@ SOURCE = "from rsikit import Policy\nclass Solution(Policy):\n    async def act(
 
 class EvaluationTests(unittest.IsolatedAsyncioTestCase):
     def setUp(self):
-        self.assertTrue(hasattr(rsikit, "EvaluationResult"), "Expose the shared evaluation result")
-        self.assertTrue(hasattr(rsikit, "evaluate_gym"), "Expose the shared Gym adapter")
         self.assertTrue(hasattr(rsikit.Policy, "from_text"), "Expose public policy construction")
         directory = tempfile.TemporaryDirectory()
         self.addCleanup(directory.cleanup)
@@ -25,9 +26,10 @@ class EvaluationTests(unittest.IsolatedAsyncioTestCase):
         self.sandbox = FakeSandbox()
         self.run = rsikit.Run.create(
             name="shared-evaluation",
-            environment=self.environment,
             path=Path(directory.name) / "run",
-            executor=rsikit.Executor(sandbox=self.sandbox, concurrency=2),
+        )
+        self.rollouts = Rollouts(
+            self.environment, rsikit.Executor(sandbox=self.sandbox, concurrency=2), self.run
         )
         self.addCleanup(self.run.close)
         self.good = rsikit.Policy.from_text(SOURCE, name="Good")
@@ -38,14 +40,11 @@ class EvaluationTests(unittest.IsolatedAsyncioTestCase):
         from research.elitesearch import Measurement as EliteMeasurement
         from research.lineagesearch import Measurement as LineageMeasurement
 
-        self.assertIs(EvaluationResult, rsikit.EvaluationResult)
         good = EliteMeasurement({0: 3})
-        failed = EliteMeasurement({}, "bad action")
+        failed = EliteMeasurement({}, failure="bad action")
         feedback = LineageMeasurement({0: 3}, "useful feedback")
         rejected = EvaluationResult({"reward": 1}, accepted=False)
-        for result in (good, failed, feedback, rejected):
-            self.assertIsInstance(result, EvaluationResult)
-        self.assertEqual(good.seed_scores, {0: 3})
+        self.assertNotIsInstance(good, EvaluationResult)
         self.assertEqual(good.scores, {0: 3})
         self.assertFalse(failed.accepted)
         self.assertEqual(failed.failure, "bad action")
@@ -65,10 +64,10 @@ class EvaluationTests(unittest.IsolatedAsyncioTestCase):
         async def evaluate(source, environment, seed, timeout):
             if source.endswith("# fails\n") and seed == 1:
                 raise PolicyError("invalid action")
-            return float(seed + 2), {}
+            return trajectory(float(seed + 2), {})
 
         self.sandbox.evaluate.side_effect = evaluate
-        results = await rsikit.evaluate_gym(self.run, [self.good, self.bad], seeds=iter([0, 1, 0]))
+        results = await assess(self.rollouts, [self.good, self.bad], seeds=iter([0, 1, 0]))
         self.assertEqual(results[self.good.id].seed_scores, {0: 2, 1: 3})
         self.assertEqual(
             results[self.good.id].metrics, {"reward": 2.5, "worst_reward": 2, "stability": -0.5}
@@ -78,7 +77,7 @@ class EvaluationTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(results[self.bad.id].metrics, {})
         self.assertEqual(self.run.scores(self.bad), {0: 2, 1: None})
         self.sandbox.evaluate.side_effect = None
-        recovered = await rsikit.evaluate_gym(self.run, [self.good, self.bad], seeds=[0, 1])
+        recovered = await assess(self.rollouts, [self.good, self.bad], seeds=[0, 1])
         self.assertEqual(recovered[self.bad.id].seed_scores, {0: 2, 1: 7})
         self.assertEqual(self.sandbox.evaluate.await_count, 5)
 
@@ -88,11 +87,11 @@ class EvaluationTests(unittest.IsolatedAsyncioTestCase):
         async def evaluate(source, environment, seed, timeout):
             if source.endswith("# fails\n"):
                 raise PolicyError("broken")
-            return 0.0 if source.endswith("# low\n") else float(10 + seed), {}
+            return trajectory(0.0 if source.endswith("# low\n") else float(10 + seed), {})
 
         self.sandbox.evaluate.side_effect = evaluate
-        results = await rsikit.evaluate_gym(
-            self.run,
+        results = await assess(
+            self.rollouts,
             [self.good, self.bad, low],
             seeds=[0, 2],
             features=("mean_reward", "reward_std"),
@@ -115,11 +114,11 @@ class EvaluationTests(unittest.IsolatedAsyncioTestCase):
             {"screening_min_reward": float("nan")},
         ):
             with self.subTest(kwargs=kwargs), self.assertRaises(ValueError):
-                await rsikit.evaluate_gym(self.run, [self.good], **kwargs)
+                await assess(self.rollouts, [self.good], **kwargs)
         self.sandbox.start.assert_not_awaited()
         self.sandbox.evaluate.side_effect = InfrastructureError("offline")
         with self.assertRaisesRegex(InfrastructureError, "offline"):
-            await rsikit.evaluate_gym(self.run, [self.good])
+            await assess(self.rollouts, [self.good])
 
 
 if __name__ == "__main__":

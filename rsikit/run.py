@@ -1,24 +1,19 @@
-"""Store generated policies and their scores in one local SQLite database."""
+"""Persist the configuration, checkpoints and outputs of one optimizer run."""
 
-import asyncio
 import fcntl
-import logging
+import json
+import math
 import re
-from collections.abc import Sequence
-from contextlib import AsyncExitStack, aclosing, asynccontextmanager
 from datetime import datetime, timezone
 from pathlib import Path
-from statistics import fmean
 from uuid import uuid4
 
-import gymnasium as gym
 from sqlalchemy import JSON, Column, inspect
 from sqlmodel import Field, Session, SQLModel, create_engine, select
 
-from .execution import Executor
+from .episode import Episode
 from .policy import Policy
-
-logger = logging.getLogger(__name__)
+from .sandbox.codec import decode_episode, encode_episode
 
 
 def _slug(name: str) -> str:
@@ -48,10 +43,8 @@ class Run:
         cls,
         *,
         name: str,
-        environment: gym.Env,
         path: str | Path | None = None,
         export: bool = True,
-        executor: Executor | None = None,
     ) -> "Run":
         settings = _Settings(name=name, export=export)
         stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
@@ -61,27 +54,20 @@ class Run:
             else Path("runs") / f"{_slug(name)}-{stamp}-{uuid4().hex[:8]}"
         )
         directory.mkdir(parents=True, exist_ok=False)
-        return cls(directory, environment, settings, executor=executor)
+        return cls(directory, settings)
 
     @classmethod
-    def open(
-        cls, path: str | Path, *, environment: gym.Env, executor: Executor | None = None
-    ) -> "Run":
+    def open(cls, path: str | Path) -> "Run":
         directory = Path(path)
         if not (directory / "run.sqlite").is_file():
             raise FileNotFoundError(directory / "run.sqlite")
-        return cls(directory, environment, executor=executor)
+        return cls(directory)
 
     def __init__(
         self,
         path: Path,
-        environment: gym.Env,
         settings: _Settings | None = None,
-        *,
-        executor: Executor | None = None,
     ):
-        self.environment = environment
-        self.executor = Executor() if executor is None else executor
         self.path = path.resolve()
         self._lock = (self.path / ".lock").open("a")
         self._engine = None
@@ -106,7 +92,6 @@ class Run:
                 self._settings = session.exec(select(_Settings)).one()
                 for stored in session.exec(select(_StoredPolicy)):
                     self._export(stored)
-            self._policy_locks = {}
         except BaseException:
             self.close()
             raise
@@ -122,21 +107,13 @@ class Run:
         self.close()
 
     async def __aenter__(self) -> "Run":
-        await self.executor.__aenter__()
         return self
 
     async def __aexit__(self, *exc):
-        try:
-            await self.executor.__aexit__(*exc)
-        finally:
-            self.close()
+        self.close()
 
     async def aclose(self) -> None:
-        """Close the persistent evaluation sandbox and release the run database."""
-        try:
-            await self.executor.aclose()
-        finally:
-            self.close()
+        self.close()
 
     def close(self) -> None:
         if self._engine is not None:
@@ -178,137 +155,81 @@ class Run:
                 ).to_file(destination)
 
     def policies(self) -> list[type[Policy]]:
-        with Session(self._engine) as session:
+        with self.database() as session:
             return [
                 Policy.from_text(row.implementation, name=row.name, description=row.description)
                 for row in session.exec(select(_StoredPolicy))
             ]
 
     def scores(self, policy: type[Policy]) -> dict[int, float | None]:
-        with Session(self._engine) as session:
+        with self.database() as session:
             row = session.get(_StoredPolicy, policy.id)
             return {} if row is None else {int(seed): score for seed, score in row.scores.items()}
 
-    @asynccontextmanager
-    async def _evaluating(self, policy_ids):
-        # Serialize overlapping policies to retain score reuse; different candidates
-        # can feed the same executor while a previous candidate's last seed finishes.
-        async with AsyncExitStack() as stack:
-            for policy_id in sorted(set(policy_ids)):
-                lock = self._policy_locks.setdefault(policy_id, asyncio.Lock())
-                await stack.enter_async_context(lock)
-            yield
-
-    async def evaluate(self, policies: Sequence[type[Policy]], *, seeds=(0,)) -> dict[str, float]:
-        """Save and evaluate a batch, returning mean scores keyed by policy ID.
-
-        Each policy uses the same seeds, defaulting to one episode with seed 0.
-        Completed scores are reused. Individual episode scores remain in scores().
-        """
-        seeds = tuple(dict.fromkeys(seeds))
-        if not seeds:
-            raise ValueError("Evaluation requires at least one seed")
-        policies = tuple({policy.id: policy for policy in policies}.values())
-        async with self._evaluating(policy.id for policy in policies):
-            if self._lock.closed:
-                raise RuntimeError("Run is closed")
-            with Session(self._engine) as session:
-                for policy in policies:
-                    stored = session.get(_StoredPolicy, policy.id)
-                    if stored is None:
-                        stored = _StoredPolicy(
-                            id=policy.id,
-                            name=policy.name,
-                            description=policy.description,
-                            implementation=policy._implementation,
-                        )
-                    elif (stored.name, stored.implementation) != (
-                        policy.name,
-                        policy._implementation,
-                    ):
-                        raise ValueError("A stored policy cannot change under the same ID")
-                    stored.scores = {**dict.fromkeys(map(str, seeds)), **stored.scores}
-                    session.add(stored)
-                # Persist the whole group before dispatching any evaluation.
-                session.commit()
-                jobs = []
-                for policy in policies:
-                    stored = session.get(_StoredPolicy, policy.id)
-                    self._export(stored)
-                    jobs.extend(
-                        (stored.id, stored.implementation, seed)
-                        for seed in seeds
-                        if stored.scores[str(seed)] is None
-                    )
-            try:
-                await self._execute(jobs)
-            except Exception:
-                unfinished = [
-                    p.name for p in policies if any(self.scores(p)[seed] is None for seed in seeds)
-                ]
-                if unfinished:
-                    logger.error("Unfinished policies: %s", ", ".join(unfinished))
-                raise
-            result = {}
-            for policy in policies:
-                scores = self.scores(policy)
-                result[policy.id] = fmean(scores[seed] for seed in seeds)
-            return result
-
-    async def _execute(self, jobs):
-        requested = {(policy_id, seed) for policy_id, _, seed in jobs}
-        logger.info(
-            "Evaluating %s episodes (%s workers)",
-            len(jobs),
-            self.executor.concurrency,
-            extra={"event": "evaluation_started", "total": len(jobs)},
-        )
-        async with aclosing(self.executor.evaluate(jobs, self.environment)) as results:
-            async for policy_id, seed, result in results:
-                if (policy_id, seed) not in requested:
-                    raise ValueError("Executor returned an unexpected or duplicate result")
-                root = (self.path / "artifacts" / policy_id / str(seed)).resolve()
-                if not root.is_relative_to(self.path):
-                    raise ValueError("Artifact directory must stay inside the run")
-                for name, data in result.artifacts.items():
-                    destination = (root / name).resolve()
-                    if not destination.is_relative_to(root):
-                        raise ValueError("Artifact path must stay inside the evaluation directory")
-                    destination.parent.mkdir(parents=True, exist_ok=True)
-                    temporary = destination.with_name(destination.name + ".tmp")
-                    temporary.write_bytes(data)
-                    temporary.replace(destination)
-                with Session(self._engine) as session:
-                    stored = session.get(_StoredPolicy, policy_id)
-                    policy_name = stored.name
-                    stored.scores = {**stored.scores, str(seed): result.score}
-                    session.add(stored)
-                    session.commit()
-                logger.info(
-                    "%s: score=%g (seed=%s)",
-                    policy_name,
-                    result.score,
-                    seed,
-                    extra={"event": "policy_evaluated", "policy_id": policy_id, "seed": seed},
+    def save_policy(
+        self, policy: type[Policy], *, scores: dict[int, float | None] | None = None
+    ) -> None:
+        """Persist source and optimizer-supplied measurements without evaluating anything."""
+        if scores is not None and any(
+            type(seed) is not int
+            or (score is not None and (type(score) not in (int, float) or not math.isfinite(score)))
+            for seed, score in scores.items()
+        ):
+            raise ValueError("Scores require integer seeds and finite numbers or None")
+        with self.database() as db:
+            stored = db.get(_StoredPolicy, policy.id)
+            if stored is None:
+                stored = _StoredPolicy(
+                    id=policy.id,
+                    name=policy.name,
+                    description=policy.description,
+                    implementation=policy._implementation,
                 )
-                requested.remove((policy_id, seed))
-        if requested:
-            raise RuntimeError("Executor finished without returning all requested results")
+            elif (stored.name, stored.implementation) != (policy.name, policy._implementation):
+                raise ValueError("A stored policy cannot change under the same ID")
+            stored.scores = {**stored.scores, **{str(k): v for k, v in (scores or {}).items()}}
+            db.add(stored)
+            db.commit()
+            self._export(stored)
 
-    async def resume(self) -> None:
-        """Evaluate only missing scores with this run's executor."""
+    def _output_path(self, relative: Path) -> Path:
         if self._lock.closed:
             raise RuntimeError("Run is closed")
-        policy_ids = {policy.id for policy in self.policies()}
-        async with self._evaluating(policy_ids):
-            if self._lock.closed:
-                raise RuntimeError("Run is closed")
-            with Session(self._engine) as session:
-                jobs = [
-                    (row.id, row.implementation, int(seed))
-                    for row in session.exec(select(_StoredPolicy))
-                    if row.id in policy_ids
-                    for seed, score in row.scores.items()
-                    if score is None
-                ]
-            await self._execute(jobs)
+        destination = (self.path / relative).resolve()
+        if not destination.is_relative_to(self.path):
+            raise ValueError("Output path must stay inside the run")
+        return destination
+
+    def save_episode(self, policy: type[Policy], seed: int, episode: Episode) -> None:
+        """Save raw evidence and artifacts; fitness is supplied separately by the optimizer."""
+        if type(seed) is not int:
+            raise ValueError("Episode seed must be an integer")
+        data = json.dumps(encode_episode(episode), allow_nan=False).encode()
+        if len(data) > 64 * 1024 * 1024:
+            raise ValueError("Episode exceeds 64 MiB")
+        self.save_policy(policy)
+        root = self._output_path(Path("artifacts") / policy.id / str(seed))
+        outputs = []
+        for name, value in episode.artifacts.items():
+            destination = (root / name).resolve()
+            if not destination.is_relative_to(root):
+                raise ValueError("Artifact path must stay inside the evaluation directory")
+            outputs.append((destination, value))
+        outputs.append((self._output_path(Path("episodes") / policy.id / f"{seed}.json"), data))
+        for destination, value in outputs:
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            temporary = destination.with_name(destination.name + ".tmp")
+            temporary.write_bytes(value)
+            temporary.replace(destination)
+
+    def load_episode(self, policy: type[Policy], seed: int) -> Episode | None:
+        if type(seed) is not int:
+            raise ValueError("Episode seed must be an integer")
+        path = self._output_path(Path("episodes") / policy.id / f"{seed}.json")
+        if not path.exists():
+            return None
+        with path.open("rb") as stream:
+            data = stream.read(64 * 1024 * 1024 + 1)
+        if len(data) > 64 * 1024 * 1024:
+            raise ValueError("Episode exceeds 64 MiB")
+        return decode_episode(json.loads(data))

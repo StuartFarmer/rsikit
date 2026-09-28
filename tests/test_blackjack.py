@@ -9,9 +9,10 @@ from gymnasium.error import InvalidAction
 from gymnasium.utils.env_checker import check_env
 
 from rsikit import envs
-from rsikit.evaluation import PolicyError, run_episode
+from rsikit.evaluation import PolicyError
 from rsikit.policy import Policy
 from rsikit.sandbox.codec import decode_space, encode_space
+from tests.helpers import run_episode
 
 
 class BlackjackTests(unittest.TestCase):

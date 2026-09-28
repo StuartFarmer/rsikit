@@ -14,9 +14,9 @@ from time import monotonic
 import cloudpickle
 import gymnasium as gym
 
-from rsikit.evaluation import InfrastructureError, PolicyError, PolicyTimeout, run_episode
-from rsikit.sandbox import SandboxPolicy
-from rsikit.sandbox.codec import MAX_MESSAGE, frame_size, loads
+from rsikit.evaluation import InfrastructureError, PolicyError, PolicyTimeout
+from rsikit.sandbox import SandboxPolicy, _run_episode
+from rsikit.sandbox.codec import MAX_MESSAGE, encode_episode, frame_size, loads
 
 
 class ProcessPolicy(SandboxPolicy):
@@ -132,19 +132,15 @@ async def evaluate(request, *, channel=None, directory=None, in_process=False):
                 channel=channel,
             )
 
-        *_, info = await run_episode(
+        episode = await _run_episode(
             lambda: env, make_policy, env_seed=request["seed"], policy_seed=request["seed"]
         )
-        artifacts = dict(info.get("artifacts", {}))
+        artifacts = dict(episode.infos[-1].get("artifacts", {}))
         for path in Path(directory).rglob("*"):
             if path.is_file() and not path.is_symlink():
                 artifacts[str(path.relative_to(directory))] = path.read_bytes()
-        return {
-            "score": float(info["episode"]["r"]),
-            "artifacts": {
-                name: base64.b64encode(data).decode() for name, data in artifacts.items()
-            },
-        }
+        episode.artifacts.update(artifacts)
+        return {"episode": encode_episode(episode)}
 
 
 def error_result(exc):

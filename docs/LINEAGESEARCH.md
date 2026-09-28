@@ -186,16 +186,18 @@ from pathlib import Path
 from slick import prompts
 from research import lineagesearch
 from research.lineagesearch import Config, LineageSearch
-from rsikit import evaluate_gym
+from research.rewards import Measurement, measure_rewards
+from research.rollouts import Rollouts
 
 prompts.TEMPLATE_ROOT = Path(lineagesearch.__file__).parent / "prompts"
 
-# Inside an async function, with an existing provider and RSIKit Run:
+# Inside an async function with an open executor, Run, and environment:
+rollouts = Rollouts(environment, executor, run)
 seeds = (0, 1, 2, 3, 4)
 
 
 async def evaluate(policies):
-    return await evaluate_gym(run, policies, seeds=seeds)
+    return await measure_rewards(rollouts, policies, seeds=seeds)
 
 
 agent = LineageSearch(
@@ -212,13 +214,12 @@ best_policy = agent.best  # None when nothing could be measured.
 ```
 
 Use one agent per study. The evaluator returns exactly the requested policy IDs.
-`rsikit.EvaluationResult(seed_scores=scores, feedback="", failure=None)` carries
+`Measurement(scores, feedback="", failure=None)` carries
 per-seed evidence and optional textual diagnostics. To report a broken candidate
-without aborting siblings, return `EvaluationResult(failure=diagnostic)`;
+without aborting siblings, return `Measurement(failure=diagnostic)`;
 infrastructure errors must raise. Screening rejections use `accepted=False`
-without a failure and do not consume repairs. `evaluate_gym` handles Run's
-`PolicyError.failures`. The old `Measurement(scores, feedback="", failure=None)`
-constructor remains compatible.
+without a failure and do not consume repairs. `measure_rewards` handles executor
+`PolicyError.failures` while preserving successful episodes.
 Generated implementations are never executed by the optimizer itself.
 
 Programmatic callers supply valid configuration: positive family, batch, optional frontier,

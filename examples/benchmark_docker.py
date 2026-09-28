@@ -167,7 +167,7 @@ async def main(samples, output):
                     ]
                     assert len(results) == size
                     assert all(
-                        result.score == expected and result.artifacts == {}
+                        result.total_reward == expected and result.artifacts == {}
                         for _, _, result in results
                     )
 
@@ -176,7 +176,8 @@ async def main(samples, output):
         environment.close()
 
     async def legacy():
-        *_, info = await run_program(CARTPOLE, "CartPole-v1", env_seed=1, policy_seed=1)
+        episode = await run_program(CARTPOLE, "CartPole-v1", env_seed=1, policy_seed=1)
+        info = episode.infos[-1]
         assert info["episode"]["r"] == 500.0 and info["episode"]["l"] == 500
 
     await legacy()

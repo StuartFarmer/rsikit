@@ -16,8 +16,19 @@ from examples.benchmark_docker import PACKING
 from rsikit.envs import BlackjackEnv, CirclePackingEnv
 from rsikit.evaluation import InfrastructureError, PolicyError, PolicyTimeout
 from rsikit.execution import Executor
+from rsikit.sandbox.codec import decode_episode, encode_episode
 from rsikit.sandbox.docker import DockerSandbox
 from rsikit.sandbox.evaluate import ProcessPolicy
+from tests.test_episode_storage import trajectory
+
+
+def frame(job_id, reward=1, artifacts=None):
+    return (
+        json.dumps(
+            {"id": job_id, "result": {"episode": encode_episode(trajectory(reward, artifacts))}}
+        ).encode()
+        + b"\n"
+    )
 
 
 def request(source=PACKING, environment=None, seed=1, timeout=3):
@@ -102,14 +113,23 @@ class ServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotEqual(self.ready["supervisor_pid"], self.ready["forkserver_pid"])
         for job_id in ("first", "second"):
             response = await self.exchange(job_id, request())
-            self.assertEqual(response, {"id": job_id, "result": {"score": 0.5, "artifacts": {}}})
+            self.assertEqual(response["id"], job_id)
+            episode = decode_episode(response["result"]["episode"])
+            self.assertEqual(episode.total_reward, 0.5)
+            self.assertEqual(len(episode.observations), len(episode.actions) + 1)
+            self.assertTrue(episode.terminations[-1])
         self.assertIsNone(self.process.returncode)
 
     async def test_child_death_is_reported_and_service_recovers(self):
         source = PACKING.replace("return np.array", "import os; os._exit(7); return np.array")
         response = await self.exchange("dead", request(source, timeout=0.2))
         self.assertIn(response["result"]["kind"], ("policy", "timeout"))
-        self.assertEqual((await self.exchange("recovered", request()))["result"]["score"], 0.5)
+        self.assertEqual(
+            decode_episode(
+                (await self.exchange("recovered", request()))["result"]["episode"]
+            ).total_reward,
+            0.5,
+        )
 
     async def test_excess_concurrency_is_rejected_without_corrupting_results(self):
         source = PACKING.replace(
@@ -126,10 +146,15 @@ class ServiceTests(unittest.IsolatedAsyncioTestCase):
         for _ in range(3):
             result = json.loads(await asyncio.wait_for(self.process.stdout.readline(), 10))
             replies[result["id"]] = result["result"]
-        self.assertEqual(replies["0"]["score"], 0.5)
-        self.assertEqual(replies["1"]["score"], 0.5)
+        self.assertEqual(decode_episode(replies["0"]["episode"]).total_reward, 0.5)
+        self.assertEqual(decode_episode(replies["1"]["episode"]).total_reward, 0.5)
         self.assertEqual(replies["2"]["kind"], "infrastructure")
-        self.assertEqual((await self.exchange("next", request()))["result"]["score"], 0.5)
+        self.assertEqual(
+            decode_episode(
+                (await self.exchange("next", request()))["result"]["episode"]
+            ).total_reward,
+            0.5,
+        )
 
     async def test_malformed_request_stops_the_service(self):
         self.process.stdin.write(b'{"id":false,"request":{}}\n')
@@ -224,10 +249,10 @@ class ProtocolTests(unittest.IsolatedAsyncioTestCase):
         sandbox.close = AsyncMock()
         first, second = (asyncio.get_running_loop().create_future() for _ in range(2))
         sandbox._pending = {"a": first, "b": second}
-        reader.feed_data(b'{"id":"a","result":{"score":1,"artifacts":{}}}\n' * 2)
+        reader.feed_data(frame("a") * 2)
         reader.feed_eof()
         await sandbox._read_results()
-        self.assertEqual(await first, (1, {}))
+        self.assertEqual((await first).total_reward, 1)
         self.assertIsInstance(second.exception(), InfrastructureError)
 
     async def test_malformed_frames_fail_every_pending_job(self):
@@ -263,14 +288,12 @@ class ProtocolTests(unittest.IsolatedAsyncioTestCase):
         sandbox.close = AsyncMock()
         pending = {key: asyncio.get_running_loop().create_future() for key in ("a", "b")}
         sandbox._pending = pending.copy()
-        reader.feed_data(
-            b'{"id":"b","result":{"score":2,"artifacts":{}}}\n'
-            b'{"id":"a","result":{"score":1,"artifacts":{"x":"YQ=="}}}\n'
-        )
+        reader.feed_data(frame("b", 2) + frame("a", 1, {"x": b"a"}))
         reader.feed_eof()
         await sandbox._read_results()
-        self.assertEqual(await pending["a"], (1, {"x": b"a"}))
-        self.assertEqual(await pending["b"], (2, {}))
+        self.assertEqual((await pending["a"]).total_reward, 1)
+        self.assertEqual((await pending["a"]).artifacts, {"x": b"a"})
+        self.assertEqual((await pending["b"]).total_reward, 2)
         await asyncio.sleep(0)
 
 
@@ -317,8 +340,10 @@ class PersistentTests(unittest.IsolatedAsyncioTestCase):
         try:
             await sandbox.start(1)
             self.assertEqual(
-                await sandbox.evaluate(source, cloudpickle.dumps(CirclePackingEnv(1)), 1, 3),
-                (0.5, {}),
+                (
+                    await sandbox.evaluate(source, cloudpickle.dumps(CirclePackingEnv(1)), 1, 3)
+                ).total_reward,
+                0.5,
             )
         finally:
             await sandbox.close()
@@ -425,7 +450,7 @@ class PersistentTests(unittest.IsolatedAsyncioTestCase):
                 self.assertIs(sandbox.process, process)
                 self.assertEqual(sandbox.name, name)
                 for policy_id, seed, result in results:
-                    self.assertEqual(result.score, float(policy_id))
+                    self.assertEqual(result.total_reward, float(policy_id))
                     for key in ("candidate.json", "environment.json"):
                         identity = json.loads(result.artifacts[key])
                         self.assertEqual(identity["parent"], ready["forkserver_pid"])
@@ -445,7 +470,7 @@ class PersistentTests(unittest.IsolatedAsyncioTestCase):
             results = [
                 item async for item in executor.evaluate([("cleanup", PACKING, 1)], CheckCleanup(1))
             ]
-            self.assertEqual(results[0][2].score, 0.5)
+            self.assertEqual(results[0][2].total_reward, 0.5)
         self.assertIsNone(sandbox.name)
         self.assertIsNotNone(process.returncode)
 
@@ -461,7 +486,7 @@ class PersistentTests(unittest.IsolatedAsyncioTestCase):
             results = [
                 item async for item in executor.evaluate([("ok", PACKING, 1)], CirclePackingEnv(1))
             ]
-            self.assertEqual(results[0][2].score, 0.5)
+            self.assertEqual(results[0][2].total_reward, 0.5)
             self.assertEqual(sandbox.ready, ready)
             self.assertIs(sandbox.process, process)
 
@@ -483,7 +508,7 @@ class PersistentTests(unittest.IsolatedAsyncioTestCase):
                 ):
                     results.append(result)
             self.assertEqual(set(caught.exception.failures), {"slow"})
-            self.assertEqual([(p, s, r.score) for p, s, r in results], [("fast", 1, 0)])
+            self.assertEqual([(p, s, r.total_reward) for p, s, r in results], [("fast", 1, 0)])
             ready, process = sandbox.ready.copy(), sandbox.process
             results = [
                 result
@@ -491,7 +516,7 @@ class PersistentTests(unittest.IsolatedAsyncioTestCase):
                     [("repaired", fast, 0)], BlackjackEnv(shoes_per_episode=1)
                 )
             ]
-            self.assertEqual(results[0][2].score, 0)
+            self.assertEqual(results[0][2].total_reward, 0)
             self.assertEqual(sandbox.ready, ready)
             self.assertIs(sandbox.process, process)
 
@@ -510,13 +535,13 @@ class PersistentTests(unittest.IsolatedAsyncioTestCase):
                 ):
                     results.append(result)
             self.assertEqual(set(caught.exception.failures), {"bad"})
-            self.assertEqual([(p, s, r.score) for p, s, r in results], [("good", 1, 0)])
+            self.assertEqual([(p, s, r.total_reward) for p, s, r in results], [("good", 1, 0)])
             self.assertIsNone(sandbox._failure)
             ready, process = sandbox.ready.copy(), sandbox.process
             results = [
                 result async for result in executor.evaluate([("bad", repaired, 0)], BlackjackEnv())
             ]
-            self.assertEqual(results[0][2].score, 0)
+            self.assertEqual(results[0][2].total_reward, 0)
             self.assertEqual(sandbox.ready, ready)
             self.assertIs(sandbox.process, process)
 
@@ -542,8 +567,10 @@ class PersistentTests(unittest.IsolatedAsyncioTestCase):
             await sandbox.close()
             await sandbox.start(1)
             self.assertEqual(
-                await sandbox.evaluate(PACKING, cloudpickle.dumps(CirclePackingEnv(1)), 1, 3),
-                (0.5, {}),
+                (
+                    await sandbox.evaluate(PACKING, cloudpickle.dumps(CirclePackingEnv(1)), 1, 3)
+                ).total_reward,
+                0.5,
             )
         finally:
             await sandbox.close()

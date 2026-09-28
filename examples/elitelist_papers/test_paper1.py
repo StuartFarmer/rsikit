@@ -15,10 +15,12 @@ import cloudpickle
 import numpy as np
 from rich.console import Console
 
-from rsikit import Executor, Run
+from rsikit import Executor
 from rsikit.evaluation import PolicyError
+from tests.helpers import recorded_run
 from tests.providers import ScriptedProvider
 from tests.test_elitesearch import program
+from tests.test_episode_storage import trajectory
 from tests.test_run import FakeSandbox
 
 
@@ -85,10 +87,10 @@ class Paper1Tests(unittest.IsolatedAsyncioTestCase):
 
         async def evaluate(source, environment, seed, call_timeout):
             if "action_space.sample" in source:
-                return -2.0, {}
+                return trajectory(-2.0, {})
             value = int(source.split("return ")[-1].strip())
             # Better search candidates deliberately generalize worse.
-            return float(value if seed < 100 else 10 - value), {}
+            return trajectory(float(value if seed < 100 else 10 - value), {})
 
         sandbox.evaluate.side_effect = evaluate
         provider = ScriptedProvider([])
@@ -175,7 +177,7 @@ class Paper1Tests(unittest.IsolatedAsyncioTestCase):
                     self.assertEqual(archive.read(name), (runner.ROOT / name).read_bytes())
             with (
                 runner.make_environment("CartPole-v1") as env,
-                Run.open(output, environment=env) as run,
+                recorded_run(output, environment=env) as (run, rollouts),
             ):
                 self.assertTrue(
                     all(np.isfinite(v) for p in run.policies() for v in run.scores(p).values())
@@ -188,7 +190,7 @@ class Paper1Tests(unittest.IsolatedAsyncioTestCase):
         async def evaluate(source, environment, seed, call_timeout):
             if seed >= 100 and "action_space.sample" not in source:
                 raise PolicyError("unseen-state failure")
-            return 7.0, {}
+            return trajectory(7.0, {})
 
         sandbox.evaluate.side_effect = evaluate
         with tempfile.TemporaryDirectory() as directory:
@@ -261,7 +263,7 @@ class Paper1Tests(unittest.IsolatedAsyncioTestCase):
 
                 async def evaluate(source, environment, seed, call_timeout):
                     # Search meets the target exactly; held-out results do not.
-                    return (475.0 if seed == 0 else -100.0), {}
+                    return trajectory(475.0 if seed == 0 else -100.0, {})
 
                 sandbox.evaluate.side_effect = evaluate
                 provider = ScriptedProvider(

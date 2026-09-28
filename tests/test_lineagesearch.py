@@ -18,9 +18,11 @@ from slick.providers import ProviderError
 from sqlmodel import select
 
 from research.lineagesearch import Config, Family, LineageSearch, Measurement, Study, Trial
-from rsikit import Executor, Run
+from rsikit import Executor
 from rsikit.evaluation import PolicyError
+from tests.helpers import recorded_run
 from tests.providers import ScriptedProvider
+from tests.test_episode_storage import trajectory
 from tests.test_run import FakeSandbox
 
 ROOT = Path(__file__).resolve().parents[1] / "research/lineagesearch" / "prompts"
@@ -579,13 +581,13 @@ class LineageTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(agent.families[0].stale_batches, 0)
 
     async def test_screening_rejection_does_not_promote_or_repair(self):
-        from rsikit import EvaluationResult
+        from research.rewards import Measurement
 
         agent = self.agent([families(), *sequence(0)], {}, max_attempts=1)
 
         async def evaluate(policies):
             return {
-                p.id: EvaluationResult(seed_scores={0: 100}, accepted=False, feedback="screened")
+                p.id: Measurement(scores={0: 100}, accepted=False, feedback="screened")
                 for p in policies
             }
 
@@ -602,9 +604,9 @@ class LineageTests(unittest.IsolatedAsyncioTestCase):
             [families(), *sequence(0, 1, 2)], {"Policy 0": 1, "Policy 1": 1, "Policy 2": 1}
         )
         with tempfile.TemporaryDirectory() as directory, gym.make("CartPole-v1") as env:
-            with Run.create(
+            with recorded_run(
                 name="lineage-test", environment=env, path=Path(directory) / "run"
-            ) as run:
+            ) as (run, rollouts):
                 agent.on_checkpoint = lambda current: run.save(*current.records())
                 await agent.run()
                 with run.database() as db:
@@ -690,19 +692,19 @@ class LineageTests(unittest.IsolatedAsyncioTestCase):
         async def execute(implementation, environment, seed, call_timeout):
             if "scipy" in implementation:
                 raise PolicyError("ModuleNotFoundError: No module named 'scipy'")
-            return 7.0, {}
+            return trajectory(7.0, {})
 
         sandbox.evaluate.side_effect = execute
         with tempfile.TemporaryDirectory() as directory, gym.make("CartPole-v1") as env:
-            with Run.create(
+            with recorded_run(
                 name="dependency-repair",
                 environment=env,
                 executor=Executor(sandbox=sandbox),
                 path=Path(directory) / "run",
-            ) as run:
+            ) as (run, rollouts):
 
                 async def evaluate(policies):
-                    return await measure(run, policies, [0, 1])
+                    return await measure(rollouts, policies, [0, 1])
 
                 agent.evaluate = evaluate
                 await agent.run()
@@ -895,7 +897,10 @@ class LineageTests(unittest.IsolatedAsyncioTestCase):
             self.assertIn("Repairing", log)
             self.assertIn("score=7", log)
             self.assertIn("survivors for next decomposition", log)
-            with gym.make("CartPole-v1") as env, Run.open(output, environment=env) as run:
+            with (
+                gym.make("CartPole-v1") as env,
+                recorded_run(output, environment=env) as (run, rollouts),
+            ):
                 with run.database() as db:
                     self.assertEqual(db.exec(select(Study)).one().config["cull_percent"], 50)
                     trials = db.exec(select(Trial)).all()

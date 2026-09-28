@@ -14,6 +14,8 @@ from slick import prompts
 from slick.providers import OpenRouterAPI
 
 import rsikit.generation as generation
+from research.rewards import mean_rewards
+from research.rollouts import Rollouts
 from rsikit import DockerSandbox, Executor, Run, generate
 from rsikit.evaluation import PolicyError
 
@@ -37,13 +39,18 @@ async def run_demo(
     async with AsyncExitStack() as stack:
         video_folder = stack.enter_context(TemporaryDirectory())
         environment = stack.enter_context(make_environment(max_steps, video, video_folder))
+        executor = await stack.enter_async_context(
+            Executor(sandbox=DockerSandbox(), concurrency=concurrency)
+        )
         run = await stack.enter_async_context(
             Run.create(
                 name="cartpole-comparison",
-                environment=environment,
                 path=output,
-                executor=Executor(sandbox=DockerSandbox(), concurrency=concurrency),
             )
+        )
+        rollouts = Rollouts(environment, executor, run)
+        (run.path / "experiment.json").write_text(
+            json.dumps(dict(seeds=list(seeds), max_steps=max_steps))
         )
         print(f"Run: {run.path}", flush=True)
         policies = []
@@ -53,9 +60,10 @@ async def run_demo(
                 task.render(approach=approach, max_steps=max_steps), provider=provider
             )
             policies.append(policy)
+            run.save_policy(policy)
         print(f"Evaluating {len(policies)} policies, concurrency={concurrency}...", flush=True)
         try:
-            await run.evaluate(policies, seeds=seeds)
+            await mean_rewards(rollouts, policies, seeds=seeds)
         except PolicyError as exc:
             print(f"Policy evaluation failed: {exc}", flush=True)
         return write_report(run)
@@ -107,17 +115,17 @@ async def main():
     if args.resume:
         async with AsyncExitStack() as stack:
             video_folder = stack.enter_context(TemporaryDirectory())
+            run = await stack.enter_async_context(Run.open(args.resume))
+            saved = json.loads((run.path / "experiment.json").read_text())
             environment = stack.enter_context(
-                make_environment(args.max_steps, args.video, video_folder)
+                make_environment(saved["max_steps"], args.video, video_folder)
             )
-            run = await stack.enter_async_context(
-                Run.open(
-                    args.resume,
-                    environment=environment,
-                    executor=Executor(sandbox=DockerSandbox(), concurrency=args.concurrency),
-                )
+            executor = await stack.enter_async_context(
+                Executor(sandbox=DockerSandbox(), concurrency=args.concurrency)
             )
-            await run.resume()
+            await mean_rewards(
+                Rollouts(environment, executor, run), run.policies(), seeds=saved["seeds"]
+            )
             write_report(run)
         return
     if not os.environ.get("OPENROUTER_API_KEY"):

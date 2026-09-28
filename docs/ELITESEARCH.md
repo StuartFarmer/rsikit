@@ -74,13 +74,12 @@ Improvement on search seeds is not a guarantee of improvement on unseen seeds.
 
 Programmatic callers import `Config` and `EliteSearch` from
 `research.elitesearch`, configure Slick's template root to `research/elitesearch/prompts`, and inject
-an async evaluator returning `{policy.id: EvaluationResult(seed_scores=per_seed_scores)}`.
-Import `EvaluationResult` and the reusable `evaluate_gym(run, policies, seeds=...)`
-adapter from `rsikit`. Candidate failures use `EvaluationResult(failure="diagnostic")`;
-screening rejections use `accepted=False` without a failure and are discarded without
-repair. Infrastructure failures raise. The old `Measurement(scores, failure=None)`
-constructor remains compatible.
-Evaluation callbacks run concurrently; a shared Run/Executor bounds episode workers.
+an async callback returning `{policy.id: Measurement(scores=per_seed_scores)}`.
+Import `Measurement` and `measure_rewards(rollouts, policies, seeds=...)` from
+`research.rewards`, and construct `Rollouts(environment, executor, run)` explicitly.
+Candidate failures use `Measurement(failure="diagnostic")`; screening rejections
+use `accepted=False` without a failure. Infrastructure failures raise.
+Concurrent callbacks share a Rollouts collector and executor.
 The caller owns isolated execution and persistence through `on_checkpoint` and
 `agent.records()`. Generated code is never executed by the optimizer itself.
 

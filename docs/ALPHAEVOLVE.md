@@ -319,6 +319,8 @@ from slick.providers import OpenRouterAPI
 
 from research import alphaevolve
 from rsikit import Executor, Run
+from research.rollouts import Rollouts
+from research.rewards import mean_rewards
 from research.alphaevolve.improved import AlphaEvolve
 
 # Configure Slick once at application startup.
@@ -335,10 +337,11 @@ executor = Executor(concurrency=4)
 
 # Inside an async function:
 with gym.make("CartPole-v1", max_episode_steps=500) as environment:
-    async with Run.create(name="cartpole", environment=environment, executor=executor) as run:
+    async with executor, Run.create(name="cartpole") as run:
+        rollouts = Rollouts(environment, executor, run)
         for generation in range(25):
             policies = await generator.generate(n=10, concurrency=4)
-            scores = await run.evaluate(policies)
+            scores = await mean_rewards(rollouts, policies)
             generator.update(scores, seed_scores={p.id: run.scores(p) for p in policies})
         print(generator.best.name)
 ```
@@ -365,14 +368,14 @@ guidance enabled, response timing
 can affect which guidance later proposals use. Keep the generate/evaluate/update
 loop sequential so every generation uses the previous generation's measured scores.
 
-`evaluate` is the first persistence boundary: it stores and exports the requested
+The research reward callback is the first persistence boundary: it stores and exports the requested
 policies before dispatch so interruptions can be resumed, then saves scores and
 artifacts as they arrive. It returns `{policy_id: score}`. Identical policy IDs are
 evaluated once; their score applies to all matching proposals in `update`.
 
 By default, evaluation uses one episode with seed 0 for every policy. A seed controls
 random starting conditions; using the same seed makes comparisons reproducible.
-For a broader comparison, `await run.evaluate(policies, seeds=[0, 1, 2])` returns the
+For a broader comparison, `await mean_rewards(rollouts, policies, seeds=[0, 1, 2])` returns the
 mean reward. `run.scores(policy)` retains the individual scores. Use the same seed
 set throughout a search and separate held-out seeds when checking generalization.
 The optimizer's constructor `seed` controls parent/model selection, separately from
@@ -451,7 +454,7 @@ policies = await generator.generate(n=10)
 scores = {}
 while policies:
     try:
-        scores = await run.evaluate(policies)
+        scores = await mean_rewards(rollouts, policies)
         break
     except PolicyError as error:
         replacements = {

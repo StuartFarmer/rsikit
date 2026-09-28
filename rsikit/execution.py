@@ -10,8 +10,8 @@ from typing import Protocol
 
 import cloudpickle
 import gymnasium as gym
-from pydantic import BaseModel, Field, FiniteFloat
 
+from .episode import Episode
 from .evaluation import InfrastructureError, PolicyError
 from .sandbox.docker import InProcessDockerSandbox
 
@@ -20,13 +20,8 @@ class Sandbox(Protocol):
     async def start(self, workers: int) -> None: ...
     async def evaluate(
         self, implementation: str, environment: bytes, seed: int, call_timeout: float
-    ) -> tuple[float, dict[str, bytes]]: ...
+    ) -> Episode: ...
     async def close(self) -> None: ...
-
-
-class Result(BaseModel):
-    score: FiniteFloat
-    artifacts: dict[str, bytes] = Field(default_factory=dict)
 
 
 class Executor:
@@ -126,7 +121,7 @@ class Executor:
         self,
         jobs: Iterable[tuple[str, str, int]],
         environment: gym.Env,
-    ) -> AsyncIterator[tuple[str, int, Result]]:
+    ) -> AsyncIterator[tuple[str, int, Episode]]:
         """Yield episode results; an async context retains the sandbox between batches."""
         jobs = list(jobs)
         if not jobs:
@@ -148,13 +143,13 @@ class Executor:
                     if self._broken:
                         raise InfrastructureError("Sandbox interrupted during another evaluation")
                     try:
-                        score, artifacts = await self.sandbox.evaluate(
+                        episode = await self.sandbox.evaluate(
                             implementation,
                             definition,
                             seed,
                             self.call_timeout,
                         )
-                        return policy_id, seed, Result(score=score, artifacts=artifacts)
+                        return policy_id, seed, episode
                     except asyncio.CancelledError:
                         self._broken = True
                         raise

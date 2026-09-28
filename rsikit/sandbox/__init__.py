@@ -2,11 +2,18 @@
 
 import asyncio
 import contextlib
+import logging
 import math
+import sys
+from collections.abc import Callable
+from copy import deepcopy
 from pathlib import Path
 from uuid import uuid4
 
-from rsikit.evaluation import InfrastructureError, PolicyError, PolicyTimeout, run_episode
+import gymnasium as gym
+
+from rsikit.episode import Episode
+from rsikit.evaluation import Evaluator, InfrastructureError, PolicyError, PolicyTimeout
 from rsikit.policy import Policy
 
 from .codec import MAX_MESSAGE, MAX_SOURCE, decode, dumps, encode, encode_space, loads, pack, unpack
@@ -217,8 +224,8 @@ async def run_program(
     max_steps: int | None = None,
     instructions: str | None = None,
     call_timeout: float = 10.0,
-):
-    """Read source as data, then delegate the rollout to the shared episode runner."""
+) -> Episode:
+    """Run a generated policy in Docker with a host environment; return its trajectory."""
     try:
         with Path(program).open(encoding="utf-8") as stream:
             source = stream.read(MAX_SOURCE + 1)
@@ -234,7 +241,7 @@ async def run_program(
             call_timeout=call_timeout,
         )
 
-    return await run_episode(
+    return await _run_episode(
         make_env,
         make_policy,
         env_seed=env_seed,
@@ -242,3 +249,52 @@ async def run_program(
         max_steps=max_steps,
         instructions=instructions,
     )
+
+
+async def _run_episode(
+    make_env: str | Callable[[], gym.Env],
+    make_policy: Callable[..., Policy],
+    *,
+    env_seed: int | None = None,
+    policy_seed: int | None = None,
+    max_steps: int | None = None,
+    instructions: str | None = None,
+) -> Episode:
+    """Prepare and clean up instances on behalf of sandbox execution.
+
+    Accept an environment ID or a factory returning a fresh environment. Existing
+    Gymnasium time limits apply unless max_steps supplies an additional cap.
+    Instructions are optional. Exceptions propagate after resources are closed.
+    """
+    env = gym.make(make_env) if isinstance(make_env, str) else make_env()
+    policy = None
+    try:
+        if max_steps is not None:
+            env = gym.wrappers.TimeLimit(env, max_episode_steps=max_steps)
+        env = gym.wrappers.RecordEpisodeStatistics(env, buffer_length=1)
+        if instructions is None:
+            instructions = (
+                env.get_wrapper_attr("instructions") if env.has_wrapper_attr("instructions") else ""
+            )
+        policy = make_policy(
+            deepcopy(env.observation_space),
+            deepcopy(env.action_space),
+            instructions=instructions,
+        )
+        observation, info = env.reset(seed=env_seed)
+        await policy.reset(seed=policy_seed)
+        episode = await Evaluator(env, policy).run(observation, info=info)
+        return episode
+    finally:
+        primary = sys.exc_info()[1]
+        try:
+            try:
+                if policy is not None:
+                    await policy.close()
+            finally:
+                env.close()
+        except BaseException:
+            if primary is None:
+                raise
+            # Keep the original failure/cancellation; expose secondary cleanup errors.
+            logging.getLogger(__name__).exception("Cleanup failed while handling an episode error")

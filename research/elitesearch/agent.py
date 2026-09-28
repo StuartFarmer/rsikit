@@ -15,7 +15,8 @@ from pydantic import ValidationError
 from slick import prompt
 from slick.providers import Provider
 
-from rsikit import EvaluationResult, Policy
+from research.rewards import Measurement
+from rsikit import Policy
 from rsikit.generation import WORKER_LIBRARIES, RecordingProvider
 from rsikit.generation.edits import (
     InvalidCandidate,
@@ -45,11 +46,6 @@ class Config:
     target_score: float | None = None
 
 
-def Measurement(scores: dict[int, float], failure: str | None = None) -> EvaluationResult:
-    """Compatibility constructor; new evaluators return rsikit.EvaluationResult."""
-    return EvaluationResult(seed_scores=scores, failure=failure)
-
-
 class EliteSearch:
     """One run per instance. Evaluation is injected and must isolate generated code.
 
@@ -66,7 +62,7 @@ class EliteSearch:
         self,
         task: str,
         provider: Provider,
-        evaluate: Callable[[Sequence[type[Policy]]], Awaitable[dict[str, EvaluationResult]]],
+        evaluate: Callable[[Sequence[type[Policy]]], Awaitable[dict[str, Measurement]]],
         *,
         context: str = "",
         config: Config = Config(),
@@ -320,13 +316,11 @@ class EliteSearch:
             for result in results.values():
                 if not result.accepted:
                     continue
-                if not result.seed_scores or any(
-                    not math.isfinite(v) for v in result.seed_scores.values()
-                ):
+                if not result.scores or any(not math.isfinite(v) for v in result.scores.values()):
                     raise ValueError("Measurements must contain finite per-seed scores")
-                if panel is not None and set(result.seed_scores) != panel:
+                if panel is not None and set(result.scores) != panel:
                     raise ValueError("All candidates must use the same seed panel")
-                panel = set(result.seed_scores)
+                panel = set(result.scores)
             self._seed_panel = panel
             failed = []
             for row in rows:
@@ -337,10 +331,8 @@ class EliteSearch:
                 elif not result.accepted:
                     row.status, row.error = "discarded", result.feedback or "Evaluation rejected"
                 else:
-                    row.score = fmean(result.seed_scores.values())
-                    row.seed_scores = {
-                        str(seed): value for seed, value in result.seed_scores.items()
-                    }
+                    row.score = fmean(result.scores.values())
+                    row.seed_scores = {str(seed): value for seed, value in result.scores.items()}
                     row.status = "evaluated"
             self._checkpoint()
             if not failed:

@@ -5,7 +5,8 @@ import unittest
 import numpy as np
 
 from rsikit import Policy
-from rsikit.evaluation import PolicyError, run_episode
+from rsikit.evaluation import PolicyError
+from tests.helpers import run_episode
 
 
 class DiscreteActionTests(unittest.IsolatedAsyncioTestCase):
@@ -28,6 +29,7 @@ class DiscreteActionTests(unittest.IsolatedAsyncioTestCase):
     async def test_invalid_discrete_actions_are_rejected_before_conversion(self):
         for action in (np.array([0]), np.array(0.5), np.array(6), np.array(-1)):
             with self.subTest(action=action):
+
                 class InvalidPolicy(Policy):
                     async def act(self, observation):
                         return action
@@ -45,6 +47,7 @@ class BoxActionTests(unittest.IsolatedAsyncioTestCase):
         expected = await run_episode("CarRacing-v3", ArrayPolicy, env_seed=0, max_steps=2)
         for action in ([0.0, 0.5, 0.0], (0.0, 0.5, 0.0)):
             with self.subTest(action=action):
+
                 class SequencePolicy(Policy):
                     async def act(self, observation):
                         return action
@@ -55,9 +58,14 @@ class BoxActionTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(actual[4]["episode"]["r"], expected[4]["episode"]["r"])
 
     async def test_invalid_box_actions_still_raise_policy_errors(self):
-        for action in ([0.0], [0.0, 2.0, 0.0], [0.0, float("nan"), 0.0],
-                       np.array([0.0, 0.5, 0.0], dtype=np.float64)):
+        for action in (
+            [0.0],
+            [0.0, 2.0, 0.0],
+            [0.0, float("nan"), 0.0],
+            np.array([0.0, 0.5, 0.0], dtype=np.float64),
+        ):
             with self.subTest(action=action):
+
                 class InvalidPolicy(Policy):
                     async def act(self, observation):
                         return action

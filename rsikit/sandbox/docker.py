@@ -8,7 +8,9 @@ import math
 import sys
 from uuid import uuid4
 
+from rsikit.episode import Episode
 from rsikit.evaluation import InfrastructureError, PolicyError, PolicyTimeout
+from rsikit.sandbox.codec import decode_episode
 
 MAX_RESULT = 64 * 1024 * 1024
 
@@ -163,21 +165,9 @@ class DockerSandbox:
                     error = error_type(result["error"])
                     value = None
                 else:
-                    if (
-                        set(result) != {"score", "artifacts"}
-                        or type(result["score"]) not in (int, float)
-                        or not math.isfinite(result["score"])
-                        or not isinstance(result["artifacts"], dict)
-                        or any(not isinstance(data, str) for data in result["artifacts"].values())
-                    ):
-                        raise ValueError("Malformed evaluation score or artifacts")
-                    value = (
-                        result["score"],
-                        {
-                            name: base64.b64decode(data, validate=True)
-                            for name, data in result["artifacts"].items()
-                        },
-                    )
+                    if set(result) != {"episode"}:
+                        raise ValueError("Malformed evaluation episode")
+                    value = decode_episode(result["episode"])
                     error = None
                 future = self._pending.pop(envelope["id"])
                 if future.done():
@@ -201,7 +191,7 @@ class DockerSandbox:
 
     async def evaluate(
         self, implementation: str, environment: bytes, seed: int, call_timeout: float
-    ) -> tuple[float, dict[str, bytes]]:
+    ) -> Episode:
         if self._failure is not None:
             raise self._failure
         if self.process is None or self.name is None or self._reader is None:

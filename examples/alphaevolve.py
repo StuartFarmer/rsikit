@@ -28,10 +28,12 @@ from sqlmodel import func, select
 from research import alphaevolve
 from research.alphaevolve import improved, original, paper
 from research.alphaevolve.history import Generation, history_records
+from research.alphaevolve.paper.evaluation import assess
+from research.rewards import mean_rewards
+from research.rollouts import Rollouts
 from rsikit import Executor, Run
 from rsikit.envs.tasks import TASKS, make_environment
 from rsikit.evaluation import PolicyError
-from rsikit.measurements import evaluate_gym
 from rsikit.policy import Policy
 from rsikit.progress import ProgressHandler, show_scores
 
@@ -63,6 +65,7 @@ def _check_gym_evaluation(
 async def run_search(
     generator,
     run,
+    rollouts,
     *,
     generations,
     batch_size,
@@ -78,6 +81,7 @@ async def run_search(
         return await run_paper_search(
             generator,
             run,
+            rollouts,
             generations=generations,
             batch_size=batch_size,
             generation_concurrency=generation_concurrency,
@@ -94,7 +98,11 @@ async def run_search(
         if inspect(db.bind).has_table(Generation.__tablename__):
             first_generation = (db.exec(select(func.max(Generation.number))).one() or 0) + 1
     logger = logging.getLogger("rsikit")
-    loggers = (logger, logging.getLogger("research.alphaevolve"))
+    loggers = (
+        logger,
+        logging.getLogger("research.alphaevolve"),
+        logging.getLogger("research.rewards"),
+    )
     old_settings = [(item.level, item.propagate) for item in loggers]
     with Progress(
         SpinnerColumn(),
@@ -134,7 +142,7 @@ async def run_search(
                     while policies:
                         run.save(*history_records(generator, **history, failures=failures))
                         try:
-                            scores = await run.evaluate(policies, seeds=seeds)
+                            scores = await mean_rewards(rollouts, policies, seeds=seeds)
                             failures = {}
                             break
                         except PolicyError as exc:
@@ -205,6 +213,7 @@ async def run_search(
 async def run_paper_search(
     generator,
     run,
+    rollouts,
     *,
     generations,
     batch_size,
@@ -231,7 +240,11 @@ async def run_paper_search(
     )
     console = console or Console()
     logger = logging.getLogger("rsikit")
-    loggers = (logger, logging.getLogger("research.alphaevolve"))
+    loggers = (
+        logger,
+        logging.getLogger("research.alphaevolve"),
+        logging.getLogger("research.rewards"),
+    )
     old_settings = [(item.level, item.propagate) for item in loggers]
     generation = 1
     with run.database() as db:
@@ -247,8 +260,8 @@ async def run_paper_search(
     async def evaluate(policies):
         nonlocal failures
         try:
-            results = await evaluate_gym(
-                run,
+            results = await assess(
+                rollouts,
                 policies,
                 seeds=seeds,
                 features=generator.config.features,
@@ -524,16 +537,16 @@ async def main():
     executor = Executor(concurrency=args.concurrency)
     async with AsyncExitStack() as stack:
         environment = stack.enter_context(make_environment(args.env, max_steps=args.max_steps))
+        await stack.enter_async_context(executor)
         run = await stack.enter_async_context(
-            Run.open(args.resume, environment=environment, executor=executor)
+            Run.open(args.resume)
             if args.resume
             else Run.create(
                 name=f"{args.env.lower()}-{args.variant}-evolution",
-                environment=environment,
-                executor=executor,
                 path=args.output,
             )
         )
+        rollouts = Rollouts(environment, executor, run)
         providers = [
             (OpenRouterAPI(model=name, max_output_tokens=8192, timeout=120), weight)
             for name, weight in models
@@ -558,6 +571,7 @@ async def main():
             await run_search(
                 generator,
                 run,
+                rollouts,
                 generations=args.generations,
                 batch_size=args.batch_size,
                 generation_concurrency=args.generation_concurrency,

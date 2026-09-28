@@ -22,7 +22,8 @@ from slick import prompt
 from slick.providers import Provider
 from sqlmodel import SQLModel
 
-from rsikit import EvaluationResult, Policy
+from research.rewards import Measurement
+from rsikit import Policy
 from rsikit.generation import WORKER_LIBRARIES, RecordingProvider
 from rsikit.generation.edits import InvalidCandidate, Program, check_program, check_rewrite
 
@@ -55,13 +56,6 @@ class Config:
     def __post_init__(self):
         if not 0 <= self.cull_percent < 100:
             raise ValueError("cull_percent must be between 0 (inclusive) and 100 (exclusive)")
-
-
-def Measurement(
-    scores: dict[int, float], feedback: str = "", failure: str | None = None
-) -> EvaluationResult:
-    """Compatibility constructor; new evaluators return rsikit.EvaluationResult."""
-    return EvaluationResult(seed_scores=scores, feedback=feedback, failure=failure)
 
 
 class FamilyBrief(BaseModel, extra="forbid"):
@@ -103,7 +97,7 @@ class LineageSearch:
         self,
         task: str,
         provider: Provider,
-        evaluate: Callable[[Sequence[type[Policy]]], Awaitable[dict[str, EvaluationResult]]],
+        evaluate: Callable[[Sequence[type[Policy]]], Awaitable[dict[str, Measurement]]],
         *,
         context: str = "",
         config: Config = Config(),
@@ -538,13 +532,11 @@ class LineageSearch:
         for result in results.values():
             if not result.accepted:
                 continue
-            if not result.seed_scores or any(
-                not math.isfinite(s) for s in result.seed_scores.values()
-            ):
+            if not result.scores or any(not math.isfinite(s) for s in result.scores.values()):
                 raise ValueError("Measurements must contain finite per-seed scores")
-            if panel is not None and set(result.seed_scores) != panel:
+            if panel is not None and set(result.scores) != panel:
                 raise ValueError("Every measurement must use the same seed panel")
-            panel = set(result.seed_scores)
+            panel = set(result.scores)
         self._seed_panel = panel
         for row in generated:
             result = results[row.policy_id]
@@ -555,8 +547,8 @@ class LineageSearch:
             elif not result.accepted:
                 row.status, row.error = "rejected", result.feedback or "Evaluation rejected"
             else:
-                row.seed_scores = {str(seed): score for seed, score in result.seed_scores.items()}
-                row.score, row.status = fmean(result.seed_scores.values()), "evaluated"
+                row.seed_scores = {str(seed): score for seed, score in result.scores.items()}
+                row.score, row.status = fmean(result.scores.values()), "evaluated"
 
     def _improves(self, child, parent, minimum=0.0):
         differences = [

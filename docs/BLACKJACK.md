@@ -24,12 +24,20 @@ during a hand, and terminates only after the final shoe.
 For this repository's trusted policy runner:
 
 ```python
-import asyncio
+from copy import deepcopy
 from examples.blackjack import Solution
-from rsikit.evaluation import run_episode
+from rsikit import Evaluator
 
-result = asyncio.run(run_episode(BlackjackEnv, Solution, env_seed=42, policy_seed=1))
-print(result[4]["episode"])  # Total net profit and action steps over all 24 shoes.
+# Inside an async function:
+with BlackjackEnv() as env:
+    policy = Solution(deepcopy(env.observation_space), deepcopy(env.action_space))
+    try:
+        observation, info = env.reset(seed=42)
+        await policy.reset(seed=1)
+        episode = await Evaluator(env, policy).run(observation, info=info)
+    finally:
+        await policy.close()
+print(episode.total_reward, len(episode))
 ```
 
 `Solution` is an intentionally weak starting policy, not an optimal strategy.
@@ -39,7 +47,7 @@ codec. Only the observation reaches the policy through `act()`.
 
 The same example source can run through `run_program(Path("examples/blackjack.py"),
 BlackjackEnv, env_seed=42, policy_seed=1)` with the existing Docker policy worker.
-When using `Run`/`Executor`, which also moves the environment into Docker, rebuild
+When using `Executor`, which also moves the environment into Docker, rebuild
 the worker image after adding this environment so the new module is installed.
 
 ## Actions and rules

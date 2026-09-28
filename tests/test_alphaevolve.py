@@ -16,9 +16,12 @@ from slick.providers import ProviderError
 from research import alphaevolve
 from research.alphaevolve.improved import AlphaEvolve, Config, InvalidCandidate
 from research.alphaevolve.original.agent import Guidance
-from rsikit import Executor, Policy, Run
+from research.rewards import mean_rewards
+from rsikit import Executor, Policy
 from rsikit.generation.edits import Edit, Mutation, Program, apply_edits, check_rewrite
+from tests.helpers import recorded_run
 from tests.providers import ScriptedProvider
+from tests.test_episode_storage import trajectory
 from tests.test_run import FakeSandbox
 
 ROOT = Path(alphaevolve.__file__).parent
@@ -102,18 +105,18 @@ class AlphaEvolveTests(unittest.IsolatedAsyncioTestCase):
 
         async def evaluate(implementation, environment, seed, call_timeout):
             score = float(implementation.split("return ")[1].split()[0])
-            return score, {"result.txt": str(score).encode()}
+            return trajectory(score, {"result.txt": str(score).encode()})
 
         sandbox.evaluate.side_effect = evaluate
         with (
             tempfile.TemporaryDirectory() as folder,
             gym.make("CartPole-v1", max_episode_steps=2) as environment,
-            Run.create(
+            recorded_run(
                 name="loop",
                 path=Path(folder) / "run",
                 environment=environment,
                 executor=Executor(sandbox=sandbox, concurrency=2),
-            ) as run,
+            ) as (run, rollouts),
         ):
             for generation in range(2):
                 policies = await agent.generate(n=10)
@@ -121,7 +124,7 @@ class AlphaEvolveTests(unittest.IsolatedAsyncioTestCase):
                 self.assertTrue(all(issubclass(p, Policy) for p in policies))
                 self.assertEqual(len(run.policies()), generation * 10)
                 self.assertEqual(len(list(run.path.rglob("*.py"))), generation * 10)
-                scores = await run.evaluate(policies)
+                scores = await mean_rewards(rollouts, policies)
                 self.assertEqual(len(scores), 10)
                 self.assertEqual(len(run.policies()), (generation + 1) * 10)
                 if generation == 0:

@@ -18,11 +18,14 @@ from examples.alphaevolve import run_search
 from research import alphaevolve
 from research.alphaevolve import improved, original, paper
 from research.alphaevolve.history import Evaluation, Generation
-from rsikit import Executor, Run
+from research.rewards import mean_rewards
+from rsikit import Executor
 from rsikit.evaluation import PolicyError
 from rsikit.policy import Policy
+from tests.helpers import recorded_run
 from tests.providers import ScriptedProvider
 from tests.test_alphaevolve import program
+from tests.test_episode_storage import trajectory
 from tests.test_run import FakeSandbox
 
 
@@ -83,7 +86,10 @@ class VariantTests(unittest.IsolatedAsyncioTestCase):
                     f"Optimizer: research.alphaevolve.{variant}.agent",
                     (output / "run.log").read_text(),
                 )
-                with gym.make("CartPole-v1") as env, Run.open(output, environment=env) as run:
+                with (
+                    gym.make("CartPole-v1") as env,
+                    recorded_run(output, environment=env) as (run, rollouts),
+                ):
                     self.assertIn(variant, run.name)
                     self.assertEqual(len(run.policies()), 2)
 
@@ -144,7 +150,7 @@ class VariantTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual((output / "experiment.json").read_bytes(), original_metadata)
             self.assertTrue((output / "run.log").read_text().startswith(original_log))
             with example.make_environment("CartPole-v1", max_steps=3) as env:
-                with Run.open(output, environment=env) as run, run.database() as db:
+                with recorded_run(output, environment=env) as (run, rollouts), run.database() as db:
                     self.assertEqual(len(run.policies()), 4)  # Initial seed plus three proposals.
                     self.assertTrue(all(set(run.scores(p)) == {7, 9} for p in run.policies()))
                     history = db.exec(select(Evaluation).order_by(Evaluation.attempt)).all()
@@ -248,7 +254,7 @@ class VariantTests(unittest.IsolatedAsyncioTestCase):
             sandbox = FakeSandbox()
 
             async def evaluate(source, environment, seed, timeout):
-                return float(source.split("return ")[1].split()[0]) + seed, {}
+                return trajectory(float(source.split("return ")[1].split()[0]) + seed, {})
 
             sandbox.evaluate.side_effect = evaluate
             generator = paper.AlphaEvolve(
@@ -262,15 +268,16 @@ class VariantTests(unittest.IsolatedAsyncioTestCase):
                 ),
             )
             self.addCleanup(generator.close)
-            with Run.create(
+            with recorded_run(
                 name="paper",
                 environment=environment,
                 path=Path(directory) / "run",
                 executor=Executor(sandbox=sandbox),
-            ) as run:
+            ) as (run, rollouts):
                 await run_search(
                     generator,
                     run,
+                    rollouts,
                     generations=4,
                     batch_size=2,
                     generation_concurrency=2,
@@ -303,18 +310,18 @@ class VariantTests(unittest.IsolatedAsyncioTestCase):
             sandbox = FakeSandbox()
 
             async def evaluate(source, environment, seed, timeout):
-                return float(source.split("return ")[1].split()[0]) + seed, {}
+                return trajectory(float(source.split("return ")[1].split()[0]) + seed, {})
 
             sandbox.evaluate.side_effect = evaluate
             policies = [Policy.from_text(program(i).implementation, name=str(i)) for i in (0, 10)]
-            with Run.create(
+            with recorded_run(
                 name="cascade",
                 environment=environment,
                 path=Path(directory) / "run",
                 executor=Executor(sandbox=sandbox),
-            ) as run:
-                results = await example.evaluate_gym(
-                    run,
+            ) as (run, rollouts):
+                results = await example.assess(
+                    rollouts,
                     policies,
                     seeds=(0, 2),
                     features=("mean_reward", "reward_std"),
@@ -332,25 +339,25 @@ class VariantTests(unittest.IsolatedAsyncioTestCase):
             sandbox = FakeSandbox()
 
             async def evaluate(source, environment, seed, timeout):
-                return float(seed), {}
+                return trajectory(float(seed), {})
 
             sandbox.evaluate.side_effect = evaluate
             policies = [Policy.from_text(program(i).implementation, name=str(i)) for i in (0, 1)]
-            with Run.create(
+            with recorded_run(
                 name="screening",
                 environment=environment,
                 path=Path(directory) / "run",
                 executor=Executor(sandbox=sandbox),
-            ) as run:
-                results = await example.evaluate_gym(
-                    run,
+            ) as (run, rollouts):
+                results = await example.assess(
+                    rollouts,
                     policies[:1],
                     seeds=(0, 1),
                     features=(),
                     screening_seeds=(99,),
                     screening_min_reward=0,
                 )
-                await run.evaluate(policies[1:], seeds=(99,))
+                await mean_rewards(rollouts, policies[1:], seeds=(99,))
                 output = io.StringIO()
                 example.show_scores(policies, run, Console(file=output), seeds=(0, 1))
                 self.assertEqual(results[policies[0].id].metrics["reward"], 0.5)
@@ -363,12 +370,12 @@ class VariantTests(unittest.IsolatedAsyncioTestCase):
             provider = ScriptedProvider([])
             generator = paper.AlphaEvolve("task", provider)
             self.addCleanup(generator.close)
-            with Run.create(
+            with recorded_run(
                 name="validation",
                 environment=environment,
                 path=Path(directory) / "run",
                 executor=Executor(sandbox=FakeSandbox()),
-            ) as run:
+            ) as (run, rollouts):
                 for options in (
                     {"screening_seeds": (99,)},
                     {"screening_min_reward": 0},
@@ -377,7 +384,7 @@ class VariantTests(unittest.IsolatedAsyncioTestCase):
                 ):
                     with self.subTest(options=options), self.assertRaises(ValueError):
                         await example.run_paper_search(
-                            generator, run, generations=1, batch_size=1, **options
+                            generator, run, rollouts, generations=1, batch_size=1, **options
                         )
                 self.assertEqual(provider.calls, [])
 
@@ -398,7 +405,7 @@ class VariantTests(unittest.IsolatedAsyncioTestCase):
                         if cancel:
                             await asyncio.Event().wait()
                         raise PolicyError("bad action")
-                    return 7, {}
+                    return trajectory(7, {})
 
                 sandbox.evaluate.side_effect = evaluate
                 generator = paper.AlphaEvolve(
@@ -407,16 +414,17 @@ class VariantTests(unittest.IsolatedAsyncioTestCase):
                     config=paper.Config(meta_interval=0),
                 )
                 self.addCleanup(generator.close)
-                with Run.create(
+                with recorded_run(
                     name="failure",
                     environment=environment,
                     path=Path(directory) / "run",
                     executor=Executor(sandbox=sandbox),
-                ) as run:
+                ) as (run, rollouts):
                     task = asyncio.create_task(
                         run_search(
                             generator,
                             run,
+                            rollouts,
                             generations=1,
                             batch_size=1,
                             console=Console(file=io.StringIO()),
@@ -507,7 +515,7 @@ class VariantTests(unittest.IsolatedAsyncioTestCase):
             async def evaluate(source, environment, seed, timeout):
                 if "return 1" in source:
                     await generating.wait()
-                return 7, {}
+                return trajectory(7, {})
 
             show_scores = example.show_scores
 
@@ -523,18 +531,19 @@ class VariantTests(unittest.IsolatedAsyncioTestCase):
             )
             self.addCleanup(generator.close)
             with (
-                Run.create(
+                recorded_run(
                     name="overlap",
                     environment=environment,
                     path=Path(directory) / "run",
                     executor=Executor(sandbox=sandbox),
-                ) as run,
+                ) as (run, rollouts),
                 patch.object(example, "show_scores", side_effect=show),
             ):
                 task = asyncio.create_task(
                     run_search(
                         generator,
                         run,
+                        rollouts,
                         generations=3,
                         batch_size=1,
                         generation_concurrency=2,
@@ -582,7 +591,7 @@ class VariantTests(unittest.IsolatedAsyncioTestCase):
                 if "return 1" in source:
                     await sibling_started.wait()
                     raise PolicyError("bad concurrent action")
-                return 7, {}
+                return trajectory(7, {})
 
             provider.acall = generate
             sandbox.evaluate.side_effect = evaluate
@@ -590,12 +599,12 @@ class VariantTests(unittest.IsolatedAsyncioTestCase):
                 "task", provider, config=paper.Config(islands=1, mode="rewrite", meta_interval=0)
             )
             self.addCleanup(generator.close)
-            with Run.create(
+            with recorded_run(
                 name="repair-overlap",
                 environment=environment,
                 path=Path(directory) / "run",
                 executor=Executor(sandbox=sandbox),
-            ) as run:
+            ) as (run, rollouts):
                 save = run.save
 
                 def save_and_release(*records):
@@ -613,6 +622,7 @@ class VariantTests(unittest.IsolatedAsyncioTestCase):
                         run_search(
                             generator,
                             run,
+                            rollouts,
                             generations=3,
                             batch_size=1,
                             generation_concurrency=2,
@@ -638,12 +648,12 @@ class VariantTests(unittest.IsolatedAsyncioTestCase):
                 patch.object(prompts, "TEMPLATE_ROOT", Path(alphaevolve.__file__).parent),
                 tempfile.TemporaryDirectory() as directory,
                 gym.make("CartPole-v1", max_episode_steps=3) as env,
-                Run.create(
+                recorded_run(
                     name="comparison",
                     path=Path(directory) / "run",
                     environment=env,
                     executor=Executor(sandbox=FakeSandbox()),
-                ) as run,
+                ) as (run, rollouts),
             ):
                 provider = ScriptedProvider([program(i) for i in range(9)])
                 agent = variant.AlphaEvolve(
@@ -678,6 +688,7 @@ class VariantTests(unittest.IsolatedAsyncioTestCase):
                 await run_search(
                     agent,
                     run,
+                    rollouts,
                     generations=1,
                     batch_size=1,
                     seeds=(0, 1),

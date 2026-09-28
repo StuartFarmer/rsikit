@@ -122,6 +122,8 @@ def encode(value, _depth=0):
         return encode(value.item(), _depth + 1)
     if value is None or type(value) in (bool, int, str):
         return value
+    if isinstance(value, bytes):
+        return ["bytes", base64.b64encode(value).decode()]
     if type(value) is float:
         return value if math.isfinite(value) else ["float", str(value)]
     if isinstance(value, (tuple, list)):
@@ -153,6 +155,8 @@ def decode(value, _depth=0):
         return np.frombuffer(data, dtype=dtype).reshape(value[2]).copy()
     if len(value) != 2:
         raise ValueError("Invalid encoded value")
+    if tag == "bytes" and isinstance(value[1], str):
+        return base64.b64decode(value[1], validate=True)
     if tag == "float" and value[1] in ("nan", "inf", "-inf"):
         return float(value[1])
     if tag in ("tuple", "list") and isinstance(value[1], list):
@@ -161,6 +165,61 @@ def decode(value, _depth=0):
     if tag == "dict" and isinstance(value[1], list):
         return {decode(k, _depth + 1): decode(v, _depth + 1) for k, v in value[1]}
     raise ValueError("Unknown value tag")
+
+
+def encode_episode(episode):
+    """Data-only representation used by both storage and the sandbox boundary."""
+    from rsikit.episode import Episode
+
+    if not isinstance(episode, Episode):
+        raise ValueError("Expected an Episode")
+    _validate_episode(vars(episode))
+    return {name: encode(value) for name, value in vars(episode).items()}
+
+
+def decode_episode(data):
+    from rsikit.episode import Episode
+
+    fields = {
+        "observations",
+        "actions",
+        "rewards",
+        "terminations",
+        "truncations",
+        "infos",
+        "artifacts",
+    }
+    if not isinstance(data, dict) or set(data) != fields:
+        raise ValueError("Malformed episode fields")
+    values = {name: decode(value) for name, value in data.items()}
+    _validate_episode(values)
+    return Episode(**values)
+
+
+def _validate_episode(values):
+    if any(not isinstance(values[name], list) for name in set(values) - {"artifacts"}):
+        raise ValueError("Episode tracks must be lists")
+    length = len(values["rewards"])
+    if not length or any(
+        len(values[name]) != length for name in ("actions", "terminations", "truncations")
+    ):
+        raise ValueError("Episode transitions are not aligned")
+    if any(len(values[name]) != length + 1 for name in ("observations", "infos")):
+        raise ValueError("Episode must include its initial observation and info")
+    if any(type(r) not in (int, float) or not math.isfinite(r) for r in values["rewards"]):
+        raise ValueError("Episode rewards must be finite numbers")
+    ends = list(zip(values["terminations"], values["truncations"]))
+    if any(type(flag) is not bool for pair in ends for flag in pair):
+        raise ValueError("Episode end flags must be boolean")
+    if any(a or b for a, b in ends[:-1]) or not any(ends[-1]):
+        raise ValueError("Episode must end exactly at its last transition")
+    if any(not isinstance(info, dict) for info in values["infos"]):
+        raise ValueError("Episode infos must be dictionaries")
+    artifacts = values["artifacts"]
+    if not isinstance(artifacts, dict) or any(
+        not isinstance(k, str) or not isinstance(v, bytes) for k, v in artifacts.items()
+    ):
+        raise ValueError("Episode artifacts must map paths to bytes")
 
 
 def encode_space(space):

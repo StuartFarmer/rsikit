@@ -1,209 +1,113 @@
-# Local runs
+# Runs and execution
 
-The environment owns task configuration. The executor owns worker concurrency,
-timeouts, and its sandbox. Run stores policies, scores, and returned artifacts.
+A `Run` serializes one optimizer run: policies, measurements, raw episodes, and
+optimizer-defined checkpoints. It has no environment, executor, evaluation loop,
+or execution-resume method. Opening a Run never starts Docker.
 
 ```python
 import gymnasium as gym
 from rsikit import Executor, Run
+from research.rollouts import Rollouts
+from research.rewards import mean_rewards
 
-executor = Executor(concurrency=4)
+# Inside an async function; policies are Policy definitions from generate/from_file.
 with gym.make("CartPole-v1", max_episode_steps=500) as environment:
-    async with Run.create(name="comparison", environment=environment, executor=executor) as run:
-        scores = await run.evaluate(policies)
-        print(scores)  # {policy_id: score}
+    async with Executor(concurrency=4) as executor, Run.create(name="comparison") as run:
+        rollouts = Rollouts(environment, executor, run)
+        scores = await mean_rewards(rollouts, policies, seeds=(0, 1, 2))
+        print(scores)  # {policy_id: mean episode reward}
 ```
 
-Policies come directly from `await generate(task, provider=provider)`. Their names
-come from the model. Generation neither executes their implementations nor selects
-a sandbox. Generation writes nothing to disk; `evaluate` is the first place
-a policy is saved. `Policy` remains the agent's reset/act/close interface.
+`Rollouts` and reward callbacks live in `research/`, alongside the experiments.
+They connect execution to persistence and reuse saved episodes within a fixed
+experiment environment/configuration. Each successful episode is saved before
+fitness is computed; failed siblings do not erase it. Changing environment settings
+requires a new run. Old scalar scores remain readable, but are not fabricated into
+trajectories: missing episodes are executed again when requested.
 
-By default, each policy gets one episode with seed 0. A seed controls the random
-starting conditions; giving every policy the same seeds makes comparisons fairer.
-Pass `seeds=[0, 1, 2]` to evaluate multiple starts; the returned score is their mean.
-The same seed also initializes policy randomness. `run.scores(policy)` exposes the
-individual episode scores. Keep the seed set fixed while comparing generations.
+`mean_rewards` explicitly selects cumulative reward as fitness and averages the
+requested seeds. `measure_rewards` returns per-seed `Measurement` objects and
+candidate diagnostics. AlphaEvolve's `research.alphaevolve.paper.evaluation.assess`
+owns its richer `EvaluationResult`, descriptors, and screening thresholds.
+Infrastructure errors and cancellation propagate; these are not low fitness.
 
-## Shared evaluation and saved source
+## Core execution
 
-`Policy` is the solution type. Use `Policy.from_text(source)` or
-`Policy.from_file(path)` to load one. Both validate Python syntax, the exported
-`Solution` class, evolution boundaries and constructor compatibility without
-importing or executing the source. The returned policy definition goes directly
-to Run; the sandbox loads its implementation.
+`Evaluator(environment, policy).run(observation, info=info)` consumes caller-owned,
+already-reset instances and returns an `Episode`. It never creates, resets, seeds,
+or closes them. See [the inner-loop contract](INNER_LOOP.md).
+
+`Executor.evaluate(jobs, environment)` is an async stream of
+`(policy_id, seed, episode)`, where each job is `(policy_id, source, seed)`.
+The environment is an unstarted, serializable Gymnasium instance used as a template.
+Each sandbox episode gets fresh environment and policy instances, resets them,
+uses `Evaluator`, and closes them. Host and sandbox Python minor versions must match.
+The caller owns the host template's lifecycle.
+
+Use `async with Executor(...)` to reuse a container across batches; its exit removes
+the container. `Run` contexts only release storage. `InProcessDockerSandbox` is the
+default: policy and environment share one fresh episode process inside Docker.
+`DockerSandbox` puts them in separate processes to isolate environment state and
+supports per-policy-call deadlines. Both return complete Episodes through a bounded,
+data-only protocol. Episode deadlines default to 60 seconds.
+
+Build the image before execution:
+
+```sh
+docker build -t rsikit-sandbox:local -f rsikit/sandbox/Dockerfile .
+```
+
+Candidate errors preserve successful siblings and the service. Infrastructure
+failures or cancellation invalidate and remove the service; an explicit retry
+can start a new one. See [sandbox details](IN_PROCESS_SANDBOX.md).
+
+## Storage and analysis
 
 ```python
-from rsikit import Policy, evaluate_gym
+from rsikit import Policy, Run
 
 policy = Policy.from_file("solution.py")
-# For raw source: Policy.from_text(source, name="Initial solution", description="...")
-policy.to_file("saved.py")
-restored = Policy.from_text(policy.to_text())
-assert restored.id == policy.id
+with Run.create(name="experiment") as run:
+    run.save_policy(policy)
+    run.save_episode(policy, 42, episode)
+    # Fitness is a caller decision, and need not equal total reward.
+    run.save_policy(policy, scores={42: fitness})
 
-# Inside an async function with an open Run:
-results = await evaluate_gym(run, [policy], seeds=[0, 1, 2])
-result = results[policy.id]
-if result.failure is not None:
-    print(result.failure)
-elif result.accepted:
-    print(result.metrics["reward"], result.seed_scores)
-else:
-    print(result.feedback)  # Screened out; no execution repair required.
+with Run.open(run.path) as restored:
+    episode = restored.load_episode(policy, 42)
+    print(episode.observations, episode.actions, episode.rewards)
+    print(restored.scores(policy))
 ```
 
-`to_text()` and `to_file(path)` preserve source, name and description in a valid
-Python file with a JSON metadata comment. Reloading preserves the policy ID,
-including after moving or renaming the file. File writes replace the destination
-atomically. Run exports and optimizer `best.py` files use this same serializer.
-These methods save the solution definition; episode-local environment and policy
-state are not serialized.
+`Policy.from_text`/`from_file` validate source without executing it. `to_text` and
+`to_file` preserve its name, description, source and ID. Run exports definitions to
+`exports/` by default; `export=False` disables that. Missing exports are recreated
+on open. `policies()` reloads saved definitions.
 
-Plain Python files are accepted too. Without saved metadata the name defaults to
-`Solution` and the description to an empty string; pass `name=` and `description=`
-to supply or override them. Older raw-source exports need their original name
-supplied explicitly to retain their old ID. The standalone `policy_from_source`
-and private `_policy_class` factories have been replaced by these class methods.
+`run.sqlite` contains core `settings` and `policy` tables plus optimizer-defined
+records. Per-seed scores are explicit caller data; `None` denotes unfinished work.
+Raw trajectories are stored under `episodes/<policy-id>/<seed>.json`, preserving
+numeric arrays, tuples and byte payloads. Episode files are written atomically
+after their artifacts. `load_episode` returns `None` when no episode was saved.
+Both storage and sandbox transport limit each episode to 64 MiB.
 
-`evaluate_gym` returns `dict[policy_id, EvaluationResult]`. Successful results
-contain mean `reward`, `worst_reward`, `stability` (negative population standard
-deviation), and the requested `seed_scores`. Optional
-`features=("mean_reward", "reward_std")` adds numeric descriptors. Scores from
-other seeds already in Run do not enter these results. Completed episodes remain
-cached, including successful episodes from partially failed candidates.
+Gymnasium recording wrappers run in the sandbox, with output relocated to an
+isolated episode directory. Files and the final `info["artifacts"]` byte mapping
+are returned as `episode.artifacts`. `save_episode` also writes these files under
+`artifacts/<policy-id>/<seed>/`. Run performs no rendering.
 
-Use `screening_seeds=[0]` and `screening_min_reward=5` together to skip the full
-evaluation for candidates below that screening mean. Screening rejections have
-`accepted=False` and no `failure`. Candidate execution failures carry a diagnostic
-in `failure` and always have `accepted=False`; successful siblings still return
-their measurements. Infrastructure errors and cancellation propagate.
+## Resume
 
-Custom evaluators can return `EvaluationResult(metrics={...}, seed_scores={...},
-features={...}, feedback="...")`, `EvaluationResult(accepted=False,
-feedback="screened out")`, or `EvaluationResult(failure="invalid action")`.
-Metric/descriptor values and per-seed scores must be finite numbers. Optimizers
-validate required objectives and comparable seed panels. The adapter borrows Run;
-callers still own its context and the configured environment.
+The optimizer/controller restores its configuration and checkpoint, opens storage
+with `Run.open(path)`, constructs its environment and executor, and continues its
+own search loop. Run does not reconstruct or advance an optimizer. Existing
+AlphaEvolve paper and EliteSearch checkpoint paths remain optimizer-owned.
+The inner-loop example restores its saved seed panel and step limit and requests
+its saved policies again; Rollouts reuses completed episodes.
 
-The old research `Measurement(...)` constructors return this shared result, and
-`result.scores` remains an alias for `result.seed_scores`. AlphaEvolve's existing
-`EvaluationResult` import re-exports the shared class. The lower-level
-`Run.evaluate()` API still returns scalar means and raises `PolicyError` for
-candidate failures.
-
-## Environment
-
-Pass a configured Gymnasium **instance**. Use `gym.make` arguments, `TimeLimit`,
-custom environment attributes such as `instructions`, and native wrappers. Run has
-no environment kwargs, step limit, instructions, render, or recording options.
-
-The supplied environment is a template for independent evaluations. It is serialized
-with cloudpickle and each worker loads its own instance inside the sandbox. The host
-instance is not stepped or closed by Run; its caller owns it. Use an unstarted environment
-that supports serialization. Required environment modules and dependencies must be
-installed in the sandbox image; local classes that cloudpickle serializes by value
-are also supported. Host and sandbox Python minor versions must match.
-
-## Executor and sandbox
-
-With `async with Run.create(...)` or `async with Run.open(...)`,
-`Executor(concurrency=4)` defaults to `InProcessDockerSandbox` and lazily starts
-**one Docker container for the run**, then launches up to four evaluation processes inside it.
-Each process runs both its environment and generated agent, with no per-action
-process communication. Completed
-scores and artifacts stream back to Run. The same container serves later batches,
-generations, policy repairs and held-out evaluations. It is removed when the async
-Run context exits, including after model failures or interruption. Fully cached
-runs start no container. All example CLIs use this persistent lifecycle.
-
-Infrastructure failures or cancelled evaluations invalidate and remove the container;
-an explicit retry starts a fresh one. Candidate errors and policy timeouts leave the
-container available for repaired policies. Each episode uses a fresh process.
-
-Direct executor users can use `async with Executor(...)`. `await run.aclose()` or
-`await executor.aclose()` explicitly closes asynchronous resources. The older
-synchronous `with Run(...)` API remains compatible, with per-batch sandbox cleanup;
-use the async context for persistent evaluation. Synchronous `run.close()` releases
-storage only and is not a replacement for async cleanup.
-
-The default sandbox enforces a 60-second `episode_timeout` for the complete rollout;
-`call_timeout` does not apply. To isolate the policy from environment state and enforce
-per-call timeouts, pass `sandbox=DockerSandbox()` explicitly. See
-[sandbox details](IN_PROCESS_SANDBOX.md). Cancellation waits for worker and sandbox
-cleanup. Successful evaluations are persisted even when another evaluation fails;
-the executor raises an error after delivering the successful results.
-
-Sandbox implementations provide `start`, `evaluate`, and `close`. This keeps
-Docker-specific process commands out of Run and Executor. Only Docker is implemented;
-a future sandbox can use the same boundary. Shared-container workers share the
-container's security boundary, rather than having one container boundary per policy.
-
-Build the worker image using your Python minor version (the Dockerfile defaults to 3.14):
-
-```sh
-docker build --build-arg PYTHON_VERSION=3.14 -t rsikit-sandbox:local -f rsikit/sandbox/Dockerfile .
-```
-
-## Recording and artifacts
-
-Configure Gymnasium normally:
-
-```python
-environment = gym.wrappers.RecordVideo(
-    gym.make("CartPole-v1", max_episode_steps=500, render_mode="rgb_array"),
-    video_folder="recordings",
-    episode_trigger=lambda _: True,
-)
-```
-
-The worker preserves recording triggers, frame rates, and lengths. It relocates
-output paths into that evaluation's temporary directory so workers cannot overwrite
-each other's recordings. Gymnasium creates and closes the recordings. The worker
-returns those files and any custom `info["artifacts"]` mapping of relative names to
-bytes. Run saves them under `artifacts/<policy-id>/<seed>/`. It performs no rendering.
-Returned results contain only a score and artifact bytes; transport is limited to
-64 MiB per evaluation. Larger artifacts need a streaming transport later.
-
-For the AlphaEvolve example, record the best saved policies after closing the search:
-
-```sh
-.venv/bin/python -B -m examples.replay runs/YOUR_RUN --env LunarLander-v3 --top 3 --seeds 0 1 2
-```
-
-Specify the original environment and any original `--max-steps` override. Replay
-selects policies by mean stored score, excluding incomplete evaluations. It uses
-a fresh Run so cached scores do not suppress recording or change the original
-results. The command prints MP4 paths under the new Run's `artifacts/` directory.
-`--output` chooses a new directory. No model calls are made.
-
-## Storage and resume
-
-Each run directory contains `run.sqlite`, exported policies under `exports/`, and
-returned files under `artifacts/`. SQLite starts with two core tables:
-
-- `settings`: name and Python-export preference.
-- `policy`: ID, generated name and description, implementation, and seed-to-score mapping.
-
-`Run.create(export=True)` remains the default. Missing Python exports are recreated
-when opening a run. `run.policies()` reloads definitions; `run.scores(policy)` returns
-stored scores. `None` means unfinished. Identical policies and seeds reuse scores.
-Older databases receive an empty description column when opened; their policies
-and scores remain intact. There are no episode metrics, optimizer checkpoints, or
-stored environment objects.
-
-```python
-async with Run.open("runs/YOUR_RUN", environment=environment, executor=executor) as run:
-    await run.resume()
-```
-
-Supply the same configured environment when reopening; Run does not reconstruct it.
-The entire group's requested seeds are persisted before dispatch. Each result and
-its artifacts are saved as they arrive. Resume retries unfinished evaluations,
-including failed ones. It does not regenerate policies or restore mid-episode state.
-One process may own a run directory at a time (macOS/Linux file lock). Close it before
-moving or copying the directory.
-
+Only one process may own a run directory at a time (macOS/Linux file lock).
+Close it before moving or copying the directory. Older databases retain policies
+and scores and receive the existing description-column migration on open.
 
 ## Optimizer-defined records
 

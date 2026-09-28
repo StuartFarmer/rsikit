@@ -7,8 +7,8 @@ For generated policies and durable batch evaluations, see [Run](RUNS.md).
 
 `rsikit.evaluation.Evaluator` collects the rollout and returns an
 `rsikit.episode.Episode`. Both are also exported directly from `rsikit`.
-Batch scoring helpers (`EvaluationResult`, `evaluate_gym`) live in
-`rsikit.measurements` and retain their top-level exports.
+Fitness and screening belong to the research optimizers. AlphaEvolve owns its
+`EvaluationResult`; core execution returns raw episodes.
 
 ```python
 from copy import deepcopy
@@ -109,27 +109,22 @@ Only copied observations reach `act`; diagnostic info stays in the episode.
 Goals and feedback the policy needs during the episode belong in observations.
 No weights are trained by the evaluator.
 
-## Compatibility helpers and generated programs
-
-`run_episode(make_env, make_policy, ...)` remains a compatibility helper for
-existing callers. It creates and resets instances, delegates to `Evaluator`,
-closes both, and returns the final step tuple. It retains its seeds, instructions,
-and Gymnasium `RecordEpisodeStatistics` behavior (`info["episode"]` contains
-`r`, `l`, and `t`). Prefer `Evaluator` for new code that owns its instances.
+## Generated programs
 
 ```python
 from pathlib import Path
 from rsikit import run_program
 
-result = await run_program(Path("solution.py"), "CartPole-v1", max_steps=100)
+episode = await run_program(Path("solution.py"), "CartPole-v1", max_steps=100)
+print(episode.total_reward, episode.actions)
 ```
 
-`run_program` retains the compatibility helper's arguments and return tuple.
+`run_program` creates, resets, and closes its instances and returns an `Episode`.
 The source must export `Solution(Policy)`. It reads source as data and executes
-it in Docker; never import generated source on the host. The environment and
-scoring remain on the host. One remote policy instance and asyncio event loop
-persist for the episode. For the separate `Run.evaluate()` sandbox arrangements,
-see [InProcessDockerSandbox](IN_PROCESS_SANDBOX.md).
+it in Docker; never import generated source on the host. Its environment remains
+on the host. One remote policy instance and asyncio event loop persist throughout
+the episode. For execution with both instances in Docker, use `Executor`; see
+[InProcessDockerSandbox](IN_PROCESS_SANDBOX.md).
 
 Build the worker with:
 
@@ -156,10 +151,10 @@ and trusted-policy exceptions retain their types. Cancellation propagates.
 Failed execution returns no normal `Episode`.
 
 The caller must clean up after `Evaluator.run()`, including on failure. The
-compatibility helpers still perform their own cleanup and log secondary cleanup
+sandbox helpers perform their own cleanup and log secondary cleanup
 failures without replacing the original exception. Sandbox failures raise
 `PolicyError`, `PolicyTimeout`, or `InfrastructureError` from `rsikit.evaluation`.
 
 Termination does not imply success: rewards and task-specific info define that.
 Search and cross-episode aggregation remain outside the evaluator. `Run` persists
-scores and artifacts; it does not automatically persist these episode histories.
+supplied scores, checkpoints, and raw episodes through `save_episode`/`load_episode`.

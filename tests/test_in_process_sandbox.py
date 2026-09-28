@@ -9,6 +9,37 @@ from tests.test_persistent_sandbox import PACKING
 
 
 class InProcessTests(unittest.IsolatedAsyncioTestCase):
+    async def test_both_backends_return_every_transition(self):
+        import gymnasium as gym
+        import numpy as np
+
+        from rsikit import DockerSandbox
+
+        source = "from rsikit import Policy\nclass Solution(Policy):\n    async def act(self, o): return 0\n"
+        with gym.make("CartPole-v1", max_episode_steps=3) as env:
+            initial, _ = env.reset(seed=42)
+            expected = [initial.copy()]
+            for _ in range(3):
+                obs, *_ = env.step(0)
+                expected.append(obs.copy())
+            for backend in (DockerSandbox, InProcessDockerSandbox):
+                with self.subTest(backend=backend.__name__):
+                    async with Executor(sandbox=backend()) as executor:
+                        results = [
+                            episode
+                            async for _, _, episode in executor.evaluate(
+                                [("constant", source, 42)], env
+                            )
+                        ]
+                    episode = results[0]
+                    np.testing.assert_array_equal(episode.observations, expected)
+                    self.assertEqual(episode.actions, [0, 0, 0])
+                    self.assertEqual(episode.rewards, [1.0, 1.0, 1.0])
+                    self.assertEqual(episode.terminations, [False, False, False])
+                    self.assertEqual(episode.truncations, [False, False, True])
+                    self.assertEqual(len(episode.infos), 4)
+                    self.assertEqual(episode.infos[-1]["episode"]["l"], 3)
+
     async def test_shared_process_fresh_episodes_and_artifacts(self):
         class Environment(CirclePackingEnv):
             def step(self, action):
@@ -52,7 +83,7 @@ class InProcessTests(unittest.IsolatedAsyncioTestCase):
                 ]
                 self.assertEqual(len(results), 2)
                 for result in results:
-                    self.assertEqual(result.score, 0.5)
+                    self.assertEqual(result.total_reward, 0.5)
                     self.assertEqual(
                         result.artifacts["policy.txt"], result.artifacts["environment.txt"]
                     )
@@ -96,7 +127,7 @@ class InProcessTests(unittest.IsolatedAsyncioTestCase):
                             [("good", PACKING, 1)], CirclePackingEnv(1)
                         )
                     ]
-                    self.assertEqual(results[0].score, 0.5)
+                    self.assertEqual(results[0].total_reward, 0.5)
                     self.assertIsNone(sandbox._failure)
 
     async def test_subprocess_cleanup_and_episode_only_deadline(self):
@@ -126,7 +157,7 @@ class InProcessTests(unittest.IsolatedAsyncioTestCase):
             (result,) = [
                 r async for _, _, r in executor.evaluate([("check", check, 1)], CirclePackingEnv(1))
             ]
-            self.assertEqual(result.score, 0.5)
+            self.assertEqual(result.total_reward, 0.5)
 
     async def test_subprocesses_cannot_escape_episode_process_group(self):
         source = PACKING.replace(
@@ -146,7 +177,7 @@ class InProcessTests(unittest.IsolatedAsyncioTestCase):
                 r
                 async for _, _, r in executor.evaluate([("groups", source, 1)], CirclePackingEnv(1))
             ]
-            self.assertEqual(result.score, 0.5)
+            self.assertEqual(result.total_reward, 0.5)
 
 
 if __name__ == "__main__":
