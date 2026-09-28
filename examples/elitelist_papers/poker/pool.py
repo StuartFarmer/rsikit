@@ -5,7 +5,7 @@ import json
 import logging
 from uuid import uuid4
 
-from rsikit.episode import InfrastructureError
+from rsikit.evaluation import InfrastructureError
 from rsikit.sandbox.docker import _spawn
 
 logger = logging.getLogger(f"{__package__}.tournament")

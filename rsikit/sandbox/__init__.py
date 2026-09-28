@@ -6,7 +6,7 @@ import math
 from pathlib import Path
 from uuid import uuid4
 
-from rsikit.episode import InfrastructureError, PolicyError, PolicyTimeout, run_episode
+from rsikit.evaluation import InfrastructureError, PolicyError, PolicyTimeout, run_episode
 from rsikit.policy import Policy
 
 from .codec import MAX_MESSAGE, MAX_SOURCE, decode, dumps, encode, encode_space, loads, pack, unpack

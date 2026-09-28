@@ -26,7 +26,7 @@ For this repository's trusted policy runner:
 ```python
 import asyncio
 from examples.blackjack import Solution
-from rsikit.episode import run_episode
+from rsikit.evaluation import run_episode
 
 result = asyncio.run(run_episode(BlackjackEnv, Solution, env_seed=42, policy_seed=1))
 print(result[4]["episode"])  # Total net profit and action steps over all 24 shoes.
@@ -253,6 +253,22 @@ one deck, 61 for two, 234 for six, and 312 for eight. Thus small shoes can stop
 earlier than requested; the final round can also cross the cut card. Six- and
 eight-deck defaults retain the requested 75% cut. Disabling splits reduces the
 reserve. There is no terminal signal between ordinary rounds.
+
+## Held-out replay
+
+The saved-run exporter can visualize unseen seed panels independently of search:
+
+```sh
+.venv/bin/python -m examples.blackjack_videos runs/blackjack-long \
+  --split holdout --top 1 --output runs/blackjack-heldout-videos
+```
+
+This uses `heldout_seeds` from `experiment.json`; `--seeds 1000 1001` overrides
+them. Seeds must be disjoint from the saved training seeds. `--split validation`
+is an alias for held-out seeds in Blackjack. Leaders remain selected by their
+training rankings, and held-out results are written only to the export directory.
+Use `--generation N` to inspect one frozen generation. The index shows training
+and replay means separately, without expecting held-out scores to match training.
 
 ## Performance and verification
 

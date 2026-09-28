@@ -16,7 +16,7 @@ from sqlalchemy import JSON, Column, inspect
 from sqlmodel import Field, Session, SQLModel, create_engine, select
 
 from .execution import Executor
-from .policy import Policy, _policy_class
+from .policy import Policy
 
 logger = logging.getLogger(__name__)
 
@@ -173,14 +173,14 @@ class Run:
             destination = self.path / "exports" / f"{policy.id}_{_slug(policy.name)}.py"
             if not destination.exists():
                 destination.parent.mkdir(exist_ok=True)
-                temporary = destination.with_suffix(".py.tmp")
-                temporary.write_text(policy.implementation, encoding="utf-8")
-                temporary.replace(destination)
+                Policy.from_text(
+                    policy.implementation, name=policy.name, description=policy.description
+                ).to_file(destination)
 
     def policies(self) -> list[type[Policy]]:
         with Session(self._engine) as session:
             return [
-                _policy_class(row.name, row.implementation, row.description)
+                Policy.from_text(row.implementation, name=row.name, description=row.description)
                 for row in session.exec(select(_StoredPolicy))
             ]
 

@@ -13,6 +13,7 @@ RUN pip install --no-cache-dir --index-url https://download.pytorch.org/whl/cpu 
 RUN mkdir -p /opt/worker/rsikit/sandbox && printf 'from .policy import Policy\n' > /opt/worker/rsikit/__init__.py && touch /opt/worker/rsikit/sandbox/__init__.py
 COPY rsikit/policy.py /opt/worker/rsikit/policy.py
 COPY rsikit/episode.py /opt/worker/rsikit/episode.py
+COPY rsikit/evaluation.py /opt/worker/rsikit/evaluation.py
 COPY rsikit/envs/ /opt/worker/rsikit/envs/
 COPY rsikit/sandbox/__init__.py rsikit/sandbox/worker.py rsikit/sandbox/codec.py rsikit/sandbox/evaluate.py rsikit/sandbox/service.py rsikit/sandbox/in_process.py /opt/worker/rsikit/sandbox/
 RUN python -c "import site; from pathlib import Path; Path(site.getsitepackages()[0], 'rsikit-worker.pth').write_text('/opt/worker\n')"

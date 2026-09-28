@@ -16,7 +16,7 @@ from research.alphaevolve.paper.evaluation import (
     evaluate_cascade,
 )
 from research.alphaevolve.paper.feedback import LLMFeedback
-from rsikit.policy import _policy_class
+from rsikit.policy import Policy
 from tests.providers import ScriptedProvider
 from tests.test_alphaevolve import program
 
@@ -26,7 +26,7 @@ class FeedbackTests(unittest.IsolatedAsyncioTestCase):
         root = patch.object(prompts, "TEMPLATE_ROOT", Path(alphaevolve.__file__).parent)
         root.start()
         self.addCleanup(root.stop)
-        self.policy = _policy_class("Candidate", program(0).implementation)
+        self.policy = Policy.from_text(program(0).implementation, name="Candidate")
         self.measured = EvaluationResult(
             {"reward": 9}, {"variability": 2}, "Completed every episode", {3: 9}
         )

@@ -34,13 +34,27 @@ class BitcoinEnv(gym.Env):
 
     metadata = {"render_modes": []}
 
-    def __init__(self, data_path=TRAIN_DATA, fee_rate=0.001, initial_cash=10_000.0):
+    def __init__(
+        self,
+        data_path=TRAIN_DATA,
+        fee_rate=0.001,
+        initial_cash=10_000.0,
+        *,
+        start_date=None,
+        end_date=None,
+    ):
         fee_rate, initial_cash = float(fee_rate), float(initial_cash)
         if not math.isfinite(fee_rate) or not 0 <= fee_rate < 1:
             raise ValueError("fee_rate must be finite and in [0, 1)")
         if not math.isfinite(initial_cash) or initial_cash <= 0:
             raise ValueError("initial_cash must be finite and positive")
         self._dates, self._prices = load_prices(data_path)
+        start = date.fromisoformat(start_date).toordinal() if start_date else self._dates[0]
+        end = date.fromisoformat(end_date).toordinal() if end_date else self._dates[-1]
+        if start < self._dates[0] or end > self._dates[-1] or start >= end:
+            raise ValueError("Date range must contain at least two prices within the CSV")
+        left, right = start - self._dates[0], end - self._dates[0] + 1
+        self._dates, self._prices = self._dates[left:right], self._prices[left:right]
         self._ratios = tuple(b / a for a, b in zip(self._prices, self._prices[1:]))
         if any(not math.isfinite(r) or r <= 0 for r in self._ratios):
             raise ValueError("Daily price ratios must be finite and positive")
@@ -117,6 +131,7 @@ class BitcoinEnv(gym.Env):
         cash = (1 - target) * funded
         self._index += 1
         self._done = self._index == len(self._prices) - 1
+        liquidation = btc_value if self._done else 0.0
         if self._done:
             fee += self.fee_rate * btc_value
             cash += btc_value * (1 - self.fee_rate)
@@ -133,5 +148,7 @@ class BitcoinEnv(gym.Env):
                 "wealth": self._wealth,
                 "fee": fee,
                 "total_fees": self._total_fees,
+                "trade_usd": trade,
+                "liquidation_usd": liquidation,
             },
         )

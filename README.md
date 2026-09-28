@@ -7,7 +7,8 @@ Install the shared library with `pip install rsikit` (Python 3.10+).
 Research algorithms and examples require a clone of this repository.
 This is an experimental release; APIs may change.
 
-- `Policy`: the agent interface: `reset`, `act`, and `close`.
+- `Policy`: the solution type: load with `from_text` / `from_file`, save with
+  `to_text` / `to_file`, and execute through `reset`, `act`, and `close`.
 - `generate`: returns a named `Policy` subclass from the LLM.
 - `Run`: stores policies, scores, and returned artifacts.
 - `Executor`: owns concurrency and timeouts, using a configurable sandbox.
@@ -99,8 +100,14 @@ docker build -t rsikit-sandbox:local -f rsikit/sandbox/Dockerfile .
 ```
 
 A program exports `Solution(Policy)`. One policy instance persists throughout an
-episode. Run evaluates both environment and agent inside the container, in separate
-processes. The lower-level `run_program` helper still keeps its environment on the host.
+episode. Run evaluates both environment and agent inside the container, sharing
+an episode process by default; `DockerSandbox` uses separate processes. The
+lower-level `run_program` helper still keeps its environment on the host.
+
+For caller-owned instances, use `Evaluator(env, policy, max_steps=1000)` and
+`await evaluator.run(observation, info=info)` after resetting both objects.
+It returns an `Episode` with observations, actions, rewards, end flags, and infos
+for later analysis. Creation, seeding, and cleanup stay with the caller.
 
 See the [API guide](docs/INNER_LOOP.md) for task instructions, class contracts,
 results, and execution limits.
@@ -115,6 +122,10 @@ For daily BTC portfolio allocation with transaction fees and a seven-year traini
 three-year validation split, see the [Bitcoin environment](docs/BITCOIN.md).
 Use `--env Bitcoin` with the optimizer examples, or benchmark locally with
 `.venv/bin/python -m examples.bitcoin` (100,000 steps/second minimum).
+Export saved policy charts with `examples.bitcoin_videos RUN --split training`
+or `--split validation` for the reserved chronological panel. Videos show
+buy/sell fills, equity, buy-and-hold, allocation, and drawdown; see the
+[replay options](docs/BITCOIN.md#performance-charts-and-videos).
 
 ## Generate and compare five policies with OpenRouter
 

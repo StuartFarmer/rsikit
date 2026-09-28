@@ -14,7 +14,7 @@ import cloudpickle
 
 from examples.benchmark_docker import PACKING
 from rsikit.envs import BlackjackEnv, CirclePackingEnv
-from rsikit.episode import InfrastructureError, PolicyError, PolicyTimeout
+from rsikit.evaluation import InfrastructureError, PolicyError, PolicyTimeout
 from rsikit.execution import Executor
 from rsikit.sandbox.docker import DockerSandbox
 from rsikit.sandbox.evaluate import ProcessPolicy

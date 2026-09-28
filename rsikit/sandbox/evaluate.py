@@ -14,7 +14,7 @@ from time import monotonic
 import cloudpickle
 import gymnasium as gym
 
-from rsikit.episode import InfrastructureError, PolicyError, PolicyTimeout, run_episode
+from rsikit.evaluation import InfrastructureError, PolicyError, PolicyTimeout, run_episode
 from rsikit.sandbox import SandboxPolicy
 from rsikit.sandbox.codec import MAX_MESSAGE, frame_size, loads
 

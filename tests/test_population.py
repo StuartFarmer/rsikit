@@ -7,11 +7,11 @@ from dataclasses import replace
 from pathlib import Path
 
 from research.alphaevolve.paper.database import Candidate, Database
-from rsikit.policy import _policy_class
+from rsikit.policy import Policy
 
 
 def candidate(value, score, niche=0, stability=0):
-    policy = _policy_class(str(value), f"class Solution:\n    value = {value}\n")
+    policy = Policy.from_text(f"class Solution:\n    value = {value}\n", name=str(value))
     return Candidate(policy, score, {"reward": score, "stability": stability}, {"x": niche})
 
 
@@ -62,7 +62,7 @@ class PopulationTests(unittest.TestCase):
     def test_dedup_ignores_comments_names_and_does_not_replace_evaluation(self):
         db = self.database(islands=2)
         original = db.register(candidate(1, 10), 0)
-        renamed = _policy_class("new name", "# comment\nclass Solution:\n    value=1\n")
+        renamed = Policy.from_text("# comment\nclass Solution:\n    value=1\n", name="new name")
         duplicate = db.register(replace(candidate(1, 999), policy=renamed), 1)
         self.assertEqual(duplicate, original)
         self.assertEqual(duplicate.policy.id, original.policy.id)
@@ -72,8 +72,8 @@ class PopulationTests(unittest.TestCase):
 
     def test_validation_and_storage_do_not_execute_source(self):
         db = self.database(islands=1)
-        policy = _policy_class(
-            "untrusted", "raise RuntimeError('never execute')\nclass Solution: pass"
+        policy = Policy.from_text(
+            "raise RuntimeError('never execute')\nclass Solution: pass", name="untrusted"
         )
         item = replace(candidate(1, 2), policy=policy)
         db.validate(item, 0)

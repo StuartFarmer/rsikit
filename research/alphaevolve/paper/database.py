@@ -8,7 +8,7 @@ import sqlite3
 from dataclasses import dataclass, field
 from numbers import Real
 
-from rsikit.policy import Policy, _policy_class
+from rsikit.policy import Policy
 
 
 @dataclass(frozen=True)
@@ -163,7 +163,7 @@ class Database:
         if not isinstance(policy, type) or not issubclass(policy, Policy):
             raise ValueError("candidate policy must be a Policy class")
         try:
-            restored = _policy_class(policy.name, policy._implementation)
+            restored = Policy.from_text(policy._implementation, name=policy.name)
             if restored.id != policy.id:
                 raise ValueError("policy id must match its name and implementation")
         except (AttributeError, SyntaxError, TypeError) as error:
@@ -240,8 +240,8 @@ class Database:
 
     def _decode(self, row):
         if row["id"] not in self._policies:
-            self._policies[row["id"]] = _policy_class(
-                row["name"], row["source"], row["description"]
+            self._policies[row["id"]] = Policy.from_text(
+                row["source"], name=row["name"], description=row["description"]
             )
         return Candidate(
             self._policies[row["id"]],

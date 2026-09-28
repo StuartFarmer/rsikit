@@ -24,10 +24,11 @@ from .tournament import Tournament, TournamentConfig, docker_block
 
 class PopulationTests(unittest.IsolatedAsyncioTestCase):
     async def test_tournament_batches_failures_and_only_replays_changed_tables(self):
-        from rsikit.policy import _policy_class
+        from rsikit.policy import Policy
 
         candidates = [
-            _policy_class(str(i), json.loads(program(i))["implementation"]) for i in range(20)
+            Policy.from_text(json.loads(program(i))["implementation"], name=str(i))
+            for i in range(20)
         ]
         calls = []
         broken = {candidates[0]._implementation, candidates[6]._implementation}
@@ -124,7 +125,7 @@ class PopulationTests(unittest.IsolatedAsyncioTestCase):
             )
 
     async def test_pool_cleanup_survives_cancellation_and_failed_removal_can_retry(self):
-        from rsikit.episode import InfrastructureError
+        from rsikit.evaluation import InfrastructureError
 
         from .pool import TablePool
 
@@ -160,7 +161,7 @@ class PopulationTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(remove.await_count, 2)
 
     async def test_failed_docker_removal_is_not_reported_as_success(self):
-        from rsikit.episode import InfrastructureError
+        from rsikit.evaluation import InfrastructureError
 
         from .pool import remove_container
 
@@ -170,7 +171,7 @@ class PopulationTests(unittest.IsolatedAsyncioTestCase):
                 await remove_container("test-evaluator", None)
 
     async def test_infrastructure_failure_cancels_active_blocks(self):
-        from rsikit.episode import InfrastructureError
+        from rsikit.evaluation import InfrastructureError
 
         from .baselines import policies
 
@@ -316,7 +317,7 @@ class PopulationTests(unittest.IsolatedAsyncioTestCase):
             def kill(self):
                 self.returncode = -9
 
-        from rsikit.episode import InfrastructureError
+        from rsikit.evaluation import InfrastructureError
 
         with (
             patch(f"{__package__}.pool._spawn", side_effect=[SlowProcess(), SlowProcess()]),
@@ -459,10 +460,11 @@ class PopulationTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(agent.organisms[0].repairs, 1)
 
     async def test_tournament_scores_and_equal_hands(self):
-        from rsikit.policy import _policy_class
+        from rsikit.policy import Policy
 
         policies = [
-            _policy_class(str(i), json.loads(program(i))["implementation"]) for i in range(7)
+            Policy.from_text(json.loads(program(i))["implementation"], name=str(i))
+            for i in range(7)
         ]
 
         async def runner(request, config):

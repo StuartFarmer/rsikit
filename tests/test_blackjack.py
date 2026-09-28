@@ -9,7 +9,7 @@ from gymnasium.error import InvalidAction
 from gymnasium.utils.env_checker import check_env
 
 from rsikit import envs
-from rsikit.episode import PolicyError, run_episode
+from rsikit.evaluation import PolicyError, run_episode
 from rsikit.policy import Policy
 from rsikit.sandbox.codec import decode_space, encode_space
 

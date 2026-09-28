@@ -17,7 +17,7 @@ import gymnasium as gym
 from examples.benchmark_docker import CARTPOLE, PACKING, command
 from rsikit import Executor, Run
 from rsikit.envs import BitcoinEnv, BlackjackEnv, CirclePackingEnv
-from rsikit.policy import _policy_class
+from rsikit.policy import Policy
 from rsikit.sandbox.docker import DockerSandbox, InProcessDockerSandbox
 
 
@@ -109,7 +109,7 @@ async def scheduling(samples):
                             await asyncio.sleep(0.005)
                             source = PACKING + f"\n# candidate {i}\n"
                             arrived[source] = perf_counter()
-                            await queue.put(_policy_class(str(i), source))
+                            await queue.put(Policy.from_text(source, name=str(i)))
                         await queue.put(None)
 
                     async def consume():

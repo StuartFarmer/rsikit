@@ -11,16 +11,24 @@ class Solution(Policy):
 
 
 async def main():
-    from rsikit.episode import run_episode
+    from copy import deepcopy
 
-    _, _, terminated, truncated, info = await run_episode(
-        "CartPole-v1",
-        Solution,
-        env_seed=1,
-        policy_seed=2,
-        max_steps=50,
+    import gymnasium as gym
+
+    from rsikit import Evaluator
+
+    with gym.make("CartPole-v1") as env:
+        policy = Solution(deepcopy(env.observation_space), deepcopy(env.action_space))
+        try:
+            observation, info = env.reset(seed=1)
+            await policy.reset(seed=2)
+            episode = await Evaluator(env, policy, max_steps=50).run(observation, info=info)
+        finally:
+            await policy.close()
+    print(
+        f"reward={episode.total_reward} steps={len(episode)} "
+        f"terminated={episode.terminations[-1]} truncated={episode.truncations[-1]}"
     )
-    print(f"{info['episode']} terminated={terminated} truncated={truncated}")
 
 
 if __name__ == "__main__":

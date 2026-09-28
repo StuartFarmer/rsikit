@@ -30,7 +30,7 @@ from examples.elitesearch import measure, run_search
 from research import elitesearch
 from research.elitesearch import Config, EliteSearch, Generation, Organism
 from rsikit import Executor, Run
-from rsikit.policy import _policy_class
+from rsikit.policy import Policy
 from rsikit.sandbox.docker import DockerSandbox
 
 TASKS = (
@@ -188,7 +188,7 @@ async def export_curves(agent, run, heldout_seeds):
         for g in agent.generations
         if g.status == "completed" and g.elite_ids
     }
-    random_policy = _policy_class("Random action reference", RANDOM_SOURCE)
+    random_policy = Policy.from_text(RANDOM_SOURCE, name="Random action reference")
     measurements = await measure(
         run, [policies[key] for key in sorted(winners)] + [random_policy], heldout_seeds
     )

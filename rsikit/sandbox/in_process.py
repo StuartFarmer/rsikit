@@ -3,7 +3,7 @@
 import os
 import resource
 
-from rsikit.episode import PolicyError
+from rsikit.evaluation import PolicyError
 from rsikit.policy import Policy
 from rsikit.sandbox.worker import block_connections, load_policy
 

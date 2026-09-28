@@ -24,7 +24,7 @@ from research import shinkaevolve
 from research.shinkaevolve import Config, ShinkaEvolve
 from rsikit import Executor, Run
 from rsikit.envs.tasks import TASKS, make_environment
-from rsikit.episode import PolicyError
+from rsikit.evaluation import PolicyError
 from rsikit.progress import ProgressHandler, show_scores
 
 

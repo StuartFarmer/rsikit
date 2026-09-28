@@ -34,7 +34,8 @@ Training lives in `rsikit/envs/data/bitcoin_train.csv`. Validation lives separat
 in `data/bitcoin/validation.csv`, outside the installed package and the environment
 directory copied into Docker. The downloaded source URL, timestamps, row counts,
 and SHA-256 hashes are in [metadata](../data/bitcoin/metadata.json).
-No validation strategy evaluation was performed while implementing this environment.
+Validation is evaluated only when explicitly selected for replay, never by the
+automatic per-generation training video export.
 
 Refresh explicitly; this changes the optimization problem and should use a new run:
 
@@ -74,7 +75,8 @@ The final step also sells all remaining BTC and pays the sell fee. Each reward
 is `wealth_after_step - wealth_before_step`, so undiscounted episode reward sums
 to net USD profit. This objective favors absolute wealth, with no risk penalty or
 log-return transformation. `info` contains `wealth`, that step's total `fee`, and
-cumulative `total_fees`.
+cumulative `total_fees`, signed `trade_usd` at the observed price, and
+`liquidation_usd` sold at the final price (zero on nonterminal steps).
 
 Repeating 50% rebalances the allocation after price changes. To hold your current
 BTC quantity without trading, return `np.array([observation[2]])`. Staying at 100%
@@ -104,7 +106,7 @@ or `info`. Policies maintain their own history in memory. The environment's
 ```python
 import asyncio
 from examples.bitcoin import Solution  # Buy-and-hold baseline
-from rsikit.episode import run_episode
+from rsikit.evaluation import run_episode
 
 result = asyncio.run(run_episode(BitcoinEnv, Solution))
 print(result[4]["episode"])  # Net USD profit and daily steps
@@ -145,6 +147,70 @@ make_validation_env = partial(BitcoinEnv, data_path="data/bitcoin/validation.csv
 The validation panel starts with fresh portfolio and policy state, without
 training-period warmup. The training `BitcoinEnv` instance contains no validation
 prices. Keep validation results out of generation/repair feedback.
+
+## Performance charts and videos
+
+With the existing `video` extra installed, export a saved EliteSearch generation:
+
+```sh
+.venv/bin/python -m examples.bitcoin_videos runs/bitcoin-smoke1 \
+  --generation 14 --top 1 --seeds 0 --output runs/bitcoin-training-videos
+.venv/bin/python -m examples.bitcoin_videos runs/bitcoin-smoke1 \
+  --generation 14 --top 1 --split validation --seeds 100 \
+  --output runs/bitcoin-validation-videos
+```
+
+Open `index.html` in the output directory. Each policy has a 1280×720 MP4 at
+30 fps, one day/action per frame, and a final PNG chart for the last seed.
+The charts show BTC price with buy/sell fills and a separate final-liquidation
+marker, equity after fees, a buy-and-hold baseline with the same fees, BTC
+allocation, and drawdown from the running equity peak. Net profit, cumulative
+fees, and maximum drawdown are displayed. `manifest.json` includes per-seed
+daily equity, prices, allocations, fees, drawdowns, and signed fill notionals.
+Fill `index` refers to the corresponding daily history row. Equity includes
+cash and the current market value of BTC; the last point is liquidated cash.
+
+`--split training` uses the saved search seeds and training CSV. `--split validation`
+(or `--split holdout`) uses the saved held-out seeds and reserved validation CSV.
+`--seeds` overrides the policy seeds without changing the market panel. Policies
+are always selected by their **training** rankings; evaluation does not alter the
+source run or feed validation scores into optimization. Use `--generation` to
+evaluate a frozen generation, or omit it to export all completed generations.
+Repeatedly inspecting validation to choose a policy makes it selection data;
+reserve another unseen period for the final assessment.
+
+For an explicit section of the selected CSV, add inclusive bounds:
+
+```sh
+.venv/bin/python -m examples.bitcoin_videos runs/bitcoin-smoke1 \
+  --generation 14 --top 1 --split validation \
+  --start-date 2024-01-01 --end-date 2024-12-31
+```
+
+`--data-path /path/to/prices.csv` accepts another consecutive daily price CSV.
+Validation returns must follow the packaged training period; overlapping ranges
+are rejected. Both bounds must lie within the selected CSV and include at least
+two prices. Every section starts with fresh cash and policy memory, with no
+earlier-price warmup. The same `start_date`/`end_date` keyword arguments work on
+`BitcoinEnv`. Cache identity includes dates, data contents, split, and seeds so
+training traces cannot be reused as validation traces.
+
+Generated policies execute in the existing Docker sandbox; rendering replays
+their actions locally and checks the resulting score. No model calls are made.
+For training videos after every generation, use
+`examples.elitesearch --env Bitcoin --video-top 4`; this exports only training
+data. Held-out date evaluation remains an explicit, separate replay command.
+
+For a trusted policy's own rendering loop:
+
+```python
+from rsikit.envs.bitcoin_render import BitcoinRenderer
+
+with BitcoinRenderer(BitcoinEnv(), policy_name="My policy") as env:
+    observation, info = env.reset(seed=0)
+    observation, reward, terminated, truncated, info = env.step(action)
+    frame = env.render()  # uint8 RGB, shape (720, 1280, 3)
+```
 
 ## Verification and speed
 

@@ -17,7 +17,7 @@ from sqlmodel import Field, SQLModel, select
 
 import rsikit.generation as generation
 from rsikit import Executor, Policy, Run, generate
-from rsikit.episode import InfrastructureError, PolicyError
+from rsikit.evaluation import InfrastructureError, PolicyError
 from tests.providers import ScriptedProvider
 
 RESPONSE = {
@@ -282,7 +282,11 @@ class RunTests(unittest.IsolatedAsyncioTestCase):
             self.sandbox.start.assert_awaited_once_with(1)
             self.assertEqual(self.sandbox.evaluate.call_args.args[3], 4)
             (export,) = (self.path / "exports").glob("*.py")
-            self.assertEqual(export.read_text(), RESPONSE["implementation"])
+            restored = Policy.from_file(export)
+            self.assertEqual(restored.id, self.policy.id)
+            self.assertEqual(restored.name, self.policy.name)
+            self.assertEqual(restored.description, self.policy.description)
+            self.assertEqual(restored._implementation, RESPONSE["implementation"])
         export.unlink()
         with self.reopen() as run:
             (restored,) = run.policies()

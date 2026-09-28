@@ -10,7 +10,7 @@ from research.alphaevolve.paper.evaluation import (
     evaluate_cascade,
 )
 from research.alphaevolve.paper.pipeline import search
-from rsikit.episode import InfrastructureError, PolicyError
+from rsikit.evaluation import InfrastructureError, PolicyError
 
 
 class Generator:
@@ -48,6 +48,19 @@ class Generator:
 
 
 class EvaluationTests(unittest.IsolatedAsyncioTestCase):
+    async def test_stage_failure_skips_thresholds_and_remaining_stages(self):
+        async def broken(policy):
+            return EvaluationResult(failure="invalid action")
+
+        async def expensive(policy):
+            self.fail("failed candidate reached expensive stage")
+
+        result = await evaluate_cascade(
+            object(), [EvaluationStage(broken, {"reward": 1}), EvaluationStage(expensive)]
+        )
+        self.assertEqual(result.failure, "invalid action")
+        self.assertFalse(result.accepted)
+
     async def test_pruning_combines_feedback_and_skips_expensive_stage(self):
         calls = []
 
@@ -113,6 +126,28 @@ class EvaluationTests(unittest.IsolatedAsyncioTestCase):
 
 
 class PipelineTests(unittest.IsolatedAsyncioTestCase):
+    async def test_result_failures_are_repaired_but_screened_candidates_are_discarded(self):
+        import rsikit
+
+        self.assertTrue(hasattr(rsikit, "EvaluationResult"), "Expose the shared evaluation result")
+        generator = Generator()
+        batches = []
+
+        async def evaluate(policies):
+            batches.append([p.id for p in policies])
+            return {
+                p.id: rsikit.EvaluationResult(failure="bad action")
+                if p.id == "0"
+                else rsikit.EvaluationResult({"reward": 2}, accepted=p.id != "1")
+                for p in policies
+            }
+
+        await search(generator, evaluate, proposals=3, evaluation_batch_size=3)
+        self.assertEqual(generator.repairs, [("0", "bad action")])
+        self.assertEqual(set(generator.results), {"0r", "2"})
+        self.assertEqual([id for id, _ in generator.discarded], ["1"])
+        self.assertEqual(batches, [["0", "1", "2"], ["0r"]])
+
     async def test_generation_and_runtime_repairs_share_concurrency_limit(self):
         generator = Generator()
         generate = generator.generate

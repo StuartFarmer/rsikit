@@ -3,7 +3,7 @@
 import asyncio
 from collections.abc import Mapping
 
-from rsikit.episode import PolicyError
+from rsikit.evaluation import PolicyError
 
 from .evaluation import EvaluationResult
 
@@ -60,11 +60,29 @@ async def search(
         # One result updates every pending attempt for an identical program.
         # Copies already consumed through a concurrent batch can remain queued.
         policies = list({policy.id: policy for policy in policies if policy.id in pending}.values())
+        measured = {}
         while policies:
+            batch = [policy for policy in policies if policy.id not in measured]
             try:
-                results = await evaluate_batch(policies)
+                results = await evaluate_batch(batch) if batch else {}
+                if not isinstance(results, Mapping) or set(results) != {p.id for p in batch}:
+                    raise ValueError("Evaluator must return exactly the evaluated policy IDs")
+                if any(not isinstance(result, EvaluationResult) for result in results.values()):
+                    raise ValueError("Evaluator must return EvaluationResult values")
+                measured.update(
+                    (id, result) for id, result in results.items() if result.failure is None
+                )
+                failures = {
+                    id: result.failure
+                    for id, result in results.items()
+                    if result.failure is not None
+                }
+                if failures:
+                    error = PolicyError("Candidate evaluation failed")
+                    error.failures = failures
+                    raise error
             except PolicyError as exc:
-                if not exc.failures or not set(exc.failures) <= {p.id for p in policies}:
+                if not exc.failures or not set(exc.failures) <= {p.id for p in batch}:
                     raise
                 emit("evaluation_failed", [p for p in policies if p.id in exc.failures])
                 repairs = {
@@ -86,10 +104,7 @@ async def search(
                 ]
                 policies = list({policy.id: policy for policy in survivors}.values())
                 continue
-            if not isinstance(results, Mapping) or set(results) != {p.id for p in policies}:
-                raise ValueError("Evaluator must return exactly the evaluated policy IDs")
-            if any(not isinstance(result, EvaluationResult) for result in results.values()):
-                raise ValueError("Evaluator must return EvaluationResult values")
+            results = {policy.id: measured[policy.id] for policy in policies}
             accepted = {id: result for id, result in results.items() if result.accepted}
             if accepted:
                 generator.update_results(accepted)

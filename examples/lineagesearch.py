@@ -25,31 +25,11 @@ from slick import prompts
 from slick.providers import OpenRouterAPI
 
 from research import lineagesearch
-from research.lineagesearch import Config, LineageSearch, Measurement
+from research.lineagesearch import Config, LineageSearch
 from rsikit import Executor, Run
 from rsikit.envs.tasks import TASKS, make_environment
-from rsikit.episode import PolicyError
+from rsikit.measurements import evaluate_gym as measure
 from rsikit.progress import ProgressHandler, show_scores
-
-
-async def measure(run, policies, seeds):
-    """Keep successful measurements when sibling candidates fail in the sandbox."""
-    failures = {}
-    try:
-        await run.evaluate(policies, seeds=seeds)
-    except PolicyError as exc:
-        if not exc.failures or not set(exc.failures) <= {p.id for p in policies}:
-            raise
-        failures = exc.failures
-    return {
-        policy.id: Measurement(
-            scores={}
-            if policy.id in failures
-            else {seed: run.scores(policy)[seed] for seed in seeds},
-            failure=failures.get(policy.id),
-        )
-        for policy in policies
-    }
 
 
 async def run_search(agent, run, *, seeds, heldout_seeds, console=None):

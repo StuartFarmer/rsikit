@@ -16,7 +16,7 @@ from slick.providers import ProviderError
 from sqlmodel import select
 
 from research.elitesearch import Config, EliteSearch, Generation, Measurement, Organism
-from rsikit import Executor, Run
+from rsikit import EvaluationResult, Executor, Policy, Run
 from tests.providers import ScriptedProvider
 from tests.test_run import FakeSandbox
 
@@ -188,6 +188,26 @@ class EliteSearchTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(agent.elites, [])
                 self.assertEqual(agent.reason, "error")
 
+    async def test_screening_rejection_does_not_promote_or_repair(self):
+        async def evaluate(policies):
+            return {
+                p.id: EvaluationResult(seed_scores={99: 100}, accepted=False, feedback="screened")
+                if p.name == "Policy 0"
+                else EvaluationResult(seed_scores={0: 3})
+                for p in policies
+            }
+
+        provider = ScriptedProvider([program(0), program(1)])
+        agent = EliteSearch(
+            "Score", provider, evaluate, config=Config(population_size=2, generations=1)
+        )
+        await agent.run()
+        self.assertEqual(agent.best.name, "Policy 1")
+        self.assertEqual(agent.organisms[0].status, "discarded")
+        self.assertEqual(agent.organisms[0].error, "screened")
+        self.assertEqual(agent.organisms[0].repairs, 0)
+        self.assertEqual(len(provider.calls), 2)
+
     async def test_arriving_candidate_evaluates_while_previous_candidate_is_running(self):
         provider = ScriptedProvider([program(0), program(1)])
         first_started, second_started = asyncio.Event(), asyncio.Event()
@@ -318,7 +338,8 @@ class EliteSearchTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(summary["elite_ids"], [1])
             self.assertEqual(summary["heldout"]["scores"], {"99": 7})
             self.assertEqual(
-                (output / "best.py").read_text(), json.loads(program(0))["implementation"]
+                Policy.from_file(output / "best.py")._implementation,
+                json.loads(program(0))["implementation"],
             )
             self.assertIn("Elite leaderboard", terminal.getvalue())
             self.assertIn("promotions", (output / "run.log").read_text())
@@ -329,6 +350,49 @@ class EliteSearchTests(unittest.IsolatedAsyncioTestCase):
                     self.assertEqual([g.elite_ids for g in generations], [[1], [1]])
                     self.assertEqual(len(rows), 4)
                     self.assertTrue(all(row.seed_scores == {"0": 7, "1": 7} for row in rows))
+
+    async def test_cli_generation_timeout_controls_request_and_search_deadline(self):
+        from examples import elitesearch as example
+
+        provider = ScriptedProvider([])
+
+        async def stalled_response(*args, **kwargs):
+            await asyncio.Event().wait()
+
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory) / "run"
+            with (
+                patch.dict("os.environ", {"OPENROUTER_API_KEY": "test"}),
+                patch.object(example, "OpenRouterAPI", return_value=provider) as constructor,
+                patch.object(provider, "acall", side_effect=stalled_response),
+                patch.object(example, "Executor", return_value=Executor(sandbox=FakeSandbox())),
+                patch.object(example, "Console", return_value=Console(file=io.StringIO())),
+            ):
+                with self.assertRaises(TimeoutError):
+                    await asyncio.wait_for(
+                        example.main(
+                            [
+                                "--env",
+                                "Bitcoin",
+                                "--population",
+                                "1",
+                                "--generations",
+                                "1",
+                                "--generation-timeout",
+                                "0.01",
+                                "--output",
+                                str(output),
+                            ]
+                        ),
+                        2,
+                    )
+            self.assertEqual(constructor.call_args.kwargs["timeout"], 0.01)
+            # If the search ignored the option, the outer guard would cancel it instead.
+            summary = json.loads((output / "summary.json").read_text())
+            self.assertEqual(summary["reason"], "error")
+            self.assertEqual(summary["generations"], 0)
+            experiment = json.loads((output / "experiment.json").read_text())
+            self.assertEqual(experiment["generation_timeout"], 0.01)
 
 
 if __name__ == "__main__":

@@ -11,7 +11,7 @@ import sys
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
-from rsikit.episode import InfrastructureError, PolicyError, PolicyTimeout
+from rsikit.evaluation import InfrastructureError, PolicyError, PolicyTimeout
 from rsikit.sandbox.evaluate import error_result, run_evaluation
 from rsikit.sandbox.in_process import run_in_process
 from rsikit.sandbox.worker import run_candidate

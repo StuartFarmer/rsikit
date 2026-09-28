@@ -13,7 +13,7 @@ import gymnasium as gym
 import numpy as np
 from gymnasium import spaces
 
-from rsikit.episode import InfrastructureError, PolicyError, PolicyTimeout, run_episode
+from rsikit.evaluation import InfrastructureError, PolicyError, PolicyTimeout, run_episode
 from rsikit.policy import Policy
 from rsikit.sandbox import SandboxPolicy, run_program
 from rsikit.sandbox.codec import decode, decode_space, dumps, encode, encode_space, loads
@@ -583,13 +583,14 @@ class Solution(Policy):
 
         from examples.replay import record_best
         from rsikit import Executor, Run
-        from rsikit.policy import _policy_class
+        from rsikit.policy import Policy
         from tests.test_run import RESPONSE, FakeSandbox
 
         if find_spec("moviepy") is None or find_spec("pygame") is None:
             self.skipTest("Install .[video] for video checks")
         policies = [
-            _policy_class(name, RESPONSE["implementation"]) for name in ("Low", "Best", "Failed")
+            Policy.from_text(RESPONSE["implementation"], name=name)
+            for name in ("Low", "Best", "Failed")
         ]
         sandbox = FakeSandbox()
         sandbox.evaluate.side_effect = [(2.0, {}), (30.0, {}), PolicyError("bad policy")]
@@ -765,16 +766,16 @@ class Solution(Policy):
 
     async def test_batch_timeout_and_cancellation_remove_shared_container(self):
         from rsikit import DockerSandbox, Executor, Run
-        from rsikit.policy import _policy_class
+        from rsikit.policy import Policy
 
         loop = asyncio.get_running_loop()
         previous_handler = loop.get_exception_handler()
         self.addCleanup(loop.set_exception_handler, previous_handler)
         loop_errors = []
         loop.set_exception_handler(lambda loop, context: loop_errors.append(context))
-        policy = _policy_class(
-            "stuck",
+        policy = Policy.from_text(
             "from rsikit import Policy\nclass Solution(Policy):\n    async def act(self, observation):\n        while True: pass\n",
+            name="stuck",
         )
         sandbox = DockerSandbox()
         executor = Executor(sandbox=sandbox, call_timeout=0.1)

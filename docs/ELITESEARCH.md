@@ -53,6 +53,14 @@ the separate `--concurrency` setting. New candidates can use free workers while
 earlier candidates finish their remaining seeds. A generation completes before breeding the
 next one so it can use the updated leaderboard.
 
+`--generation-timeout` sets both the OpenRouter request timeout and the search's
+wall-clock deadline per model call (default 120 seconds), including repairs.
+For a model that needs longer, try `--generation-timeout 600`; lowering
+`--generation-concurrency` reduces simultaneous requests. Waiting for a model-call
+slot does not consume its deadline. `--episode-timeout` separately limits execution
+of a generated policy in Docker. A generation timeout still aborts and records the
+run; it is not treated as a bad policy or automatically retried.
+
 Rich shows generations, evaluated/discarded population slots, filled elite slots,
 generation/evaluation progress and the leaderboard after each generation.
 Artifacts include `experiment.json`, `run.log`, `leaderboard.json`, `best.py`,
@@ -64,10 +72,14 @@ Search seeds default to 0–4. The final best elite is also evaluated on held-ou
 seeds 100–104, without changing the leaderboard or repairing against those results.
 Improvement on search seeds is not a guarantee of improvement on unseen seeds.
 
-Programmatic callers import `Config`, `EliteSearch`, and `Measurement` from
+Programmatic callers import `Config` and `EliteSearch` from
 `research.elitesearch`, configure Slick's template root to `research/elitesearch/prompts`, and inject
-an async evaluator returning `{policy.id: Measurement(per_seed_scores)}`. Candidate
-failures use `Measurement({}, failure="diagnostic")`; infrastructure failures raise.
+an async evaluator returning `{policy.id: EvaluationResult(seed_scores=per_seed_scores)}`.
+Import `EvaluationResult` and the reusable `evaluate_gym(run, policies, seeds=...)`
+adapter from `rsikit`. Candidate failures use `EvaluationResult(failure="diagnostic")`;
+screening rejections use `accepted=False` without a failure and are discarded without
+repair. Infrastructure failures raise. The old `Measurement(scores, failure=None)`
+constructor remains compatible.
 Evaluation callbacks run concurrently; a shared Run/Executor bounds episode workers.
 The caller owns isolated execution and persistence through `on_checkpoint` and
 `agent.records()`. Generated code is never executed by the optimizer itself.

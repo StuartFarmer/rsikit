@@ -4,7 +4,7 @@ import json
 import unittest
 
 from research.elitesearch import Config, EliteSearch, Generation, Organism
-from rsikit.policy import _policy_class
+from rsikit.policy import Policy
 from tests.providers import ScriptedProvider
 from tests.test_elitesearch import program
 
@@ -47,8 +47,10 @@ class TieBreakTests(unittest.TestCase):
                     rows = original._population(generation)
                     for row in rows:
                         proposal = json.loads(program(row.id))
-                        policy = _policy_class(
-                            proposal["name"], proposal["implementation"], proposal["description"]
+                        policy = Policy.from_text(
+                            proposal["implementation"],
+                            name=proposal["name"],
+                            description=proposal["description"],
                         )
                         row.name, row.description = policy.name, policy.description
                         row.implementation, row.policy_id = proposal["implementation"], policy.id

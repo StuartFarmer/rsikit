@@ -15,7 +15,7 @@ from slick.providers import OpenRouterAPI
 
 import rsikit.generation as generation
 from rsikit import DockerSandbox, Executor, Run, generate
-from rsikit.episode import PolicyError
+from rsikit.evaluation import PolicyError
 
 MODEL = "openai/gpt-oss-120b:nitro"
 ENVIRONMENT = "CartPole-v1"

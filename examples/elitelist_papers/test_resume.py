@@ -14,7 +14,7 @@ from examples.elitelist_papers import run as runner
 from research import elitesearch
 from research.elitesearch import Config, EliteSearch, Generation, Measurement, Organism
 from rsikit import Executor, Run
-from rsikit.episode import InfrastructureError
+from rsikit.evaluation import InfrastructureError
 from tests.providers import ScriptedProvider
 from tests.test_elitesearch import program
 from tests.test_run import FakeSandbox

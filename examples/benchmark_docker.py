@@ -65,6 +65,7 @@ async def main(samples, output):
             for path in [
                 Path("rsikit/execution.py"),
                 Path("rsikit/episode.py"),
+                Path("rsikit/evaluation.py"),
                 Path("rsikit/policy.py"),
                 *sorted(Path("rsikit/sandbox").glob("*.py")),
             ]

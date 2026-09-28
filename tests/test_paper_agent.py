@@ -10,8 +10,8 @@ from slick import prompts
 from research import alphaevolve
 from research.alphaevolve import paper
 from research.alphaevolve.original.agent import Guidance
-from rsikit.episode import PolicyError
-from rsikit.policy import _policy_class
+from rsikit.evaluation import PolicyError
+from rsikit.policy import Policy
 from tests.providers import ScriptedProvider
 from tests.test_alphaevolve import program
 
@@ -123,7 +123,7 @@ class PaperAgentTests(unittest.IsolatedAsyncioTestCase):
             config=paper.Config(islands=1, mode="rewrite", meta_interval=0),
         )
         self.addCleanup(agent.close)
-        seed = _policy_class("Initial", program(0).implementation)
+        seed = Policy.from_text(program(0).implementation, name="Initial")
         agent.register_initial(seed, paper.EvaluationResult(metrics={"reward": 1}))
         child = (await agent.generate())[0]
         agent.update_results({child.id: paper.EvaluationResult(metrics={"reward": 100})})
@@ -157,7 +157,7 @@ class PaperAgentTests(unittest.IsolatedAsyncioTestCase):
             config=paper.Config(mode="rewrite", meta_interval=0),
         )
         self.addCleanup(agent.close)
-        seed = _policy_class("Initial", program(0).implementation)
+        seed = Policy.from_text(program(0).implementation, name="Initial")
         agent.register_initial(seed, paper.EvaluationResult(metrics={"reward": 1}))
         self.assertTrue(all(island.policy.id == seed.id for island in agent.islands))
         child = (await agent.generate())[0]

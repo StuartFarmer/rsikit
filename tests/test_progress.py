@@ -17,7 +17,7 @@ import examples.alphaevolve as example
 from research import alphaevolve
 from research.alphaevolve.improved import AlphaEvolve, Config
 from rsikit import Executor, Run
-from rsikit.episode import PolicyError
+from rsikit.evaluation import PolicyError
 from rsikit.generation.edits import Program
 from rsikit.progress import ProgressHandler
 from tests.providers import ScriptedProvider

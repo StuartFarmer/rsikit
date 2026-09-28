@@ -5,7 +5,7 @@ import unittest
 import numpy as np
 
 from rsikit import Policy
-from rsikit.episode import PolicyError, run_episode
+from rsikit.evaluation import PolicyError, run_episode
 
 
 class DiscreteActionTests(unittest.IsolatedAsyncioTestCase):

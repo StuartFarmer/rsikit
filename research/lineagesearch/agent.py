@@ -22,10 +22,9 @@ from slick import prompt
 from slick.providers import Provider
 from sqlmodel import SQLModel
 
-from rsikit import Policy
+from rsikit import EvaluationResult, Policy
 from rsikit.generation import WORKER_LIBRARIES, RecordingProvider
 from rsikit.generation.edits import InvalidCandidate, Program, check_program, check_rewrite
-from rsikit.policy import _policy_class
 
 from .records import Family, Study, Trial
 
@@ -58,16 +57,11 @@ class Config:
             raise ValueError("cull_percent must be between 0 (inclusive) and 100 (exclusive)")
 
 
-@dataclass(frozen=True)
-class Measurement:
-    """Comparable per-seed rewards, or an explicit candidate execution failure.
-
-    An infrastructure failure must raise instead of returning a failure here.
-    """
-
-    scores: dict[int, float]
-    feedback: str = ""
-    failure: str | None = None
+def Measurement(
+    scores: dict[int, float], feedback: str = "", failure: str | None = None
+) -> EvaluationResult:
+    """Compatibility constructor; new evaluators return rsikit.EvaluationResult."""
+    return EvaluationResult(seed_scores=scores, feedback=feedback, failure=failure)
 
 
 class FamilyBrief(BaseModel, extra="forbid"):
@@ -109,7 +103,7 @@ class LineageSearch:
         self,
         task: str,
         provider: Provider,
-        evaluate: Callable[[Sequence[type[Policy]]], Awaitable[dict[str, Measurement]]],
+        evaluate: Callable[[Sequence[type[Policy]]], Awaitable[dict[str, EvaluationResult]]],
         *,
         context: str = "",
         config: Config = Config(),
@@ -431,7 +425,7 @@ class LineageSearch:
         if key in self._sources:
             raise InvalidCandidate("Duplicate program AST across lineages")
         self._sources.add(key)
-        policy = _policy_class(row.name, row.implementation, row.description)
+        policy = Policy.from_text(row.implementation, name=row.name, description=row.description)
         self._policies[row.id] = policy
         row.policy_id, row.status, row.error = policy.id, "generated", None
         row.score, row.seed_scores, row.feedback = None, {}, ""
@@ -542,13 +536,15 @@ class LineageSearch:
             raise ValueError("Evaluator must return exactly the requested policy IDs")
         panel = self._seed_panel
         for result in results.values():
-            if result.failure is not None:
+            if not result.accepted:
                 continue
-            if not result.scores or any(not math.isfinite(s) for s in result.scores.values()):
+            if not result.seed_scores or any(
+                not math.isfinite(s) for s in result.seed_scores.values()
+            ):
                 raise ValueError("Measurements must contain finite per-seed scores")
-            if panel is not None and set(result.scores) != panel:
+            if panel is not None and set(result.seed_scores) != panel:
                 raise ValueError("Every measurement must use the same seed panel")
-            panel = set(result.scores)
+            panel = set(result.seed_scores)
         self._seed_panel = panel
         for row in generated:
             result = results[row.policy_id]
@@ -556,9 +552,11 @@ class LineageSearch:
             if result.failure is not None:
                 row.status, row.error = "execution_failed", result.failure
                 logger.warning("Policy %s failed: %s", row.name, row.error)
+            elif not result.accepted:
+                row.status, row.error = "rejected", result.feedback or "Evaluation rejected"
             else:
-                row.seed_scores = {str(seed): score for seed, score in result.scores.items()}
-                row.score, row.status = fmean(result.scores.values()), "evaluated"
+                row.seed_scores = {str(seed): score for seed, score in result.seed_scores.items()}
+                row.score, row.status = fmean(result.seed_scores.values()), "evaluated"
 
     def _improves(self, child, parent, minimum=0.0):
         differences = [

@@ -25,6 +25,73 @@ Pass `seeds=[0, 1, 2]` to evaluate multiple starts; the returned score is their 
 The same seed also initializes policy randomness. `run.scores(policy)` exposes the
 individual episode scores. Keep the seed set fixed while comparing generations.
 
+## Shared evaluation and saved source
+
+`Policy` is the solution type. Use `Policy.from_text(source)` or
+`Policy.from_file(path)` to load one. Both validate Python syntax, the exported
+`Solution` class, evolution boundaries and constructor compatibility without
+importing or executing the source. The returned policy definition goes directly
+to Run; the sandbox loads its implementation.
+
+```python
+from rsikit import Policy, evaluate_gym
+
+policy = Policy.from_file("solution.py")
+# For raw source: Policy.from_text(source, name="Initial solution", description="...")
+policy.to_file("saved.py")
+restored = Policy.from_text(policy.to_text())
+assert restored.id == policy.id
+
+# Inside an async function with an open Run:
+results = await evaluate_gym(run, [policy], seeds=[0, 1, 2])
+result = results[policy.id]
+if result.failure is not None:
+    print(result.failure)
+elif result.accepted:
+    print(result.metrics["reward"], result.seed_scores)
+else:
+    print(result.feedback)  # Screened out; no execution repair required.
+```
+
+`to_text()` and `to_file(path)` preserve source, name and description in a valid
+Python file with a JSON metadata comment. Reloading preserves the policy ID,
+including after moving or renaming the file. File writes replace the destination
+atomically. Run exports and optimizer `best.py` files use this same serializer.
+These methods save the solution definition; episode-local environment and policy
+state are not serialized.
+
+Plain Python files are accepted too. Without saved metadata the name defaults to
+`Solution` and the description to an empty string; pass `name=` and `description=`
+to supply or override them. Older raw-source exports need their original name
+supplied explicitly to retain their old ID. The standalone `policy_from_source`
+and private `_policy_class` factories have been replaced by these class methods.
+
+`evaluate_gym` returns `dict[policy_id, EvaluationResult]`. Successful results
+contain mean `reward`, `worst_reward`, `stability` (negative population standard
+deviation), and the requested `seed_scores`. Optional
+`features=("mean_reward", "reward_std")` adds numeric descriptors. Scores from
+other seeds already in Run do not enter these results. Completed episodes remain
+cached, including successful episodes from partially failed candidates.
+
+Use `screening_seeds=[0]` and `screening_min_reward=5` together to skip the full
+evaluation for candidates below that screening mean. Screening rejections have
+`accepted=False` and no `failure`. Candidate execution failures carry a diagnostic
+in `failure` and always have `accepted=False`; successful siblings still return
+their measurements. Infrastructure errors and cancellation propagate.
+
+Custom evaluators can return `EvaluationResult(metrics={...}, seed_scores={...},
+features={...}, feedback="...")`, `EvaluationResult(accepted=False,
+feedback="screened out")`, or `EvaluationResult(failure="invalid action")`.
+Metric/descriptor values and per-seed scores must be finite numbers. Optimizers
+validate required objectives and comparable seed panels. The adapter borrows Run;
+callers still own its context and the configured environment.
+
+The old research `Measurement(...)` constructors return this shared result, and
+`result.scores` remains an alias for `result.seed_scores`. AlphaEvolve's existing
+`EvaluationResult` import re-exports the shared class. The lower-level
+`Run.evaluate()` API still returns scalar means and raises `PolicyError` for
+candidate failures.
+
 ## Environment
 
 Pass a configured Gymnasium **instance**. Use `gym.make` arguments, `TimeLimit`,

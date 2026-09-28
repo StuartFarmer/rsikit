@@ -25,7 +25,7 @@ from rsikit.generation.edits import (
     check_program,
     check_rewrite,
 )
-from rsikit.policy import Policy, _policy_class
+from rsikit.policy import Policy
 
 logger = logging.getLogger(__name__)
 
@@ -173,7 +173,9 @@ class AlphaEvolve:
                     check_rewrite(reference, content)
                 check_program(content)
                 call["valid"] = True
-                return _policy_class(proposal.name, content, proposal.description)
+                return Policy.from_text(
+                    content, name=proposal.name, description=proposal.description
+                )
             except (InvalidCandidate, ValidationError) as exc:
                 if isinstance(exc, ValidationError) and "raw" not in call:
                     raise  # Provider-side failures do not establish invalid model output.
@@ -349,7 +351,9 @@ class AlphaEvolve:
                     check_rewrite(reference, content)
                 record["content"] = content
                 check_program(content)
-                policy = _policy_class(proposal.name, content, proposal.description)
+                policy = Policy.from_text(
+                    content, name=proposal.name, description=proposal.description
+                )
             except (InvalidCandidate, ValidationError) as exc:
                 if isinstance(exc, ValidationError) and "raw" not in record:
                     raise

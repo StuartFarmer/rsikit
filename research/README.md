@@ -33,6 +33,10 @@ Shared modules available to every algorithm and runner:
 
 - `rsikit.generation.edits`: candidate contracts, source validation, and exact edits.
 - `rsikit.generation.RecordingProvider`: raw response capture before structured parsing.
+- `rsikit.EvaluationResult` and `rsikit.evaluate_gym`: shared evaluation evidence,
+  candidate failures, optional screening, and cached Gym measurements.
+- `rsikit.Policy.from_text` / `from_file` and `to_text` / `to_file`: canonical solution
+  loading and saving, preserving source and identity without host execution.
 - `rsikit.envs.tasks`: environment presets and `make_environment`.
 - `rsikit.progress`: `ProgressHandler` and `show_scores`.
 - `rsikit`: `Policy`, `Run`, and `Executor` with Docker evaluation.

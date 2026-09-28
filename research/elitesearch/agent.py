@@ -15,7 +15,7 @@ from pydantic import ValidationError
 from slick import prompt
 from slick.providers import Provider
 
-from rsikit import Policy
+from rsikit import EvaluationResult, Policy
 from rsikit.generation import WORKER_LIBRARIES, RecordingProvider
 from rsikit.generation.edits import (
     InvalidCandidate,
@@ -25,7 +25,6 @@ from rsikit.generation.edits import (
     check_program,
     check_rewrite,
 )
-from rsikit.policy import _policy_class
 
 from .records import Generation, Organism
 
@@ -46,12 +45,9 @@ class Config:
     target_score: float | None = None
 
 
-@dataclass(frozen=True)
-class Measurement:
-    """Per-seed rewards or a candidate failure; infrastructure failures must raise."""
-
-    scores: dict[int, float]
-    failure: str | None = None
+def Measurement(scores: dict[int, float], failure: str | None = None) -> EvaluationResult:
+    """Compatibility constructor; new evaluators return rsikit.EvaluationResult."""
+    return EvaluationResult(seed_scores=scores, failure=failure)
 
 
 class EliteSearch:
@@ -70,7 +66,7 @@ class EliteSearch:
         self,
         task: str,
         provider: Provider,
-        evaluate: Callable[[Sequence[type[Policy]]], Awaitable[dict[str, Measurement]]],
+        evaluate: Callable[[Sequence[type[Policy]]], Awaitable[dict[str, EvaluationResult]]],
         *,
         context: str = "",
         config: Config = Config(),
@@ -139,7 +135,9 @@ class EliteSearch:
                         raise ValueError("Invalid checkpoint scores")
                     self._seed_panel = panel
                 if row.policy_id is not None:
-                    policy = _policy_class(row.name, row.implementation, row.description)
+                    policy = Policy.from_text(
+                        row.implementation, name=row.name, description=row.description
+                    )
                     if policy.id != row.policy_id:
                         raise ValueError("Checkpoint policy ID does not match its source")
                     self._policies[row.id] = policy
@@ -288,7 +286,9 @@ class EliteSearch:
                 if key in self._sources:
                     raise InvalidCandidate("Duplicate program; make a substantive change")
                 self._sources.add(key)
-                policy = _policy_class(row.name, row.implementation, row.description)
+                policy = Policy.from_text(
+                    row.implementation, name=row.name, description=row.description
+                )
                 self._policies[row.id] = policy
                 row.policy_id, row.status, row.error = policy.id, "generated", None
                 logger.info(
@@ -318,13 +318,15 @@ class EliteSearch:
                 raise ValueError("Evaluator must return exactly the requested policy IDs")
             panel = self._seed_panel
             for result in results.values():
-                if result.failure is not None:
+                if not result.accepted:
                     continue
-                if not result.scores or any(not math.isfinite(v) for v in result.scores.values()):
+                if not result.seed_scores or any(
+                    not math.isfinite(v) for v in result.seed_scores.values()
+                ):
                     raise ValueError("Measurements must contain finite per-seed scores")
-                if panel is not None and set(result.scores) != panel:
+                if panel is not None and set(result.seed_scores) != panel:
                     raise ValueError("All candidates must use the same seed panel")
-                panel = set(result.scores)
+                panel = set(result.seed_scores)
             self._seed_panel = panel
             failed = []
             for row in rows:
@@ -332,9 +334,13 @@ class EliteSearch:
                 if result.failure is not None:
                     row.status, row.error = "execution_failed", result.failure
                     failed.append(row)
+                elif not result.accepted:
+                    row.status, row.error = "discarded", result.feedback or "Evaluation rejected"
                 else:
-                    row.score = fmean(result.scores.values())
-                    row.seed_scores = {str(seed): value for seed, value in result.scores.items()}
+                    row.score = fmean(result.seed_scores.values())
+                    row.seed_scores = {
+                        str(seed): value for seed, value in result.seed_scores.items()
+                    }
                     row.status = "evaluated"
             self._checkpoint()
             if not failed:

@@ -26,29 +26,12 @@ from slick import prompts
 from slick.providers import OpenRouterAPI
 
 from research import elitesearch
-from research.elitesearch import Config, EliteSearch, Measurement
+from research.elitesearch import Config, EliteSearch
 from rsikit import Executor, Run
 from rsikit.envs.tasks import TASKS, make_environment
-from rsikit.episode import PolicyError
+from rsikit.measurements import evaluate_gym as measure
 from rsikit.progress import ProgressHandler
 from rsikit.sandbox.docker import DockerSandbox
-
-
-async def measure(run, policies, seeds):
-    failures = {}
-    try:
-        await run.evaluate(policies, seeds=seeds)
-    except PolicyError as exc:
-        if not exc.failures or not set(exc.failures) <= {p.id for p in policies}:
-            raise
-        failures = exc.failures
-    return {
-        p.id: Measurement(
-            {} if p.id in failures else {seed: run.scores(p)[seed] for seed in seeds},
-            failures.get(p.id),
-        )
-        for p in policies
-    }
 
 
 async def generation_videos(queue, path, top, workers):
@@ -185,7 +168,7 @@ async def run_search(
             loggers[0].info("Run: %s", run.path)
             await agent.run()
             if agent.best is not None:
-                (run.path / "best.py").write_text(agent.best._implementation, encoding="utf-8")
+                agent.best.to_file(run.path / "best.py")
                 loggers[0].info("Evaluating best elite on held-out seeds")
                 result = (await measure(run, [agent.best], heldout_seeds))[agent.best.id]
                 summary["heldout"] = dict(scores=result.scores, failure=result.failure)
@@ -235,6 +218,12 @@ async def main(argv=None):
     parser.add_argument("--remix-parents", type=int, default=3)
     parser.add_argument("--max-repairs", type=int, default=2)
     parser.add_argument("--generation-concurrency", type=int, default=100)
+    parser.add_argument(
+        "--generation-timeout",
+        type=float,
+        default=120.0,
+        help="Seconds per model call, including policy generation and repairs",
+    )
     parser.add_argument("--concurrency", type=int, default=8, help="Docker episode workers")
     parser.add_argument(
         "--episode-timeout", type=float, default=60.0, help="Wall-clock seconds per seed"
@@ -252,12 +241,14 @@ async def main(argv=None):
         "--video-top",
         type=int,
         default=0,
-        help="Blackjack leaders to video after each generation; 0 disables",
+        help="Bitcoin/Blackjack leaders to video after each generation; 0 disables",
     )
     parser.add_argument("--video-workers", type=int, default=2)
     args = parser.parse_args(argv)
     if not math.isfinite(args.episode_timeout) or args.episode_timeout <= 0:
         parser.error("--episode-timeout must be positive and finite")
+    if not math.isfinite(args.generation_timeout) or args.generation_timeout <= 0:
+        parser.error("--generation-timeout must be positive and finite")
     for name in (
         "elites",
         "population",
@@ -271,9 +262,9 @@ async def main(argv=None):
         if getattr(args, name) < 1:
             parser.error(f"--{name.replace('_', '-')} must be positive")
     if args.video_top < 0 or (
-        args.video_top and (args.env != "Blackjack" or args.max_steps is not None)
+        args.video_top and (args.env not in ("Blackjack", "Bitcoin") or args.max_steps is not None)
     ):
-        parser.error("--video-top requires full-episode Blackjack and must be nonnegative")
+        parser.error("--video-top requires full-episode Bitcoin/Blackjack and must be nonnegative")
     if args.remix_parents < 2 or args.max_repairs < 0:
         parser.error("--remix-parents must be at least 2 and --max-repairs nonnegative")
     if not (
@@ -288,7 +279,7 @@ async def main(argv=None):
         parser.error("Set OPENROUTER_API_KEY before running this example")
     prompts.TEMPLATE_ROOT = Path(elitesearch.__file__).parent / "prompts"
     provider = OpenRouterAPI(
-        model=args.model, max_output_tokens=args.max_output_tokens, timeout=120
+        model=args.model, max_output_tokens=args.max_output_tokens, timeout=args.generation_timeout
     )
     async with AsyncExitStack() as stack:
         environment = stack.enter_context(
@@ -327,6 +318,7 @@ async def main(argv=None):
                 remix_fraction=args.remix_fraction,
                 remix_parents=args.remix_parents,
                 generation_concurrency=args.generation_concurrency,
+                generation_timeout=args.generation_timeout,
                 max_repairs=args.max_repairs,
             ),
             seed=args.search_seed,

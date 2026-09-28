@@ -233,7 +233,7 @@ async def run_search(args, config, *, console=None, pool=None):
             )
             try:
                 await agent.run()
-                (args.output / "best.py").write_text(agent.elites[0].implementation)
+                agent.best.to_file(args.output / "best.py")
                 write_json(
                     args.output / "leaderboard.json",
                     agent.history[-1]["attempts"][-1].get("leaderboard", []),

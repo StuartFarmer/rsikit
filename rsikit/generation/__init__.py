@@ -6,7 +6,7 @@ from pathlib import Path
 from pydantic import BaseModel, Field
 from slick import prompt
 
-from rsikit.policy import Policy, _policy_class
+from rsikit.policy import Policy
 
 WORKER_LIBRARIES = (Path(__file__).parent / "prompts" / "libraries.txt").read_text(encoding="utf-8")
 
@@ -22,7 +22,9 @@ async def generate(
     task: str, *, libraries: str = WORKER_LIBRARIES, generated: _Response
 ) -> type[Policy]:
     """Return a Policy definition; Run chooses where its implementation executes."""
-    policy = _policy_class(generated.name, generated.implementation, generated.description)
+    policy = Policy.from_text(
+        generated.implementation, name=generated.name, description=generated.description
+    )
     logging.getLogger(__name__).info(
         "Generated %s — %s",
         policy.name,

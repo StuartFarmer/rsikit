@@ -10,7 +10,7 @@ from statistics import fmean
 from time import perf_counter
 
 from research.elitesearch import Measurement
-from rsikit.episode import InfrastructureError
+from rsikit.evaluation import InfrastructureError
 
 from .game import derived_seed, schedule
 from .pool import TablePool

@@ -185,7 +185,8 @@ Configure Slick's process-global template root once at application startup:
 from pathlib import Path
 from slick import prompts
 from research import lineagesearch
-from research.lineagesearch import Config, LineageSearch, Measurement
+from research.lineagesearch import Config, LineageSearch
+from rsikit import evaluate_gym
 
 prompts.TEMPLATE_ROOT = Path(lineagesearch.__file__).parent / "prompts"
 
@@ -194,11 +195,7 @@ seeds = (0, 1, 2, 3, 4)
 
 
 async def evaluate(policies):
-    await run.evaluate(policies, seeds=seeds)
-    return {
-        policy.id: Measurement({seed: run.scores(policy)[seed] for seed in seeds})
-        for policy in policies
-    }
+    return await evaluate_gym(run, policies, seeds=seeds)
 
 
 agent = LineageSearch(
@@ -215,10 +212,13 @@ best_policy = agent.best  # None when nothing could be measured.
 ```
 
 Use one agent per study. The evaluator returns exactly the requested policy IDs.
-`Measurement(scores, feedback="", failure=None)` carries per-seed evidence and
-optional textual diagnostics. To reject a broken candidate without aborting
-siblings, return `Measurement({}, failure=diagnostic)`; infrastructure errors must
-raise. The CLI's `measure()` shows the adapter for RSIKit's `PolicyError.failures`.
+`rsikit.EvaluationResult(seed_scores=scores, feedback="", failure=None)` carries
+per-seed evidence and optional textual diagnostics. To report a broken candidate
+without aborting siblings, return `EvaluationResult(failure=diagnostic)`;
+infrastructure errors must raise. Screening rejections use `accepted=False`
+without a failure and do not consume repairs. `evaluate_gym` handles Run's
+`PolicyError.failures`. The old `Measurement(scores, feedback="", failure=None)`
+constructor remains compatible.
 Generated implementations are never executed by the optimizer itself.
 
 Programmatic callers supply valid configuration: positive family, batch, optional frontier,

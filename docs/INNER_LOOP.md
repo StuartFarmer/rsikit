@@ -1,60 +1,121 @@
 # Inner-loop API
 
-For generated policy objects and durable evaluations, start with [Run](RUNS.md).
-The functions below are the stateless execution layer.
+`Evaluator` runs one episode using an existing Gymnasium environment and an
+existing async `Policy`. The caller creates, seeds, resets, and closes both
+instances, and is responsible for not reusing stateful objects accidentally.
+For generated policies and durable batch evaluations, see [Run](RUNS.md).
 
-A task is a standard Gymnasium environment. RSIKit connects it to an async policy,
-runs until termination or truncation, and closes both. No weights are trained.
+`rsikit.evaluation.Evaluator` collects the rollout and returns an
+`rsikit.episode.Episode`. Both are also exported directly from `rsikit`.
+Batch scoring helpers (`EvaluationResult`, `evaluate_gym`) live in
+`rsikit.measurements` and retain their top-level exports.
 
 ```python
-from rsikit import Policy, run_episode
+from copy import deepcopy
+
+import gymnasium as gym
+from rsikit import Evaluator, Policy
 
 
-class Solution(Policy):
+class RandomPolicy(Policy):
     async def act(self, observation):
         return self.action_space.sample()
 
 
-observation, reward, terminated, truncated, info = await run_episode(
-    "CartPole-v1", Solution, env_seed=1, policy_seed=2
-)
-print(info["episode"])  # {"r": total reward, "l": number of steps, "t": seconds}
+with gym.make("LunarLander-v3", render_mode="human") as env:
+    policy = RandomPolicy(deepcopy(env.observation_space), deepcopy(env.action_space))
+    try:
+        observation, info = env.reset(seed=42)
+        await policy.reset(seed=42)
+        evaluator = Evaluator(env, policy, max_steps=1000)
+        episode = await evaluator.run(observation, info=info)
+    finally:
+        await policy.close()
+
+print(episode.total_reward, len(episode))
+observation, reward, terminated, truncated, info = episode.final_step
 ```
 
-## Environments and results
+The code above runs inside an async function or a notebook supporting top-level
+`await`. `run()` does not call `reset()` or `close()`, even on failure or
+cancellation. Pass the observation returned by the caller's reset; supplying its
+`info` is optional. The evaluator has no seed or factory parameters. It runs the
+supplied objects directly and does not provide a sandbox.
 
-Pass a registered environment ID, or a zero-argument factory returning a fresh
-Gymnasium environment: `lambda: gym.make("FrozenLake-v1", is_slippery=False)`.
-Custom problems implement the same `gym.Env` reset/step contract. No RSIKit
-base class or extra environment methods are needed.
+Existing Gymnasium episode limits apply. `max_steps` is an optional positive
+integer that marks the last recorded transition as truncated when the rollout
+reaches that many steps. It neither resets nor wraps the supplied environment,
+and cannot extend its existing limit. Like Gymnasium's `TimeLimit`, it can set
+truncation on the same step as termination. Use a `TimeLimit` wrapper before
+resetting if other environment wrappers also need to observe that limit.
 
-The runner uses Gymnasium's `RecordEpisodeStatistics` wrapper and returns the
-final standard step tuple. `reward` is the last step's reward; total reward is
-`info["episode"]["r"]`. No trajectory is stored. Leave the `episode` info key to
-this wrapper; factories should not add another `RecordEpisodeStatistics` wrapper.
+## Episode histories
 
-Existing Gymnasium time limits apply. Optional `max_steps` adds a `TimeLimit`
-cap; it cannot extend a registered environment's limit. Set a cap for custom
-environments that may never terminate. Seeds default to `None`.
+`run()` returns an `Episode`, with these ordinary Python lists:
 
-## Policy lifecycle and instructions
+| Field | Length after T steps | Meaning |
+| --- | --- | --- |
+| `observations` | T + 1 | Initial observation, then each step's next observation |
+| `actions` | T | Validated actions passed to `env.step()` |
+| `rewards` | T | Reward for each action |
+| `terminations` | T | Task termination flags |
+| `truncations` | T | Truncation flags, including the evaluator's step cap |
+| `infos` | T + 1 | Initial info (or `{}`), then each step's diagnostic info |
 
-The policy constructor receives copied observation/action spaces and optional
-`instructions`. Each episode creates one instance, calls `await reset(seed=...)`,
-then repeatedly calls `await act(observation)`, and finally `await close()`.
-Inherited reset seeds `self.rng` and `self.action_space`; override it to also
-clear policy memory. Close is an empty hook by default.
+Transition `t` is:
 
-Spaces describe valid values. Instructions can explain the goal and observation
-fields to a policy using an LLM API. Pass `instructions="..."` to the runner, or
-set `instructions` on an environment or Gymnasium wrapper. The outermost wrapper
-with that attribute takes precedence. If neither is present, text defaults
-to `""`. An explicit argument overrides the environment, including empty text.
+```python
+observation = episode.observations[t]
+action = episode.actions[t]
+reward = episode.rewards[t]
+next_observation = episode.observations[t + 1]
+terminated = episode.terminations[t]
+truncated = episode.truncations[t]
+info = episode.infos[t + 1]
+```
 
-Only copied observations reach `act`; diagnostic `info` stays with the caller.
+`episode.total_reward` is the undiscounted sum of rewards; `len(episode)` is the
+number of transitions. `episode.final_step` provides the final Gymnasium tuple,
+whose reward is only the last step's reward. No `info["episode"]` key is added by
+the evaluator; use the summary properties or wrap the environment yourself.
+
+Observations, actions, and infos are deep-copied so reused arrays or dictionaries
+cannot rewrite earlier transitions. These values must support deep copying.
+The result remains valid after caller cleanup. Full histories occupy memory
+proportional to episode length and observation/info size, including image data.
+
+This follows established RL practice: [RLlib's SingleAgentEpisode](https://docs.ray.io/en/latest/rllib/single-agent-episode.html)
+retains an initial observation plus actions, rewards, subsequent observations,
+and infos. [Stable-Baselines3 buffers](https://github.com/DLR-RM/stable-baselines3/blob/master/stable_baselines3/common/buffers.py)
+store transitions for off-policy learning and rollouts for PPO/A2C. PPO also needs
+policy log probabilities and value estimates; this generic episode history does
+not supply those algorithm-specific outputs or implement a replay buffer.
+
+Keep termination and truncation separate: value targets generally bootstrap at
+a time-limit truncation but not at a terminal state. See
+[Gymnasium's time-limit explanation](https://gymnasium.farama.org/tutorials/gymnasium_basics/handling_time_limits/).
+Histories also support reward plots, action analysis, and diagnosing failures.
+
+## Policy contract
+
+Construct the policy with observation/action spaces and optional `instructions`.
+Copy the spaces if the policy should have independent sampling state. Inherited
+`await policy.reset(seed=...)` seeds `self.rng` and `self.action_space`; overrides
+should call it and clear their own episode memory. `close()` is an empty hook by
+default. Supply instructions when constructing the policy; `Evaluator` does not
+read or override them.
+
+Only copied observations reach `act`; diagnostic info stays in the episode.
 Goals and feedback the policy needs during the episode belong in observations.
+No weights are trained by the evaluator.
 
-## Generated programs
+## Compatibility helpers and generated programs
+
+`run_episode(make_env, make_policy, ...)` remains a compatibility helper for
+existing callers. It creates and resets instances, delegates to `Evaluator`,
+closes both, and returns the final step tuple. It retains its seeds, instructions,
+and Gymnasium `RecordEpisodeStatistics` behavior (`info["episode"]` contains
+`r`, `l`, and `t`). Prefer `Evaluator` for new code that owns its instances.
 
 ```python
 from pathlib import Path
@@ -63,11 +124,12 @@ from rsikit import run_program
 result = await run_program(Path("solution.py"), "CartPole-v1", max_steps=100)
 ```
 
-The source must export `Solution(Policy)`. `run_program` has the same environment,
-seed, instruction, step-limit, and return contracts as `run_episode`. It reads
-source as data and runs it in Docker; never import generated source on the host.
-The environment and scoring stay on the host. One remote policy instance and
-asyncio event loop persist for the episode.
+`run_program` retains the compatibility helper's arguments and return tuple.
+The source must export `Solution(Policy)`. It reads source as data and executes
+it in Docker; never import generated source on the host. The environment and
+scoring remain on the host. One remote policy instance and asyncio event loop
+persist for the episode. For the separate `Run.evaluate()` sandbox arrangements,
+see [InProcessDockerSandbox](IN_PROCESS_SANDBOX.md).
 
 Build the worker with:
 
@@ -77,26 +139,27 @@ docker build -t rsikit-sandbox:local -f rsikit/sandbox/Dockerfile .
 
 The worker runs non-root, without network or host mounts, with a read-only
 filesystem and resource limits. `call_timeout` defaults to 10 seconds per policy
-call. This is research isolation, not a hostile multi-tenant service. Trusted
-local classes run directly and have no hard execution deadline.
+call in `run_program`. This is research isolation, not a hostile multi-tenant
+service. Direct trusted policies have no hard execution deadline.
 
-The isolated protocol supports Box, Discrete, Dict, Tuple, and Text spaces with
-bounded numeric array and JSON payloads. Other spaces fail explicitly before
-source execution; the trusted runner can use other Gymnasium spaces. There is no
-pickle transport or fallback to local execution.
+The isolated policy protocol supports Box, Discrete, Dict, Tuple, and Text spaces
+with bounded numeric array and JSON payloads. Unsupported spaces fail before
+source execution; direct evaluation can use other Gymnasium spaces. This policy
+channel has no pickle transport or fallback to local execution.
 
 ## Failures
 
-Exceptions propagate after cleanup. Actions outside `action_space` raise
-`PolicyError` before `env.step`. Environments should raise
-`gymnasium.error.InvalidAction` for state-dependent illegal actions; the runner
-converts this to `PolicyError` so optimizers can repair the candidate without
-stopping sibling evaluations. Other environment exceptions are not reclassified.
-Sandbox failures raise `PolicyError`, `PolicyTimeout`, or
-`InfrastructureError` from `rsikit.episode`. Other environment and trusted-policy
-exceptions retain their original types. Cancellation propagates. Secondary
-cleanup failures are logged without replacing the original failure.
+Actions outside `action_space` raise `PolicyError` before `env.step()`.
+Environments should raise `gymnasium.error.InvalidAction` for state-dependent
+illegal actions; the evaluator converts this to `PolicyError`. Other environment
+and trusted-policy exceptions retain their types. Cancellation propagates.
+Failed execution returns no normal `Episode`.
 
-Termination does not imply success: task rewards and info define that. Failed
-execution produces no normal episode result. Search and cross-episode aggregation live in the separate
-[AlphaEvolve module](ALPHAEVOLVE.md); the runner stores no trajectory.
+The caller must clean up after `Evaluator.run()`, including on failure. The
+compatibility helpers still perform their own cleanup and log secondary cleanup
+failures without replacing the original exception. Sandbox failures raise
+`PolicyError`, `PolicyTimeout`, or `InfrastructureError` from `rsikit.evaluation`.
+
+Termination does not imply success: rewards and task-specific info define that.
+Search and cross-episode aggregation remain outside the evaluator. `Run` persists
+scores and artifacts; it does not automatically persist these episode histories.

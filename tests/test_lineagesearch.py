@@ -19,7 +19,7 @@ from sqlmodel import select
 
 from research.lineagesearch import Config, Family, LineageSearch, Measurement, Study, Trial
 from rsikit import Executor, Run
-from rsikit.episode import PolicyError
+from rsikit.evaluation import PolicyError
 from tests.providers import ScriptedProvider
 from tests.test_run import FakeSandbox
 
@@ -577,6 +577,25 @@ class LineageTests(unittest.IsolatedAsyncioTestCase):
                 await agent.run()
             self.assertEqual(agent.best.name, "Policy 0")
             self.assertEqual(agent.families[0].stale_batches, 0)
+
+    async def test_screening_rejection_does_not_promote_or_repair(self):
+        from rsikit import EvaluationResult
+
+        agent = self.agent([families(), *sequence(0)], {}, max_attempts=1)
+
+        async def evaluate(policies):
+            return {
+                p.id: EvaluationResult(seed_scores={0: 100}, accepted=False, feedback="screened")
+                for p in policies
+            }
+
+        agent.evaluate = evaluate
+        await agent.run()
+        self.assertIsNone(agent.best)
+        self.assertEqual(agent.trials[0].status, "rejected")
+        self.assertEqual(agent.trials[0].feedback, "screened")
+        self.assertEqual(agent.trials[0].repairs, 0)
+        self.assertIsNone(agent.trials[0].score)
 
     async def test_persisted_lineage_has_ancestry_measurements_and_completion(self):
         agent = self.agent(

@@ -1,6 +1,6 @@
 """Fixed, deliberately simple opponents for plumbing checks and held-out reports."""
 
-from rsikit.policy import _policy_class
+from rsikit.policy import Policy
 
 SOURCE = """from rsikit import Policy
 class Solution(Policy):
@@ -26,10 +26,10 @@ class Solution(Policy):
 
 def policies(count=6):
     return [
-        _policy_class(
-            f"Reference {i}",
+        Policy.from_text(
             SOURCE.format(style=i % 6),
-            "Fixed simple reference; not a strong poker benchmark",
+            name=f"Reference {i}",
+            description="Fixed simple reference; not a strong poker benchmark",
         )
         for i in range(count)
     ]

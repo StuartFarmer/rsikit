@@ -10,7 +10,6 @@ import sqlite3
 from contextlib import AsyncExitStack, closing
 from dataclasses import asdict
 from pathlib import Path
-from statistics import fmean, pstdev
 
 from rich.console import Console
 from rich.progress import (
@@ -31,9 +30,9 @@ from research.alphaevolve import improved, original, paper
 from research.alphaevolve.history import Generation, history_records
 from rsikit import Executor, Run
 from rsikit.envs.tasks import TASKS, make_environment
-from rsikit.episode import PolicyError
-from rsikit.generation.edits import check_program
-from rsikit.policy import _policy_class
+from rsikit.evaluation import PolicyError
+from rsikit.measurements import evaluate_gym
+from rsikit.policy import Policy
 from rsikit.progress import ProgressHandler, show_scores
 
 FEATURE_BOUNDS = {
@@ -59,37 +58,6 @@ def _check_gym_evaluation(
         raise ValueError(f"Unsupported Gym descriptors: {', '.join(sorted(unknown))}")
     if objective not in ("reward", "worst_reward", "stability"):
         raise ValueError(f"Unsupported Gym objective: {objective}")
-
-
-async def evaluate_gym(
-    run, policies, *, seeds, features, screening_seeds=(), screening_min_reward=None
-):
-    """Measure trusted rewards in the sandbox; reuse overlapping cached seeds."""
-    seeds, screening_seeds = tuple(seeds), tuple(screening_seeds)
-    _check_gym_evaluation(features, seeds, screening_seeds, screening_min_reward)
-    results = {}
-    if screening_seeds:
-        screened = await run.evaluate(policies, seeds=screening_seeds)
-        for policy in policies:
-            if screened[policy.id] < screening_min_reward:
-                results[policy.id] = paper.EvaluationResult(
-                    metrics={"reward": screened[policy.id]},
-                    feedback=f"Screening reward below {screening_min_reward}",
-                    accepted=False,
-                )
-        policies = [policy for policy in policies if policy.id not in results]
-    if policies:
-        await run.evaluate(policies, seeds=seeds)
-    for policy in policies:
-        scores = {seed: score for seed, score in run.scores(policy).items() if seed in seeds}
-        mean, std = fmean(scores.values()), pstdev(scores.values())
-        descriptors = {"mean_reward": mean, "reward_std": std}
-        results[policy.id] = paper.EvaluationResult(
-            metrics={"reward": mean, "worst_reward": min(scores.values()), "stability": -std},
-            features={name: descriptors[name] for name in features},
-            seed_scores=scores,
-        )
-    return results
 
 
 async def run_search(
@@ -279,7 +247,7 @@ async def run_paper_search(
     async def evaluate(policies):
         nonlocal failures
         try:
-            return await evaluate_gym(
+            results = await evaluate_gym(
                 run,
                 policies,
                 seeds=seeds,
@@ -287,6 +255,10 @@ async def run_paper_search(
                 screening_seeds=screening_seeds,
                 screening_min_reward=screening_min_reward,
             )
+            failures = {
+                id: result.failure for id, result in results.items() if result.failure is not None
+            }
+            return results
         except PolicyError as exc:
             failures = exc.failures
             raise
@@ -371,9 +343,7 @@ async def run_paper_search(
             logger.info("Run: %s", run.path)
             logger.info("Optimizer: %s", type(generator).__module__)
             if initial_policy is not None:
-                source = initial_policy.read_text(encoding="utf-8")
-                check_program(source)
-                policy = _policy_class(initial_policy.stem, source, "User-supplied initial policy")
+                policy = Policy.from_file(initial_policy)
                 result = (await evaluate([policy]))[policy.id]
                 if not result.accepted:
                     raise ValueError("Initial policy failed screening; it was not registered")

@@ -16,7 +16,7 @@ import numpy as np
 from rich.console import Console
 
 from rsikit import Executor, Run
-from rsikit.episode import PolicyError
+from rsikit.evaluation import PolicyError
 from tests.providers import ScriptedProvider
 from tests.test_elitesearch import program
 from tests.test_run import FakeSandbox

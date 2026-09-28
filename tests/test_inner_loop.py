@@ -11,7 +11,7 @@ from gymnasium.utils.env_checker import check_env
 from examples.cartpole import Solution as CartPolePolicy
 from examples.circle_packing.initial import Solution as PackingPolicy
 from rsikit.envs import CirclePackingEnv
-from rsikit.episode import InfrastructureError, PolicyError, run_episode
+from rsikit.evaluation import InfrastructureError, PolicyError, run_episode
 from rsikit.policy import Policy
 
 
@@ -115,7 +115,7 @@ class InnerLoopTests(unittest.IsolatedAsyncioTestCase):
             async def close(self):
                 raise RuntimeError("cleanup also failed")
 
-        with self.assertLogs("rsikit.episode", level="ERROR") as logged:
+        with self.assertLogs("rsikit.evaluation", level="ERROR") as logged:
             with self.assertRaisesRegex(RuntimeError, "^policy failed$"):
                 await self.run_counter(Broken)
         self.assertIn("cleanup also failed", logged.output[0])

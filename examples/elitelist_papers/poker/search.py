@@ -10,7 +10,7 @@ from pathlib import Path
 from statistics import fmean
 
 from research.elitesearch import EliteSearch, Generation, Organism
-from rsikit.policy import _policy_class
+from rsikit.policy import Policy
 
 logger = logging.getLogger(__name__)
 
@@ -200,7 +200,9 @@ class PokerSearch(EliteSearch):
         self.rng.setstate(ast.literal_eval(data["rng_state"]))
         for row in self.organisms:
             if row.policy_id:
-                policy = _policy_class(row.name, row.implementation, row.description)
+                policy = Policy.from_text(
+                    row.implementation, name=row.name, description=row.description
+                )
                 if policy.id != row.policy_id:
                     raise ValueError("Checkpoint source does not match its policy ID")
                 self._policies[row.id] = policy

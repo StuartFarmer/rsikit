@@ -21,7 +21,7 @@ from examples.shinkaevolve import run_search
 from research import shinkaevolve
 from research.shinkaevolve import Config, Evaluation, Generation, ShinkaEvolve
 from rsikit import Executor, Run
-from rsikit.episode import PolicyError
+from rsikit.evaluation import PolicyError
 from rsikit.generation.edits import Edit, Mutation
 from tests.providers import ScriptedProvider
 from tests.test_alphaevolve import SOURCE, program

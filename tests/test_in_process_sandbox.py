@@ -4,7 +4,7 @@ import unittest
 
 from rsikit import Executor, InProcessDockerSandbox
 from rsikit.envs import CirclePackingEnv
-from rsikit.episode import PolicyError, PolicyTimeout
+from rsikit.evaluation import PolicyError, PolicyTimeout
 from tests.test_persistent_sandbox import PACKING
 
 

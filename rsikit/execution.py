@@ -12,7 +12,7 @@ import cloudpickle
 import gymnasium as gym
 from pydantic import BaseModel, Field, FiniteFloat
 
-from .episode import InfrastructureError, PolicyError
+from .evaluation import InfrastructureError, PolicyError
 from .sandbox.docker import InProcessDockerSandbox
 
 

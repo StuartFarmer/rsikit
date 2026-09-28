@@ -20,7 +20,7 @@ from research.alphaevolve import improved, original, paper
 from research.alphaevolve.history import Evaluation, Generation
 from research.alphaevolve.improved import AlphaEvolve, Config
 from rsikit import Executor, Run
-from rsikit.episode import InfrastructureError, PolicyError
+from rsikit.evaluation import InfrastructureError, PolicyError
 from rsikit.generation.edits import Program
 from tests.providers import ScriptedProvider
 from tests.test_alphaevolve import SOURCE, program

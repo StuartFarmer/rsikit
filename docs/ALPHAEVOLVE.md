@@ -467,7 +467,7 @@ while policies:
 generator.update(scores, seed_scores={p.id: run.scores(p) for p in policies})
 ```
 
-`PolicyError` is imported from `rsikit.episode`. Run performs evaluation and storage;
+`PolicyError` is imported from `rsikit.evaluation`. Run performs evaluation and storage;
 it does not call a model. Repaired policies receive their own IDs and are saved
 on the next `evaluate`. Existing successful scores are reused. Failed versions stay
 in the run with unfinished scores; no low score is invented. Only the repaired,

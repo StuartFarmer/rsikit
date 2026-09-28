@@ -8,7 +8,7 @@ import math
 import sys
 from uuid import uuid4
 
-from rsikit.episode import InfrastructureError, PolicyError, PolicyTimeout
+from rsikit.evaluation import InfrastructureError, PolicyError, PolicyTimeout
 
 MAX_RESULT = 64 * 1024 * 1024
 

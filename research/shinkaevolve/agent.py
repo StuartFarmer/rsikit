@@ -30,7 +30,6 @@ from rsikit.generation.edits import (
     check_rewrite,
     evolution_regions,
 )
-from rsikit.policy import _policy_class
 
 from .records import Evaluation, Generation
 
@@ -338,7 +337,9 @@ class ShinkaEvolve:
                         if reference and patch != "diff":
                             check_rewrite(reference, content)
                         check_program(content)
-                        policy = _policy_class(proposal.name, content, proposal.description)
+                        policy = Policy.from_text(
+                            content, name=proposal.name, description=proposal.description
+                        )
                     except InvalidCandidate as exc:
                         failed = content or call.get("raw", "")
                         policy = await self._repair_valid(row, reference, failed, str(exc))
@@ -406,7 +407,9 @@ class ShinkaEvolve:
                 if reference:
                     check_rewrite(reference, content)
                 check_program(content)
-                return _policy_class(proposal.name, content, proposal.description)
+                return Policy.from_text(
+                    content, name=proposal.name, description=proposal.description
+                )
             except InvalidCandidate as exc:
                 failed = call.get("raw", failed)
                 diagnostic = str(exc)

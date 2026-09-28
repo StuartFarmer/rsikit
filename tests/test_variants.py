@@ -19,8 +19,8 @@ from research import alphaevolve
 from research.alphaevolve import improved, original, paper
 from research.alphaevolve.history import Evaluation, Generation
 from rsikit import Executor, Run
-from rsikit.episode import PolicyError
-from rsikit.policy import _policy_class
+from rsikit.evaluation import PolicyError
+from rsikit.policy import Policy
 from tests.providers import ScriptedProvider
 from tests.test_alphaevolve import program
 from tests.test_run import FakeSandbox
@@ -306,7 +306,7 @@ class VariantTests(unittest.IsolatedAsyncioTestCase):
                 return float(source.split("return ")[1].split()[0]) + seed, {}
 
             sandbox.evaluate.side_effect = evaluate
-            policies = [_policy_class(str(i), program(i).implementation) for i in (0, 10)]
+            policies = [Policy.from_text(program(i).implementation, name=str(i)) for i in (0, 10)]
             with Run.create(
                 name="cascade",
                 environment=environment,
@@ -335,7 +335,7 @@ class VariantTests(unittest.IsolatedAsyncioTestCase):
                 return float(seed), {}
 
             sandbox.evaluate.side_effect = evaluate
-            policies = [_policy_class(str(i), program(i).implementation) for i in (0, 1)]
+            policies = [Policy.from_text(program(i).implementation, name=str(i)) for i in (0, 1)]
             with Run.create(
                 name="screening",
                 environment=environment,

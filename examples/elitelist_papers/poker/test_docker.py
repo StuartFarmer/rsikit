@@ -62,7 +62,7 @@ class DockerTests(unittest.IsolatedAsyncioTestCase):
             with self.assertRaises(asyncio.CancelledError):
                 await asyncio.wait_for(pending, 5)
             self.assertEqual((await asyncio.wait_for(survivor, 10))["chips"], [0, 0])
-            from rsikit.episode import InfrastructureError
+            from rsikit.evaluation import InfrastructureError
 
             with self.assertRaisesRegex(InfrastructureError, "deadline"):
                 await pool(slow, replace(config, block_timeout=0.05))
@@ -167,17 +167,17 @@ class Solution(Policy):
         self.assertTrue(all(score == 0 for score in agent.history[1]["scores"].values()))
 
     async def test_tournament_batches_failures_and_reuses_unaffected_blocks(self):
-        from rsikit.policy import _policy_class
+        from rsikit.policy import Policy
 
         from .tournament import TablePool
 
         policies = [
-            _policy_class(
-                str(i),
+            Policy.from_text(
                 CALLER.replace(
                     "return 1", f"marker = {i}\n        return " + ("-2" if i in (0, 2) else "1")
                 ),
-                "Repair test",
+                name=str(i),
+                description="Repair test",
             )
             for i in range(6)
         ]
@@ -192,8 +192,8 @@ class Solution(Policy):
                 )
                 self.assertEqual(pool.sequence, 3)
                 for i in (0, 2):
-                    policies[i] = _policy_class(
-                        str(i), policies[i]._implementation.replace("return -2", "return 1")
+                    policies[i] = Policy.from_text(
+                        policies[i]._implementation.replace("return -2", "return 1"), name=str(i)
                     )
                 results = await tournament(policies)
                 self.assertTrue(all(m.scores == {0: 0} for m in results.values()))
