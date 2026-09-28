@@ -1,8 +1,5 @@
-"""Small codec checks and optional real-Docker episode smoke checks."""
+"""Saved-value compatibility and full application episode checks."""
 
-import asyncio
-import shutil
-import subprocess
 import tempfile
 import unittest
 from pathlib import Path
@@ -12,12 +9,13 @@ import gymnasium as gym
 import numpy as np
 from gymnasium import spaces
 
+from examples.elitelist_papers.poker.codec import dumps, loads
 from research.rewards import mean_rewards
+from rsikit import run_program
+from rsikit.episode import decode, encode
 from rsikit.evaluation import InfrastructureError, PolicyError, PolicyTimeout
 from rsikit.policy import Policy
-from rsikit.sandbox import run_program
-from rsikit.sandbox.codec import decode, dumps, encode, loads
-from tests.helpers import finish_pending, recorded_run, run_episode
+from tests.helpers import fake_executor, finish_pending, recorded_run, run_episode
 
 INSTRUCTIONS = "Count from zero.\nPreserve café and π exactly."
 COUNTER_SOURCE = """
@@ -87,30 +85,7 @@ class CodecSmoke(unittest.TestCase):
                 decode(encoded)
 
 
-class SandboxEpisodeSmoke(unittest.IsolatedAsyncioTestCase):
-    @classmethod
-    def setUpClass(cls):
-        import sys
-
-        import cloudpickle
-
-        # The test-only environment module is not installed in the worker image.
-        cloudpickle.register_pickle_by_value(sys.modules[__name__])
-        cls.addClassCleanup(cloudpickle.unregister_pickle_by_value, sys.modules[__name__])
-
-        if shutil.which("docker") is None:
-            raise unittest.SkipTest("Docker is not installed; no local source execution fallback")
-        try:
-            result = subprocess.run(
-                ["docker", "image", "inspect", "rsikit-sandbox:local"],
-                capture_output=True,
-                timeout=10,
-            )
-        except (OSError, subprocess.TimeoutExpired) as exc:
-            raise unittest.SkipTest(f"Docker unavailable: {exc}") from exc
-        if result.returncode:
-            raise unittest.SkipTest("Docker or rsikit-sandbox:local image unavailable")
-
+class ApplicationEpisodeTests(unittest.IsolatedAsyncioTestCase):
     async def run_source(self, source, *, timeout=3):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "solution.py"
@@ -146,10 +121,10 @@ class SandboxEpisodeSmoke(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(cart.terminations[-1] or cart.truncations[-1])
         self.assertGreater(cart.infos[-1]["episode"]["l"], 1)
 
-    async def test_scientific_libraries_in_restricted_policy(self):
+    async def test_scientific_libraries_in_episode_process(self):
         source = COUNTER_SOURCE.replace(
             "        self.count = 0 if",
-            "        from rsikit.sandbox.check_libraries import check\n"
+            "        from tests.test_scientific_libraries import check\n"
             "        check()\n"
             "        self.count = 0 if",
         )
@@ -187,7 +162,10 @@ class SandboxEpisodeSmoke(unittest.IsolatedAsyncioTestCase):
                     make_environment(name, max_steps=3) as env,
                     cloudpickle.loads(cloudpickle.dumps(env)) as restored,
                     recorded_run(
-                        name="box2d", path=Path(directory) / "run", environment=restored
+                        name="box2d",
+                        path=Path(directory) / "run",
+                        environment=restored,
+                        console=Console(file=io.StringIO()),
                     ) as (run, rollouts),
                     patch.object(prompts, "TEMPLATE_ROOT", Path(alphaevolve.__file__).parent),
                 ):
@@ -198,31 +176,18 @@ class SandboxEpisodeSmoke(unittest.IsolatedAsyncioTestCase):
                             _PolicyResponse(
                                 name="Random motors",
                                 description="Exercise continuous actions and environment instructions.",
-                                implementation=f"""from rsikit import Policy
-class Solution(Policy):
-    async def act(self, observation):
-        assert {name!r} in self.instructions
-        assert "truncated after 3 steps" in self.instructions
-        assert self.action_space.shape == ({actions},)
-        return self.action_space.sample()
-""",
+                                implementation=f'from rsikit import Policy\nclass Solution(Policy):\n    async def act(self, observation):\n        assert {name!r} in self.instructions\n        assert "truncated after 3 steps" in self.instructions\n        assert self.action_space.shape == ({actions},)\n        return self.action_space.sample()\n',
                             )
                         ]
                     )
                     agent = AlphaEvolve("Maximize reward", provider, context=restored.instructions)
                     await run_search(
-                        agent,
-                        run,
-                        rollouts,
-                        generations=1,
-                        batch_size=1,
-                        seeds=[0, 1],
-                        console=Console(file=io.StringIO()),
+                        agent, run, rollouts, generations=1, batch_size=1, seeds=[0, 1]
                     )
                     self.assertIn(restored.instructions, provider.calls[0])
                     scores = run.scores(agent.best)
                     self.assertEqual(set(scores), {0, 1})
-                    self.assertTrue(all(math.isfinite(score) for score in scores.values()))
+                    self.assertTrue(all((math.isfinite(score) for score in scores.values())))
                     self.assertEqual(agent.completed, 1)
                     self.assertEqual(agent._best.seed_scores, scores)
 
@@ -243,14 +208,10 @@ class Solution(Policy):
         from tests.providers import ScriptedProvider
 
         try:
-            import Box2D  # noqa: F401
+            import Box2D  # noqa: F401 — availability check
         except ImportError:
             self.skipTest("Install the box2d extra to test Box2D environments")
-        implementation = """from rsikit import Policy
-class Solution(Policy):
-    async def act(self, observation):
-        return self.action_space.sample()
-"""
+        implementation = "from rsikit import Policy\nclass Solution(Policy):\n    async def act(self, observation):\n        return self.action_space.sample()\n"
         for name in ("CartPole-v1", "LunarLander-v3", "BipedalWalker-v3"):
             with (
                 self.subTest(environment=name),
@@ -264,6 +225,7 @@ class Solution(Policy):
                     path=Path(directory) / "run",
                     environment=environment,
                     executor=Executor(concurrency=2),
+                    console=Console(file=io.StringIO()),
                 ) as (run, rollouts),
             ):
                 provider = ScriptedProvider(
@@ -286,21 +248,15 @@ class Solution(Policy):
                     context=environment.instructions,
                     config=Config(islands=1, meta_interval=0, patch_types=(("full", 1),)),
                 )
-                await run_search(
-                    agent,
-                    run,
-                    rollouts,
-                    generations=2,
-                    batch_size=1,
-                    seeds=(0, 1),
-                    console=Console(file=io.StringIO()),
-                )
+                await run_search(agent, run, rollouts, generations=2, batch_size=1, seeds=(0, 1))
                 self.assertEqual(len(run.policies()), 2)
                 self.assertTrue(
                     all(
-                        math.isfinite(value)
-                        for policy in run.policies()
-                        for value in run.scores(policy).values()
+                        (
+                            math.isfinite(value)
+                            for policy in run.policies()
+                            for value in run.scores(policy).values()
+                        )
                     )
                 )
                 self.assertIn(name, provider.calls[0])
@@ -308,7 +264,7 @@ class Solution(Policy):
                     self.assertEqual(len(db.exec(select(Evaluation)).all()), 2)
                     generations = db.exec(select(Generation)).all()
                     self.assertTrue(
-                        all(row.complete and row.seeds == [0, 1] for row in generations)
+                        all((row.complete and row.seeds == [0, 1] for row in generations))
                     )
                     self.assertEqual(len(generations[-1].islands[0]), 2)
 
@@ -340,6 +296,7 @@ class Solution(Policy):
                 ),
             ]
         )
+        output = io.StringIO()
         with (
             tempfile.TemporaryDirectory() as folder,
             gym.make("CartPole-v1", max_episode_steps=50) as environment,
@@ -349,20 +306,13 @@ class Solution(Policy):
                 environment=environment,
                 path=Path(folder) / "run",
                 executor=Executor(concurrency=2),
+                console=Console(file=output, width=120, force_terminal=False),
             ) as (run, rollouts),
         ):
             agent = AlphaEvolve(
                 "Balance CartPole", provider, config=Config(mode="rewrite", islands=1)
             )
-            output = io.StringIO()
-            await run_search(
-                agent,
-                run,
-                rollouts,
-                generations=2,
-                batch_size=1,
-                console=Console(file=output, width=120, force_terminal=False),
-            )
+            await run_search(agent, run, rollouts, generations=2, batch_size=1)
             generation_scores = [run.scores(policy)[0] for policy in run.policies()]
             self.assertIn("Generated Left", output.getvalue())
             self.assertIn("score=50", output.getvalue())
@@ -375,7 +325,7 @@ class Solution(Policy):
         self.assertEqual(len(provider.calls), 2)
         self.assertIn('Per-seed rewards: {"0":', provider.calls[1])
 
-    async def test_repairs_syntax_and_constructor_failures_through_real_docker(self):
+    async def test_repairs_syntax_and_constructor_failures_through_real_execution(self):
         import io
 
         from rich.console import Console
@@ -388,18 +338,8 @@ class Solution(Policy):
         from rsikit import Executor
         from tests.providers import ScriptedProvider
 
-        broken = """from rsikit import Policy
-class Solution(Policy):
-    def __init__(self, observation_space, action_space, instructions):
-        super().__init__(observation_space, action_space, instructions)
-    async def act(self, observation):
-        return 0
-"""
-        fixed = """from rsikit import Policy
-class Solution(Policy):
-    async def act(self, observation):
-        return 0
-"""
+        broken = "from rsikit import Policy\nclass Solution(Policy):\n    def __init__(self, observation_space, action_space, instructions):\n        super().__init__(observation_space, action_space, instructions)\n    async def act(self, observation):\n        return 0\n"
+        fixed = "from rsikit import Policy\nclass Solution(Policy):\n    async def act(self, observation):\n        return 0\n"
         provider = ScriptedProvider(
             [
                 _PolicyResponse(
@@ -413,24 +353,21 @@ class Solution(Policy):
                 ),
             ]
         )
+        output = io.StringIO()
         with (
             tempfile.TemporaryDirectory() as directory,
             gym.make("CartPole-v1", max_episode_steps=5) as env,
             patch.object(prompts, "TEMPLATE_ROOT", Path(alphaevolve.__file__).parent),
             recorded_run(
-                name="healing", path=Path(directory) / "run", environment=env, executor=Executor()
+                name="healing",
+                path=Path(directory) / "run",
+                environment=env,
+                executor=Executor(),
+                console=Console(file=output, force_terminal=False, width=120),
             ) as (run, rollouts),
         ):
             generator = AlphaEvolve("Balance CartPole", provider)
-            output = io.StringIO()
-            await run_search(
-                generator,
-                run,
-                rollouts,
-                generations=1,
-                batch_size=1,
-                console=Console(file=output, force_terminal=False, width=120),
-            )
+            await run_search(generator, run, rollouts, generations=1, batch_size=1)
             self.assertEqual(generator.repair_calls, 2)
             self.assertEqual(generator.completed, 1)
             self.assertEqual(generator.best.name, "Repaired")
@@ -561,10 +498,9 @@ class Solution(Policy):
         from rich.console import Console
 
         from examples.replay import record_best
-        from rsikit import Executor
         from rsikit.policy import Policy
         from tests.test_episode_storage import trajectory
-        from tests.test_run import RESPONSE, FakeSandbox
+        from tests.test_run import RESPONSE, FakeEvaluation
 
         if find_spec("moviepy") is None or find_spec("pygame") is None:
             self.skipTest("Install .[video] for video checks")
@@ -572,8 +508,8 @@ class Solution(Policy):
             Policy.from_text(RESPONSE["implementation"], name=name)
             for name in ("Low", "Best", "Failed")
         ]
-        sandbox = FakeSandbox()
-        sandbox.evaluate.side_effect = [
+        evaluation = FakeEvaluation()
+        evaluation.evaluate.side_effect = [
             trajectory(2.0),
             trajectory(30.0),
             PolicyError("bad policy"),
@@ -587,7 +523,7 @@ class Solution(Policy):
                     name="search",
                     path=original,
                     environment=env,
-                    executor=Executor(sandbox=sandbox),
+                    executor=fake_executor(evaluation=evaluation),
                 ) as (source, source_rollouts),
             ):
                 with self.assertRaises(PolicyError):
@@ -621,172 +557,13 @@ class Solution(Policy):
 
     async def test_failure_deadline_and_cleanup(self):
         for body in ("raise RuntimeError('candidate failure')", "return object()", "os._exit(3)"):
-            with self.assertRaises(PolicyError):
+            with self.assertRaises(
+                InfrastructureError if body.startswith("os._exit") else PolicyError
+            ):
                 await self.run_source(COUNTER_SOURCE.replace("return action", body))
         timeout_source = COUNTER_SOURCE.replace("return action", "while True: pass")
         with self.assertRaises(PolicyTimeout):
             await self.run_source(timeout_source, timeout=0.5)
-        from rsikit import DockerSandbox
-
-        sandbox = DockerSandbox(image="rsikit-intentionally-missing:local")
-        with self.assertRaises(InfrastructureError):
-            await sandbox.start(1)
-        self.assertIsNone(sandbox.process)
-
-    async def test_batches_share_one_container_with_independent_environment_processes(self):
-        import json
-
-        from slick import prompts
-
-        import rsikit.generation as generation
-        from rsikit import DockerSandbox, Executor, generate
-        from tests.providers import ScriptedProvider
-
-        class Environment(gym.Env):
-            instructions = "independent environment"
-
-            def __init__(self):
-                self.observation_space = spaces.Discrete(3)
-                self.action_space = spaces.Discrete(1)
-                self.count = 0
-
-            def reset(self, *, seed=None, options=None):
-                super().reset(seed=seed)
-                self.count = 0
-                return 0, {}
-
-            def step(self, action):
-                import os
-                import socket
-                import time
-
-                time.sleep(0.1)
-                self.count += 1
-                return (
-                    self.count,
-                    1.0,
-                    False,
-                    False,
-                    {"artifacts": {"worker.txt": f"{socket.gethostname()}:{os.getpid()}".encode()}},
-                )
-
-        response = json.dumps(
-            {
-                "name": "Single container",
-                "description": "Check environment instructions in an isolated worker.",
-                "implementation": (
-                    "from rsikit import Policy\nclass Solution(Policy):\n"
-                    "    async def act(self, observation):\n"
-                    "        assert self.instructions == 'independent environment'\n"
-                    "        return 0\n"
-                ),
-            }
-        )
-        with patch.object(prompts, "TEMPLATE_ROOT", Path(generation.__file__).parent / "prompts"):
-            policy = await generate("test", provider=ScriptedProvider([response]))
-        sandbox = DockerSandbox()
-        with (
-            tempfile.TemporaryDirectory() as directory,
-            gym.wrappers.TimeLimit(Environment(), max_episode_steps=2) as env,
-            patch.object(sandbox, "start", wraps=sandbox.start) as start,
-        ):
-            async with recorded_run(
-                name="pool",
-                path=Path(directory) / "run",
-                environment=env,
-                executor=Executor(sandbox=sandbox, concurrency=2),
-            ) as (run, rollouts):
-                result = await mean_rewards(rollouts, [policy], seeds=[0, 1])
-                container = sandbox.name
-                self.assertIsNotNone(container)
-                result = await mean_rewards(rollouts, [policy], seeds=[2, 3])
-                self.assertEqual(result, {policy.id: 2.0})
-                self.assertEqual(sandbox.name, container)
-                start.assert_awaited_once_with(2)
-                workers = [p.read_text().split(":") for p in run.path.rglob("worker.txt")]
-                self.assertEqual(len(workers), 4)
-                self.assertEqual(len({host for host, pid in workers}), 1)
-                self.assertEqual(len({pid for host, pid in workers}), 4)
-                self.assertEqual(env.unwrapped.count, 0)
-            self.assertIsNone(sandbox.name)
-            inspected = await asyncio.create_subprocess_exec(
-                "docker",
-                "inspect",
-                container,
-                stdout=asyncio.subprocess.DEVNULL,
-                stderr=asyncio.subprocess.DEVNULL,
-            )
-            self.assertNotEqual(await inspected.wait(), 0)
-
-    async def test_batch_timeout_and_cancellation_remove_shared_container(self):
-        from rsikit import DockerSandbox, Executor
-        from rsikit.policy import Policy
-
-        loop = asyncio.get_running_loop()
-        previous_handler = loop.get_exception_handler()
-        self.addCleanup(loop.set_exception_handler, previous_handler)
-        loop_errors = []
-        loop.set_exception_handler(lambda loop, context: loop_errors.append(context))
-        policy = Policy.from_text(
-            "from rsikit import Policy\nclass Solution(Policy):\n    async def act(self, observation):\n        while True: pass\n",
-            name="stuck",
-        )
-        sandbox = DockerSandbox()
-        sandbox.episode_timeout = 0.1
-        executor = Executor(sandbox=sandbox)
-        with (
-            tempfile.TemporaryDirectory() as directory,
-            gym.make("CartPole-v1") as env,
-            recorded_run(
-                name="cleanup",
-                path=Path(directory) / "run",
-                environment=env,
-                executor=executor,
-            ) as (run, rollouts),
-        ):
-            with self.assertRaises(PolicyTimeout):
-                await mean_rewards(rollouts, [policy])
-            self.assertEqual(run.scores(policy), {0: None})
-            self.assertIsNone(sandbox.name)
-
-            started, release = asyncio.Event(), asyncio.Event()
-            create_process = asyncio.create_subprocess_exec
-            interrupted_creation, processes = [], []
-
-            async def delayed_create(*args, **kwargs):
-                process = await create_process(*args, **kwargs)
-                if args[:2] == ("docker", "run"):
-                    processes.append(process)
-                    started.set()
-                    try:
-                        await release.wait()
-                    except asyncio.CancelledError:
-                        interrupted_creation.append(True)
-                        raise
-                return process
-
-            sandbox.episode_timeout = 60
-            with patch("rsikit.sandbox.docker.asyncio.create_subprocess_exec", delayed_create):
-                pending = asyncio.create_task(finish_pending(rollouts))
-                await asyncio.wait_for(started.wait(), 10)
-                name = sandbox.name
-                pending.cancel()
-                release.set()
-                with self.assertRaises(asyncio.CancelledError):
-                    await pending
-            for process in processes:
-                await process.communicate()
-            self.assertEqual(interrupted_creation, [])
-            self.assertIsNone(sandbox.name)
-            inspect = await asyncio.create_subprocess_exec(
-                "docker",
-                "inspect",
-                name,
-                stdout=asyncio.subprocess.DEVNULL,
-                stderr=asyncio.subprocess.DEVNULL,
-            )
-            self.assertNotEqual(await inspect.wait(), 0)
-            self.assertEqual(loop_errors, [])
 
 
 if __name__ == "__main__":

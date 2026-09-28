@@ -2,7 +2,7 @@
 
 The default `alphaevolve.paper` implementation uses a persistent MAP-Elites/island
 population, multiple maximized metrics, evaluation feedback, and overlapping
-generation/evaluation. `Run` executes policies in the existing sandbox. Slick
+generation/evaluation. `Executor` evaluates policies; `Run` stores their results. Slick
 handles model calls and Pydantic validates generated responses.
 
 ## Paper implementation
@@ -55,7 +55,7 @@ default ranges are local choices; use multiple seeds to measure variability:
 | BipedalWalker | `(-200, 350, 22)` | `(0, 200, 10)` |
 
 ```sh
-.venv/bin/python -B -m examples.alphaevolve --env BipedalWalker-v3 --seeds 0 1 2 3 4 5 6 7 8 9
+./scripts/run examples.alphaevolve --env BipedalWalker-v3 --seeds 0 1 2 3 4 5 6 7 8 9
 ```
 
 `paper` is the default variant. BipedalWalker defaults to complete rewrites;
@@ -68,7 +68,7 @@ controller; it does not prove that all statements affect the returned action.
 generation barrier. The first batch seeds selection; subsequent generation and
 evaluation overlap with bounded pending work. `--generation-concurrency` controls
 both model proposals and concurrent runtime repairs, sharing one limit;
-`--concurrency` controls sandbox episode workers. Independent failed policies are
+`--concurrency` controls episode processes. Independent failed policies are
 repaired concurrently in all variants, with each policy retaining its repair
 budget. Duplicate policies share one repair, and cancellation or provider failure
 cancels and drains sibling repairs before saving the final search state.
@@ -108,7 +108,7 @@ cached but rejected/partial evaluations never enter the breeding archive.
 ### Resume a paper run
 
 ```sh
-.venv/bin/python -B -m examples.alphaevolve --resume runs/YOUR_RUN --generations 25
+./scripts/run examples.alphaevolve --resume runs/YOUR_RUN --generations 25
 ```
 
 This continues in the same directory from `population.sqlite`, loading the resolved
@@ -260,8 +260,8 @@ root once, as below; selecting the class selects its prompts too.
 ## Comparing the variants
 
 ```bash
-.venv/bin/python -B -m examples.alphaevolve --variant original --env LunarLander-v3 --generations 10 --batch-size 25 --seeds 0 1 2 3 4 5 6 7 8 9 --search-seed 0
-.venv/bin/python -B -m examples.alphaevolve --variant improved --env LunarLander-v3 --generations 10 --batch-size 25 --seeds 0 1 2 3 4 5 6 7 8 9 --search-seed 0
+./scripts/run examples.alphaevolve --variant original --env LunarLander-v3 --generations 10 --batch-size 25 --seeds 0 1 2 3 4 5 6 7 8 9 --search-seed 0
+./scripts/run examples.alphaevolve --variant improved --env LunarLander-v3 --generations 10 --batch-size 25 --seeds 0 1 2 3 4 5 6 7 8 9 --search-seed 0
 ```
 
 Each command creates a separate Run. Its name includes the variant; `experiment.json`
@@ -296,7 +296,7 @@ supply its own SQLModel records and fields.
 Individual episode scores remain in the existing `policy.scores` column. Join by
 policy ID instead of relying on generated names, which can repeat.
 
-The CLI commits proposal metadata before sandbox dispatch, failed outcomes before
+The CLI commits proposal metadata before episode dispatch, failed outcomes before
 runtime repairs, replacements before their evaluation, and final results and island
 snapshots after each generation. A runtime replacement gets a new revision of the
 same attempt, preserving its failed predecessor. Syntax repairs before a valid
@@ -456,7 +456,7 @@ These rules and the mutation response schema belong to AlphaEvolve's own
 `generation.py`. Generation and repair operations return policy definitions;
 the optimizer explicitly calls `validate_policy` before accepting them.
 Rewrites preserve the immutable skeleton. Syntax and the top-level `Solution` class
-are checked before a policy is returned; execution remains in the sandbox.
+are checked before a policy is returned; execution remains in an episode process.
 Weighted provider ensembles and prompt variants remain available. Optional generated
 search guidance is rewarded by positive offspring improvement after `update`.
 
@@ -488,7 +488,7 @@ returns the survivors; runtime `repair()` returns `None` and removes that policy
 from pending optimizer state. Provider errors, model-call timeouts, unexpected failures,
 and cancellation propagate without being treated as bad policy output.
 
-The CLI also repairs sandbox `PolicyError` failures, including constructor errors,
+The CLI also repairs `PolicyError` failures, including constructor errors,
 invalid actions, and policy execution timeouts. The executor finishes the batch,
 preserving successful results, and exposes failed-policy diagnostics through
 `error.failures`. Infrastructure errors take priority over policy failures and
@@ -534,21 +534,19 @@ work; it does not restore the optimizer's pending proposals, RNG, or islands.
 ## Example
 
 ```sh
-uv pip install --python .venv/bin/python -e '.[openrouter]'
-docker build -t rsikit-sandbox:local -f rsikit/sandbox/Dockerfile .
 export OPENROUTER_API_KEY='your-key'
-.venv/bin/python -B -m examples.alphaevolve
+./scripts/run examples.alphaevolve
 ```
 
 The default attempts 250 proposals (`25 * 10`) using
 `openai/gpt-oss-120b:nitro`. For a short run (use `--max-repairs 0` to disable healing):
 
 ```sh
-.venv/bin/python -B -m examples.alphaevolve --generations 2 --batch-size 3 --max-steps 100
+./scripts/run examples.alphaevolve --generations 2 --batch-size 3 --max-steps 100
 ```
 
 `--generation-concurrency` controls concurrent proposals (default 4).
-`--concurrency` separately controls sandbox evaluations (default 4).
+`--concurrency` separately controls episode evaluations (default 4).
 
 Select a harder environment with `--env LunarLander-v3` (continuous actions and
 wind) or `--env BipedalWalker-v3` (normal terrain). Install `.[openrouter,box2d]`

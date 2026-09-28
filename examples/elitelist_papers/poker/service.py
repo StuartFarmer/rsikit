@@ -5,14 +5,45 @@ import asyncio
 import json
 import multiprocessing as mp
 import os
+import signal
 import socket
 import sys
 from tempfile import TemporaryDirectory
 
 from poker.worker import probe, serve_table
-from rsikit.sandbox.service import frame, read_frame, reap
+from rsikit.evaluation import InfrastructureError
 
 MAX_FRAME = 8 * 1024 * 1024
+
+
+def frame(value):
+    data = json.dumps(value, allow_nan=False, separators=(",", ":")).encode()
+    if len(data) > MAX_FRAME:
+        raise InfrastructureError("Evaluation frame exceeds 64 MiB")
+    return data + b"\n"
+
+
+async def read_frame(reader):
+    line = await reader.readline()
+    if not line.endswith(b"\n") or len(line) > MAX_FRAME + 1:
+        raise InfrastructureError("Missing or oversized evaluation frame")
+    value = json.loads(line)
+    if not isinstance(value, dict):
+        raise InfrastructureError("Evaluation frame must be an object")
+    return value
+
+
+def reap(process, *, group=False):
+    if process.pid is not None:
+        if group:
+            try:
+                os.killpg(process.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+        if process.is_alive():
+            process.kill()
+        process.join()
+    process.close()
 
 
 async def serve(workers):

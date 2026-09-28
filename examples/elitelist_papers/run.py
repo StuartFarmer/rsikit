@@ -8,7 +8,6 @@ import json
 import math
 import os
 import shutil
-import subprocess
 import time
 import zipfile
 from dataclasses import asdict, replace
@@ -20,7 +19,6 @@ from statistics import fmean
 from uuid import uuid4
 
 import gymnasium as gym
-from rich.console import Console
 from slick import prompts
 from slick.providers import OpenRouterAPI
 from sqlalchemy import inspect as inspect_database
@@ -32,7 +30,6 @@ from research.elitesearch import Config, EliteSearch, Generation, Organism
 from research.rollouts import Rollouts
 from rsikit import Executor, Run
 from rsikit.policy import Policy
-from rsikit.sandbox.docker import DockerSandbox
 
 TASKS = (
     "CartPole-v1",
@@ -150,20 +147,13 @@ class LoggedOpenRouter(OpenRouterAPI):
                 stream.write(json.dumps(record, default=str) + "\n")
 
 
-def command_output(*command):
-    """Optional provenance; a missing git or Docker executable is recorded as unknown."""
-    try:
-        result = subprocess.run(command, cwd=ROOT, capture_output=True, text=True, timeout=10)
-    except (OSError, subprocess.TimeoutExpired):
-        return None
-    return result.stdout.strip() if result.returncode == 0 else None
-
-
 def snapshot(path):
     files = [
         ROOT / "pyproject.toml",
         ROOT / "uv.lock",
-        ROOT / "rsikit/sandbox/Dockerfile",
+        ROOT / "Dockerfile",
+        ROOT / "scripts/run",
+        ROOT / ".dockerignore",
         ROOT / "research/__init__.py",
         ROOT / "research/rollouts.py",
         ROOT / "research/rewards.py",
@@ -262,7 +252,7 @@ async def main(argv=None):
     parser.add_argument("--max-repairs", type=int, default=5)
     parser.add_argument("--max-output-tokens", type=int, default=16384)
     parser.add_argument("--generation-concurrency", type=int, default=4)
-    parser.add_argument("--concurrency", type=int, default=4, help="Docker episode workers")
+    parser.add_argument("--concurrency", type=int, default=4, help="Concurrent episode processes")
     parser.add_argument(
         "--episode-timeout",
         type=float,
@@ -401,7 +391,7 @@ async def main(argv=None):
         )
         executor = Executor(
             concurrency=args.concurrency,
-            sandbox=DockerSandbox(episode_timeout=args.episode_timeout),
+            episode_timeout=args.episode_timeout,
         )
         try:
             run_context = (
@@ -482,6 +472,8 @@ async def main(argv=None):
                 context_sha256=sha256(env.instructions.encode()).hexdigest(),
                 config=asdict(config),
                 checkpoint_generation=len(agent.generations),
+                docker_image=os.environ.get("RSIKIT_IMAGE_ID"),
+                git_revision=os.environ.get("RSIKIT_GIT_REVISION"),
             )
             history.append(attempt)
             write_json(run.path / "attempts.json", history)
@@ -511,16 +503,8 @@ async def main(argv=None):
                             versions={
                                 item.metadata["Name"]: item.version for item in distributions()
                             },
-                            git_revision=command_output("git", "rev-parse", "HEAD"),
-                            git_status=command_output("git", "status", "--short"),
-                            docker_image=command_output(
-                                "docker",
-                                "image",
-                                "inspect",
-                                "rsikit-sandbox:local",
-                                "--format",
-                                "{{.Id}}",
-                            ),
+                            git_revision=os.environ.get("RSIKIT_GIT_REVISION"),
+                            docker_image=os.environ.get("RSIKIT_IMAGE_ID"),
                         ),
                     )
                 prompts.TEMPLATE_ROOT = Path(elitesearch.__file__).parent / "prompts"
@@ -530,7 +514,6 @@ async def main(argv=None):
                     rollouts,
                     seeds=args.seeds,
                     heldout_seeds=args.heldout_seeds,
-                    console=Console(),
                 )
                 await export_curves(agent, run, rollouts, args.heldout_seeds)
                 state["status"] = "completed"

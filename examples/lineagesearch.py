@@ -9,18 +9,6 @@ import os
 from contextlib import AsyncExitStack
 from pathlib import Path
 
-from rich.console import Console
-from rich.progress import (
-    BarColumn,
-    MofNCompleteColumn,
-    Progress,
-    SpinnerColumn,
-    TextColumn,
-    TimeElapsedColumn,
-)
-from rich.table import Table
-from rich.text import Text
-from rich.tree import Tree
 from slick import prompts
 from slick.providers import OpenRouterAPI
 
@@ -30,153 +18,68 @@ from research.rewards import measure_rewards as measure
 from research.rollouts import Rollouts
 from rsikit import Executor, Run
 from rsikit.envs.tasks import TASKS, make_environment
-from rsikit.progress import ProgressHandler, show_scores
 
 
-async def run_search(agent, run, rollouts, *, seeds, heldout_seeds, console=None):
+async def run_search(agent, run, rollouts, *, seeds, heldout_seeds):
     """Show generation, repair, evaluation and family progress; retain messages in run.log."""
-    console = console or Console()
-    loggers = (
-        logging.getLogger("research.lineagesearch"),
-        logging.getLogger("rsikit"),
-        logging.getLogger("research.rewards"),
-    )
-    logger = loggers[0]
-    settings = [(item.level, item.propagate) for item in loggers]
+    logger = logging.getLogger("research")
     previous_checkpoint = agent.on_checkpoint
-    reported_batches = {}
     reported_plan = False
-    with Progress(
-        SpinnerColumn(),
-        TextColumn("{task.description}"),
-        BarColumn(),
-        MofNCompleteColumn(),
-        TimeElapsedColumn(),
-        console=console,
-    ) as progress:
-        attempts = progress.add_task("Attempt budget", total=agent.config.max_attempts)
-        families = progress.add_task("Families complete", total=agent.config.families)
-        planning = progress.add_task("Planning families", total=agent.config.families)
-        calls = progress.add_task("Model calls completed", total=None)
-        display = ProgressHandler(progress, overlap=True)
-        log = logging.FileHandler(run.path / "run.log", encoding="utf-8")
-        log.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(name)s: %(message)s"))
-        for item in loggers:
-            item.addHandler(display)
-            item.addHandler(log)
-            item.setLevel(logging.INFO)
-            item.propagate = False
 
-        def checkpoint(current):
-            nonlocal reported_batches, reported_plan
-            run.save(*current.records())
-            if previous_checkpoint is not None:
-                previous_checkpoint(current)
-            progress.update(attempts, completed=current.study.attempts)
-            progress.update(
-                calls, completed=sum("raw" in c or "error" in c for c in current.study.calls)
-            )
-            progress.update(families, completed=sum(f.status != "active" for f in current.families))
-            if not reported_plan:
-                progress.update(
-                    planning,
-                    description=current.study.phase.replace("_", " ").capitalize(),
-                    completed=sum(
-                        bool(f.initial_approaches) or f.status != "active" for f in current.families
-                    ),
-                )
-            if current.study.phase == "search" and not reported_plan:
-                reported_plan = True
-                plan = dict(
-                    task=current.task,
-                    levels=["mechanism family", "experimental approach", "policy"],
-                    families=[
-                        f.model_dump(
-                            include={"id", "name", "mechanism", "status", "initial_approaches"}
-                        )
-                        for f in current.families
-                    ],
-                    decompositions=current.study.decompositions,
-                )
-                (run.path / "decomposition.json").write_text(
-                    json.dumps(plan, indent=2) + "\n", encoding="utf-8"
-                )
-                tree = Tree("Initial decomposition")
-                for family in current.families:
-                    branch = tree.add(Text(family.name + ": " + family.mechanism))
-                    for approach in family.initial_approaches:
-                        branch.add(Text(approach["hypothesis"] + " — " + approach["mechanism"]))
-                    if not family.initial_approaches:
-                        branch.add("Decomposition exhausted")
-                console.print(tree)
-                progress.update(planning, description="Initial decomposition complete")
-            for family in current.families:
-                previous = reported_batches.get(family.id, 0)
-                if family.batches <= previous:
-                    continue
-                rows = [row for row in current.trials if row.family_id == family.id]
-                batches = sorted({row.batch for row in rows})[previous : family.batches]
-                for batch in batches:
-                    ids = {
-                        row.policy_id
-                        for row in rows
-                        if row.batch == batch and row.policy_id is not None
-                    }
-                    show_scores(
-                        [p for p in run.policies() if p.id in ids], run, console, seeds=seeds
+    def checkpoint(current):
+        nonlocal reported_plan
+        run.save(*current.records())
+        if previous_checkpoint is not None:
+            previous_checkpoint(current)
+        if current.study.phase == "search" and (not reported_plan):
+            reported_plan = True
+            plan = dict(
+                task=current.task,
+                levels=["mechanism family", "experimental approach", "policy"],
+                families=[
+                    f.model_dump(
+                        include={"id", "name", "mechanism", "status", "initial_approaches"}
                     )
-                reported_batches[family.id] = family.batches
+                    for f in current.families
+                ],
+                decompositions=current.study.decompositions,
+            )
+            (run.path / "decomposition.json").write_text(
+                json.dumps(plan, indent=2) + "\n", encoding="utf-8"
+            )
 
-        agent.on_checkpoint = checkpoint
-        try:
-            logger.info("Run: %s", run.path)
-            study = await agent.run()
-            summary = dict(
-                reason=study.reason,
-                attempts=study.attempts,
-                calls=len(study.calls),
-                repairs=sum(row.repairs for row in agent.trials),
-                families=[f.model_dump() for f in agent.families],
-                best_id=None if agent.best is None else agent.best.id,
-            )
-            # Write search completion before any held-out infrastructure can fail.
-            destination = run.path / "summary.json"
+    agent.on_checkpoint = checkpoint
+    try:
+        logger.info("Run: %s", run.path)
+        study = await agent.run()
+        summary = dict(
+            reason=study.reason,
+            attempts=study.attempts,
+            calls=len(study.calls),
+            repairs=sum((row.repairs for row in agent.trials)),
+            families=[f.model_dump() for f in agent.families],
+            best_id=None if agent.best is None else agent.best.id,
+        )
+        destination = run.path / "summary.json"
+        destination.write_text(json.dumps(summary, indent=2) + "\n", encoding="utf-8")
+        if agent.best is not None:
+            logger.info("Evaluating final incumbent on held-out seeds")
+            heldout = (await measure(rollouts, [agent.best], heldout_seeds))[agent.best.id]
+            summary["heldout"] = dict(scores=heldout.scores, failure=heldout.failure)
             destination.write_text(json.dumps(summary, indent=2) + "\n", encoding="utf-8")
-            table = Table("Family", "Status", "Best score", "Stale batches")
-            for family in agent.families:
-                score = (
-                    "—"
-                    if family.best_id is None
-                    else f"{agent.trials[family.best_id - 1].score:.3g}"
-                )
-                table.add_row(Text(family.name), family.status, score, str(family.stale_batches))
-            console.print(table)
-            if agent.best is not None:
-                logger.info("Evaluating final incumbent on held-out seeds")
-                heldout = (await measure(rollouts, [agent.best], heldout_seeds))[agent.best.id]
-                summary["heldout"] = dict(scores=heldout.scores, failure=heldout.failure)
-                destination.write_text(json.dumps(summary, indent=2) + "\n", encoding="utf-8")
-                show_scores([agent.best], run, console, seeds=heldout_seeds)
-            logger.info(
-                "Stopped: %s; %s attempts, %s model calls, %s policy repairs",
-                study.reason,
-                study.attempts,
-                len(study.calls),
-                summary["repairs"],
-            )
-            return study
-        except Exception:
-            logger.exception("Search failed; saved evidence is in %s", run.path)
-            raise
-        finally:
-            agent.on_checkpoint = previous_checkpoint
-            for item, (level, propagate) in zip(loggers, settings):
-                item.removeHandler(display)
-                item.removeHandler(log)
-                item.setLevel(level)
-                item.propagate = propagate
-            display.close()
-            log.close()
+        logger.info(
+            "Stopped: %s; %s attempts, %s model calls, %s policy repairs",
+            study.reason,
+            study.attempts,
+            len(study.calls),
+            summary["repairs"],
+        )
+        return study
+    except Exception:
+        logger.exception("Search failed; saved evidence is in %s", run.path)
+        raise
+    finally:
+        agent.on_checkpoint = previous_checkpoint
 
 
 async def main():

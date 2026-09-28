@@ -55,7 +55,7 @@ the worker image after adding this environment so the new module is installed.
 During betting, action `i` chooses `bet_sizes[i]`. During play, `0` stands, `1`
 hits, `2` doubles, and `3` splits. Invalid or masked actions raise Gymnasium's
 `InvalidAction` before changing the game. The episode runner converts this to a
-recoverable `PolicyError`, allowing optimizer repair without closing the sandbox
+recoverable `PolicyError`, allowing optimizer repair without interrupting sibling
 or failing sibling candidates. The action space is `Discrete(max(4, len(bet_sizes)))`.
 
 A zero wager **sits out one round** (action `4` with the default bets). The agent
@@ -145,7 +145,7 @@ The environment enables this curriculum; it does not train an agent itself.
 For a new test run with automatic leader videos:
 
 ```sh
-.venv/bin/python -m examples.blackjack_train --output runs/blackjack-test
+./scripts/run examples.blackjack_train --output runs/blackjack-test
 ```
 
 This uses 3 generations, 8 candidates per generation, 4 retained elites, 10
@@ -173,10 +173,9 @@ rules and allowing sitting out. Start with a small EliteSearch run:
 
 ```sh
 # Rebuild so Docker can import the new environment module.
-docker build -t rsikit-sandbox:local -f rsikit/sandbox/Dockerfile .
 
 # Requires OPENROUTER_API_KEY; this makes paid model calls.
-.venv/bin/python -B -m examples.elitesearch \
+./scripts/run examples.elitesearch \
   --env Blackjack \
   --elites 3 --population 8 --generations 3 \
   --generation-concurrency 4 --concurrency 4 \
@@ -214,10 +213,10 @@ or intermediate animation frames.
 Generate the initial design preview with:
 
 ```sh
-.venv/bin/python -m examples.blackjack_screen
+./scripts/run examples.blackjack_screen --output runs/blackjack-screen.png
 ```
 
-This saves [blackjack-screen.png](blackjack-screen.png) from a real baseline
+This saves `runs/blackjack-screen.png` on the host from a real baseline
 replay: seed 301, action 68, two split hands, and +3 net points. Use `--seed`,
 `--steps`, and `--output` to select another frame. Install the `video` extra
 if Pillow is unavailable.
@@ -232,7 +231,7 @@ distributed under CC0; the license is included with the bundled assets.
 ## All-seed generation videos
 
 ```sh
-.venv/bin/python -m examples.blackjack_videos runs/blackjack-smoke3
+./scripts/run examples.blackjack_videos runs/blackjack-smoke3
 ```
 
 This creates `runs/blackjack-smoke3-all-seeds-videos/index.html`, with the top four
@@ -243,7 +242,7 @@ current episode; the points timeline accumulates across all seeds. Policy memory
 resets at seed boundaries. Original scores are checked against every replay.
 
 The exporter reads the saved `shoes_per_seed` setting; runs predating this option
-retain one shoe per seed. It runs generated code in the existing Docker sandbox,
+retain one shoe per seed. It runs generated code in the application container,
 saves action traces, and streams frames to FFmpeg instead of retaining whole
 videos in memory. `--top`, `--workers`, and `--output` control selection, rendering
 processes, and destination. Repeated leaders reuse the same video. Re-running an
@@ -267,7 +266,7 @@ reserve. There is no terminal signal between ordinary rounds.
 The saved-run exporter can visualize unseen seed panels independently of search:
 
 ```sh
-.venv/bin/python -m examples.blackjack_videos runs/blackjack-long \
+./scripts/run examples.blackjack_videos runs/blackjack-long \
   --split holdout --top 1 --output runs/blackjack-heldout-videos
 ```
 
@@ -281,7 +280,7 @@ and replay means separately, without expecting held-out scores to match training
 ## Performance and verification
 
 ```sh
-.venv/bin/python -m examples.blackjack --hands 100000 --repeats 3 --compare-gym
+./scripts/run examples.blackjack --hands 100000 --repeats 3 --compare-gym
 .venv/bin/python -m unittest tests.test_blackjack
 ```
 
@@ -306,7 +305,7 @@ hardware-independent guarantee.
 
 Tests cover deterministic deals, natural payouts, ace handling, doubling,
 splitting, soft-17 rules, hidden-card isolation, legal actions, finite shoes,
-Gymnasium's checker, sandbox space serialization, and the existing episode runner.
+Gymnasium's checker, space compatibility, and the existing episode runner.
 
 ## Existing environments reviewed
 

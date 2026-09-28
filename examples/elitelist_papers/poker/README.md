@@ -9,11 +9,12 @@ From the **repository root**, install the optional engine and build the worker:
 
 ```sh
 rtk proxy uv pip install --python .venv/bin/python -r examples/elitelist_papers/poker/requirements.txt
+rtk proxy docker build -t rsikit:local .
 rtk proxy docker build -t elitetable-poker:local \
   -f examples/elitelist_papers/poker/Dockerfile examples/elitelist_papers
 ```
 
-The image extends the existing `rsikit-sandbox:local` image. No host source,
+The image extends the existing `rsikit:local` image. No host source,
 credentials or volumes are mounted into the evaluator container.
 
 Run a small demo with 12 fixed reference policies and no API calls:

@@ -2,6 +2,7 @@
 
 import argparse
 import json
+import logging
 import os
 from contextlib import AsyncExitStack
 from pathlib import Path
@@ -16,7 +17,7 @@ from slick.providers import OpenRouterAPI
 import rsikit.generation as generation
 from research.rewards import mean_rewards
 from research.rollouts import Rollouts
-from rsikit import DockerSandbox, Executor, Run, generate
+from rsikit import Executor, Run, generate
 from rsikit.evaluation import PolicyError
 
 MODEL = "openai/gpt-oss-120b:nitro"
@@ -39,9 +40,7 @@ async def run_demo(
     async with AsyncExitStack() as stack:
         video_folder = stack.enter_context(TemporaryDirectory())
         environment = stack.enter_context(make_environment(max_steps, video, video_folder))
-        executor = await stack.enter_async_context(
-            Executor(sandbox=DockerSandbox(), concurrency=concurrency)
-        )
+        executor = await stack.enter_async_context(Executor(concurrency=concurrency))
         run = await stack.enter_async_context(
             Run.create(
                 name="cartpole-comparison",
@@ -52,21 +51,152 @@ async def run_demo(
         (run.path / "experiment.json").write_text(
             json.dumps(dict(seeds=list(seeds), max_steps=max_steps))
         )
-        print(f"Run: {run.path}", flush=True)
+        logger = logging.getLogger("research.inner_loop")
+        logger.info(
+            "Starting policy comparison",
+            extra={
+                "progress": dict(
+                    kind="search_started",
+                    optimizer="Policy comparison",
+                    total_candidates=len(APPROACHES),
+                    total_generations=1,
+                    columns={},
+                    resumed=False,
+                )
+            },
+        )
+        logger.info(
+            "Generating five approaches",
+            extra={
+                "progress": dict(
+                    kind="batch_started",
+                    batch_id="generic",
+                    label="Generation 1",
+                    total_candidates=len(APPROACHES),
+                    total_generations=1,
+                )
+            },
+        )
         policies = []
         for index, approach in enumerate(APPROACHES, 1):
-            print(f"[{index}/5] Generating {approach}...", flush=True)
+            logger.info("[%s/5] Generating %s", index, approach)
             policy = await generate(
                 task.render(approach=approach, max_steps=max_steps), provider=provider
             )
             policies.append(policy)
             run.save_policy(policy)
-        print(f"Evaluating {len(policies)} policies, concurrency={concurrency}...", flush=True)
-        try:
-            await mean_rewards(rollouts, policies, seeds=seeds)
-        except PolicyError as exc:
-            print(f"Policy evaluation failed: {exc}", flush=True)
+        await evaluate_policies(rollouts, policies, seeds)
         return write_report(run)
+
+
+async def evaluate_policies(rollouts, policies, seeds, *, resumed=False):
+    """Complete this comparison's full seed panel and report its final decisions."""
+    logger = logging.getLogger("research.inner_loop")
+    policies, seeds = list(policies), tuple(seeds)
+    if resumed:
+        logger.info(
+            "Resuming policy comparison",
+            extra={
+                "progress": dict(
+                    kind="search_started",
+                    optimizer="Policy comparison",
+                    total_candidates=len(policies),
+                    total_generations=1,
+                    columns={},
+                    resumed=True,
+                )
+            },
+        )
+    logger.info(
+        "Evaluating %s policies",
+        len(policies),
+        extra={
+            "progress": dict(
+                kind="batch_started",
+                batch_id="generic",
+                label="Generation 1",
+                total_candidates=len(policies),
+            )
+        },
+    )
+    records = [
+        dict(
+            kind="candidate",
+            batch_id="generic",
+            attempt_id=getattr(p, "_progress_attempt", p.id),
+            revision=0,
+            proposal_done=True,
+            policy_id=p.id,
+            name=p.name,
+            description=p.description,
+        )
+        for p in policies
+    ]
+    for row in records:
+        logger.info(
+            "Evaluating %s", row["name"], extra={"progress": dict(row, status="evaluating")}
+        )
+    failures = {}
+    try:
+        await mean_rewards(rollouts, policies, seeds=seeds)
+    except PolicyError as exc:
+        failures = exc.failures
+        logger.exception("Policy evaluation failed")
+    leaders = []
+    for policy, row in zip(policies, records):
+        values = [rollouts.run.scores(policy).get(seed) for seed in seeds]
+        complete = (
+            bool(values)
+            and all(value is not None for value in values)
+            and policy.id not in failures
+        )
+        score = fmean(values) if complete else None
+        logger.info(
+            "%s: score=%s",
+            policy.name,
+            score,
+            extra={
+                "progress": dict(
+                    row,
+                    status="evaluated" if complete else "failed",
+                    score=score,
+                    error=failures.get(policy.id),
+                )
+            },
+        )
+        if complete:
+            leaders.append(
+                dict(
+                    id=policy.id,
+                    name=policy.name,
+                    description=policy.description,
+                    score=score,
+                    generation=1,
+                    extras={},
+                )
+            )
+    logger.info(
+        "Comparison leaderboard",
+        extra={
+            "progress": dict(
+                kind="leaderboard", rows=sorted(leaders, key=lambda row: -row["score"])
+            )
+        },
+    )
+    logger.info(
+        "Comparison complete",
+        extra={"progress": dict(kind="batch_finished", batch_id="generic", status="completed")},
+    )
+    logger.info(
+        "Search complete",
+        extra={
+            "progress": dict(
+                kind="search_finished",
+                status="completed",
+                reason="completed with failures" if failures else "completed",
+            )
+        },
+    )
 
 
 def make_environment(max_steps, video, video_folder):
@@ -120,11 +250,9 @@ async def main():
             environment = stack.enter_context(
                 make_environment(saved["max_steps"], args.video, video_folder)
             )
-            executor = await stack.enter_async_context(
-                Executor(sandbox=DockerSandbox(), concurrency=args.concurrency)
-            )
-            await mean_rewards(
-                Rollouts(environment, executor, run), run.policies(), seeds=saved["seeds"]
+            executor = await stack.enter_async_context(Executor(concurrency=args.concurrency))
+            await evaluate_policies(
+                Rollouts(environment, executor, run), run.policies(), saved["seeds"], resumed=True
             )
             write_report(run)
         return

@@ -18,6 +18,7 @@ from statistics import fmean, stdev
 from typing import Annotated
 
 from pydantic import BaseModel, Field, StrictInt, StringConstraints, ValidationError
+from rich.table import Column
 from slick import parse, render
 from slick.providers import Provider
 from sqlmodel import SQLModel
@@ -126,6 +127,72 @@ class LineageSearch:
 
     def records(self) -> list[SQLModel]:
         return [self.study, *self.families, *self.trials]
+
+    leaderboard_columns = {
+        "family": Column("Family"),
+        "operation": Column("Operation"),
+        "parent": Column("Parent"),
+    }
+
+    def _log_candidate(self, row, *, terminal=False):
+        status = {
+            "planning": "planned",
+            "rejected": "repairing",
+            "execution_failed": "repairing",
+        }.get(row.status, row.status)
+        if terminal and status != "evaluated":
+            status = "discarded"
+        logger.info(
+            "%s: %s — %s",
+            row.name or f"Attempt {row.id}",
+            status,
+            row.description,
+            extra={
+                "progress": dict(
+                    kind="candidate",
+                    batch_id=str(row.batch),
+                    attempt_id=str(row.id),
+                    revision=row.repairs,
+                    status=status,
+                    proposal_done=bool(row.policy_id),
+                    policy_id=row.policy_id or "—",
+                    name=row.name,
+                    description=row.description,
+                    score=row.score,
+                    error=row.error,
+                )
+            },
+        )
+
+    def _log_leaderboard(self):
+        rows = sorted(
+            (self.trials[f.best_id - 1] for f in self.families if f.best_id is not None),
+            key=lambda row: (-row.score, row.id),
+        )
+        logger.info(
+            "Family leaderboard: %s entries",
+            len(rows),
+            extra={
+                "progress": dict(
+                    kind="leaderboard",
+                    rows=[
+                        dict(
+                            id=row.policy_id or str(row.id),
+                            name=row.name,
+                            description=row.description,
+                            score=row.score,
+                            generation=row.batch,
+                            extras=dict(
+                                family=self.families[row.family_id - 1].name,
+                                operation=row.kind,
+                                parent=row.parent_id,
+                            ),
+                        )
+                        for row in rows
+                    ],
+                )
+            },
+        )
 
     def _checkpoint(self):
         # ponytail: full in-memory history snapshots; use incremental writes for very long runs.
@@ -451,6 +518,7 @@ class LineageSearch:
         self._policies[row.id] = policy
         row.policy_id, row.status, row.error = policy.id, "generated", None
         row.score, row.seed_scores, row.feedback = None, {}, ""
+        self._log_candidate(row)
         logger.info(
             "Generated %s — %s",
             policy.name,
@@ -473,6 +541,7 @@ class LineageSearch:
             diagnostic = row.model_dump(exclude={"revisions"})
             row.repairs += 1
             row.status = "repairing"
+            self._log_candidate(row)
             self._checkpoint()
             logger.warning(
                 "Repairing attempt %s (%s/%s): %s",
@@ -508,6 +577,7 @@ class LineageSearch:
             async with slots:
                 if row.status != "execution_failed":
                     row.status = "generating"
+                    self._log_candidate(row)
                     try:
                         approach = row.model_dump(
                             include={"hypothesis", "mechanism", "change", "test"}
@@ -552,6 +622,7 @@ class LineageSearch:
         async with self._evaluation_lock:
             for row in generated:
                 row.status = "evaluating"
+                self._log_candidate(row)
             self._checkpoint()
             results = await self.evaluate([self._policies[row.id] for row in generated])
         if set(results) != {row.policy_id for row in generated}:
@@ -577,6 +648,7 @@ class LineageSearch:
             else:
                 row.seed_scores = {str(seed): score for seed, score in result.scores.items()}
                 row.score, row.status = fmean(result.scores.values()), "evaluated"
+            self._log_candidate(row)
 
     def _improves(self, child, parent, minimum=0.0):
         differences = [
@@ -681,7 +753,21 @@ class LineageSearch:
             for i in range(count)
         ]
         data = self._evidence(family, parent)
+        logger.info(
+            "Starting batch %s",
+            rows[0].batch,
+            extra={
+                "progress": dict(
+                    kind="batch_started",
+                    batch_id=str(rows[0].batch),
+                    label=f"Batch {rows[0].batch}",
+                    total_candidates=count,
+                )
+            },
+        )
         self.trials.extend(rows)
+        for row in rows:
+            self._log_candidate(row)
         self.study.attempts += count
         logger.info("%s: %s batch %s (%s attempts)", family.name, kind, self.study.batches, count)
         self._checkpoint()
@@ -703,7 +789,19 @@ class LineageSearch:
             await self._generate(rows, data, parent)
             self._checkpoint()
             await self._measure(rows, data, parent)
+        for row in rows:
+            self._log_candidate(row, terminal=True)
         self._update(family, rows, count == wanted)
+        self._log_leaderboard()
+        logger.info(
+            "Finished batch %s",
+            rows[0].batch,
+            extra={
+                "progress": dict(
+                    kind="batch_finished", batch_id=str(rows[0].batch), status="completed"
+                )
+            },
+        )
         self._checkpoint()
 
     def _sample_family(self):
@@ -723,6 +821,18 @@ class LineageSearch:
     async def run(self) -> Study:
         """Elect the complete initial tree, then expand by measured fitness until stopped."""
         self.study.reason = "running"
+        logger.info(
+            "Starting LineageSearch",
+            extra={
+                "progress": dict(
+                    kind="search_started",
+                    optimizer="LineageSearch",
+                    total_candidates=self.config.max_attempts,
+                    columns=self.leaderboard_columns,
+                    resumed=False,
+                )
+            },
+        )
         try:
             if self.config.max_attempts > 0:
                 await self._discover()
@@ -762,3 +872,20 @@ class LineageSearch:
             raise
         finally:
             self._checkpoint()
+            logger.info(
+                "Search %s",
+                self.study.reason,
+                extra={
+                    "progress": dict(
+                        kind="search_finished",
+                        status="failed"
+                        if self.study.reason == "error"
+                        else "cancelled"
+                        if self.study.reason == "cancelled"
+                        else "completed"
+                        if self.study.attempts >= self.config.max_attempts
+                        else "stopped",
+                        reason=self.study.reason,
+                    )
+                },
+            )

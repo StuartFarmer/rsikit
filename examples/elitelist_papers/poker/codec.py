@@ -1,20 +1,37 @@
 """Bounded seat messages and space definitions for the poker evaluator."""
 
+import json
 import struct
 
 import numpy as np
 from gymnasium import spaces
 
-from rsikit.sandbox.codec import (
+from rsikit.episode import (
     MAX_ARRAY_BYTES,
-    MAX_MESSAGE,
     _dtype,
     _shape,
     decode,
-    dumps,
     encode,
-    loads,
 )
+
+MAX_MESSAGE = 1_048_576
+
+
+def dumps(value):
+    data = json.dumps(value, allow_nan=False, separators=(",", ":")).encode()
+    if len(data) > MAX_MESSAGE:
+        raise ValueError("Message exceeds 1 MiB")
+    return data + b"\n"
+
+
+def _invalid_constant(value):
+    raise ValueError(f"Invalid JSON constant: {value}")
+
+
+def loads(data):
+    if not data or len(data) > MAX_MESSAGE + 1:
+        raise ValueError("Missing or oversized message")
+    return json.loads(data, parse_constant=_invalid_constant)
 
 
 def frame_size(header):

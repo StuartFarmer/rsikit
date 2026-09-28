@@ -31,13 +31,14 @@ the first validation action at September 19 earns the return to September 20.
 Both panels start with cash and end with a fee-paying sale of any BTC.
 
 Training lives in `rsikit/envs/data/bitcoin_train.csv`. Validation lives separately
-in `data/bitcoin/validation.csv`, outside the installed package and the environment
-directory copied into Docker. The downloaded source URL, timestamps, row counts,
+in `data/bitcoin/validation.csv`, outside the installed library package. Both panels are included in the
+application image. The downloaded source URL, timestamps, row counts,
 and SHA-256 hashes are in [metadata](../data/bitcoin/metadata.json).
 Validation is evaluated only when explicitly selected for replay, never by the
 automatic per-generation training video export.
 
-Refresh explicitly; this changes the optimization problem and should use a new run:
+Refresh bundled datasets on the host, then let the launcher rebuild the image.
+This changes the optimization problem and should use a new run:
 
 ```sh
 .venv/bin/python -m examples.download_bitcoin --as-of 2026-09-19
@@ -121,12 +122,11 @@ print(episode.total_reward, len(episode))
 ```
 
 The existing AlphaEvolve, ShinkaEvolve, LineageSearch and EliteSearch CLIs accept
-`--env Bitcoin`. Rebuild the Docker worker to install the new environment and
+`--env Bitcoin`. Rebuild the application image to install the new environment and
 training CSV. For example, after setting the usual OpenRouter credentials:
 
 ```sh
-docker build -t rsikit-sandbox:local -f rsikit/sandbox/Dockerfile .
-.venv/bin/python -m examples.elitesearch --env Bitcoin \
+./scripts/run examples.elitesearch --env Bitcoin \
   --seeds 0 --heldout-seeds 1 --generations 3 --population 8 --elites 3
 ```
 
@@ -161,9 +161,9 @@ prices. Keep validation results out of generation/repair feedback.
 With the existing `video` extra installed, export a saved EliteSearch generation:
 
 ```sh
-.venv/bin/python -m examples.bitcoin_videos runs/bitcoin-smoke1 \
+./scripts/run examples.bitcoin_videos runs/bitcoin-smoke1 \
   --generation 14 --top 1 --seeds 0 --output runs/bitcoin-training-videos
-.venv/bin/python -m examples.bitcoin_videos runs/bitcoin-smoke1 \
+./scripts/run examples.bitcoin_videos runs/bitcoin-smoke1 \
   --generation 14 --top 1 --split validation --seeds 100 \
   --output runs/bitcoin-validation-videos
 ```
@@ -190,7 +190,7 @@ reserve another unseen period for the final assessment.
 For an explicit section of the selected CSV, add inclusive bounds:
 
 ```sh
-.venv/bin/python -m examples.bitcoin_videos runs/bitcoin-smoke1 \
+./scripts/run examples.bitcoin_videos runs/bitcoin-smoke1 \
   --generation 14 --top 1 --split validation \
   --start-date 2024-01-01 --end-date 2024-12-31
 ```
@@ -203,7 +203,7 @@ earlier-price warmup. The same `start_date`/`end_date` keyword arguments work on
 `BitcoinEnv`. Cache identity includes dates, data contents, split, and seeds so
 training traces cannot be reused as validation traces.
 
-Generated policies execute in the existing Docker sandbox; rendering replays
+Generated policies execute in the application container; rendering replays
 their actions locally and checks the resulting score. No model calls are made.
 For training videos after every generation, use
 `examples.elitesearch --env Bitcoin --video-top 4`; this exports only training
@@ -224,7 +224,7 @@ with BitcoinRenderer(BitcoinEnv(), policy_name="My policy") as env:
 
 ```sh
 .venv/bin/python -m unittest tests.test_bitcoin
-.venv/bin/python -m examples.bitcoin --steps 1000000 --repeats 3
+./scripts/run examples.bitcoin --steps 1000000 --repeats 3
 ```
 
 The [recorded benchmark](bitcoin-benchmark-2026-09-19.json) measured **709,982 daily

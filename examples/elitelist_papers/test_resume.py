@@ -13,13 +13,12 @@ from slick import prompts
 from examples.elitelist_papers import run as runner
 from research import elitesearch
 from research.elitesearch import Config, EliteSearch, Generation, Measurement, Organism
-from rsikit import Executor
 from rsikit.evaluation import InfrastructureError
-from tests.helpers import recorded_run
+from tests.helpers import fake_executor, recorded_run
 from tests.providers import ScriptedProvider
 from tests.test_elitesearch import program
 from tests.test_episode_storage import trajectory
-from tests.test_run import FakeSandbox
+from tests.test_run import FakeEvaluation
 
 
 class ResumeTests(unittest.IsolatedAsyncioTestCase):
@@ -123,7 +122,7 @@ class ResumeTests(unittest.IsolatedAsyncioTestCase):
                     self.assertEqual(provider.calls, [])
 
     async def test_resume_reuses_cached_seeds_and_records_lower_timeout(self):
-        first = FakeSandbox()
+        first = FakeEvaluation()
 
         async def interrupted(source, environment, seed):
             if seed == 1:
@@ -131,7 +130,7 @@ class ResumeTests(unittest.IsolatedAsyncioTestCase):
             return trajectory(7.0)
 
         first.evaluate.side_effect = interrupted
-        second = FakeSandbox()
+        second = FakeEvaluation()
         jobs = []
 
         async def finish(source, environment, seed):
@@ -146,8 +145,8 @@ class ResumeTests(unittest.IsolatedAsyncioTestCase):
                 patch.object(
                     runner, "LoggedOpenRouter", return_value=ScriptedProvider([program(0)])
                 ),
-                patch.object(runner, "Executor", return_value=Executor(sandbox=first)),
-                patch.object(runner, "Console", return_value=Console(file=io.StringIO())),
+                patch.object(runner, "Executor", return_value=fake_executor(evaluation=first)),
+                patch("rsikit.progress.Console", return_value=Console(file=io.StringIO())),
             ):
                 with self.assertRaisesRegex(InfrastructureError, "interrupted worker"):
                     await runner.main(
@@ -178,9 +177,9 @@ class ResumeTests(unittest.IsolatedAsyncioTestCase):
             deadlines = []
 
             def executor(**kwargs):
-                deadlines.append(kwargs["sandbox"].episode_timeout)
-                return Executor(
-                    sandbox=second,
+                deadlines.append(kwargs["episode_timeout"])
+                return fake_executor(
+                    evaluation=second,
                     concurrency=kwargs["concurrency"],
                 )
 
@@ -189,7 +188,7 @@ class ResumeTests(unittest.IsolatedAsyncioTestCase):
                 patch.dict("os.environ", {"OPENROUTER_API_KEY": "test"}),
                 patch.object(runner, "LoggedOpenRouter", return_value=provider),
                 patch.object(runner, "Executor", side_effect=executor),
-                patch.object(runner, "Console", return_value=Console(file=io.StringIO())),
+                patch("rsikit.progress.Console", return_value=Console(file=io.StringIO())),
             ):
                 await runner.main(["--resume", str(output), "--episode-timeout", "0.25"])
             self.assertEqual(provider.calls, [])
@@ -220,8 +219,10 @@ class ResumeTests(unittest.IsolatedAsyncioTestCase):
                 patch.object(
                     runner, "LoggedOpenRouter", return_value=ScriptedProvider([program(0)])
                 ),
-                patch.object(runner, "Executor", return_value=Executor(sandbox=FakeSandbox())),
-                patch.object(runner, "Console", return_value=Console(file=io.StringIO())),
+                patch.object(
+                    runner, "Executor", return_value=fake_executor(evaluation=FakeEvaluation())
+                ),
+                patch("rsikit.progress.Console", return_value=Console(file=io.StringIO())),
             ):
                 await runner.main(
                     [
@@ -260,8 +261,10 @@ class ResumeTests(unittest.IsolatedAsyncioTestCase):
                 patch.object(
                     runner, "LoggedOpenRouter", return_value=ScriptedProvider([program(0)])
                 ),
-                patch.object(runner, "Executor", return_value=Executor(sandbox=FakeSandbox())),
-                patch.object(runner, "Console", return_value=Console(file=io.StringIO())),
+                patch.object(
+                    runner, "Executor", return_value=fake_executor(evaluation=FakeEvaluation())
+                ),
+                patch("rsikit.progress.Console", return_value=Console(file=io.StringIO())),
             ):
                 await runner.main(
                     [
@@ -304,8 +307,10 @@ class ResumeTests(unittest.IsolatedAsyncioTestCase):
                 with (
                     patch.dict("os.environ", {"OPENROUTER_API_KEY": "test"}),
                     patch.object(runner, "LoggedOpenRouter", return_value=provider),
-                    patch.object(runner, "Executor", return_value=Executor(sandbox=FakeSandbox())),
-                    patch.object(runner, "Console", return_value=Console(file=io.StringIO())),
+                    patch.object(
+                        runner, "Executor", return_value=fake_executor(evaluation=FakeEvaluation())
+                    ),
+                    patch("rsikit.progress.Console", return_value=Console(file=io.StringIO())),
                 ):
                     await runner.main(["--resume", str(output), *flags])
             self.assertEqual(len(provider.calls), 1)

@@ -4,6 +4,7 @@ import argparse
 import asyncio
 import hashlib
 import json
+import os
 import platform
 import statistics
 import tempfile
@@ -14,17 +15,25 @@ from time import perf_counter
 
 import gymnasium as gym
 
-from examples.benchmark_docker import CARTPOLE, PACKING, command
 from research.rewards import mean_rewards
 from research.rollouts import Rollouts
 from rsikit import Episode, Executor, Run
 from rsikit.envs import BitcoinEnv, BlackjackEnv, CirclePackingEnv
 from rsikit.policy import Policy
-from rsikit.sandbox.docker import DockerSandbox
+
+PACKING = """
+import numpy as np
+from rsikit import Policy
+class Solution(Policy):
+    async def act(self, observation):
+        return np.array([[0.5, 0.5, 0.5]], dtype=np.float64)
+"""
+CARTPOLE = Path(__file__).with_name("cartpole.py")
 
 
 class TimedEnvironment(gym.Wrapper):
     def reset(self, **kwargs):
+        self.started = perf_counter()
         self.seconds = 0.0
         self.steps = 0
         return self.env.reset(**kwargs)
@@ -39,7 +48,7 @@ class TimedEnvironment(gym.Wrapper):
             info["artifacts"] = {
                 **info.get("artifacts", {}),
                 "environment-timing.json": json.dumps(
-                    dict(seconds=self.seconds, steps=self.steps)
+                    dict(seconds=self.seconds, steps=self.steps, started=self.started)
                 ).encode(),
             }
         return observation, reward, terminated, truncated, info
@@ -76,14 +85,8 @@ async def scheduling(samples):
             arrived, waits, durations = {}, [], []
             active = peak = 0
 
-            class Sandbox:
-                async def start(self, workers):
-                    pass
-
-                async def close(self):
-                    pass
-
-                async def evaluate(self, implementation, environment, seed):
+            class TimedExecutor(Executor):
+                async def _evaluate(self, implementation, environment, seed):
                     nonlocal active, peak
                     start = perf_counter()
                     waits.append(start - arrived[implementation])
@@ -98,7 +101,7 @@ async def scheduling(samples):
 
             with tempfile.TemporaryDirectory() as directory:
                 async with (
-                    Executor(sandbox=Sandbox(), concurrency=4) as executor,
+                    TimedExecutor(concurrency=4) as executor,
                     Run.create(
                         name="benchmark",
                         export=False,
@@ -166,10 +169,9 @@ async def scheduling(samples):
     return report
 
 
-async def main(samples, output, image, compare_image=None):
-    backend = DockerSandbox
+async def main(samples, output):
     report = {
-        "backend": backend.__name__,
+        "backend": "local episode processes",
         "host": platform.platform(),
         "python": platform.python_version(),
         "date": datetime.now(timezone.utc).isoformat(),
@@ -179,13 +181,11 @@ async def main(samples, output, image, compare_image=None):
                 Path(__file__),
                 Path("rsikit/execution.py"),
                 Path("rsikit/run.py"),
-                *sorted(Path("rsikit/sandbox").glob("*.py")),
+                Path("Dockerfile"),
             )
         },
-        "image": (
-            await command("docker", "image", "inspect", image, "--format", "{{.Id}}")
-        ).strip(),
-        "scope": "Warm sandbox; instrumented env.step and policy.act wall time. Residual includes IPC, validation, startup of children, reset/close and artifacts, not just transport.",
+        "image": os.environ.get("RSIKIT_IMAGE_ID"),
+        "scope": "First episode includes clean forkserver startup; subsequent episodes use fresh children. Residual includes startup, reset/close, validation and artifacts.",
         "workloads": {},
     }
     workloads = [
@@ -203,14 +203,7 @@ async def main(samples, output, image, compare_image=None):
         ),
     ]
     async with AsyncExitStack() as stack:
-        executor = await stack.enter_async_context(Executor(sandbox=backend(image=image)))
-        if compare_image:
-            reference = await stack.enter_async_context(
-                Executor(sandbox=DockerSandbox(image=compare_image))
-            )
-            report["compare_image"] = (
-                await command("docker", "image", "inspect", compare_image, "--format", "{{.Id}}")
-            ).strip()
+        executor = await stack.enter_async_context(Executor())
         for label, environment, source in workloads:
             env = TimedEnvironment(environment)
             values = []
@@ -226,10 +219,13 @@ async def main(samples, output, image, compare_image=None):
                 assert env_time["steps"] == policy_time["steps"] > 0
                 if values:
                     assert result.total_reward == values[0]["score"]
+                if not repeat:
+                    first_seconds = elapsed
                 if repeat:
                     values.append(
                         dict(
                             seconds=elapsed,
+                            startup_seconds=env_time["started"] - start,
                             environment_seconds=env_time["seconds"],
                             policy_seconds=policy_time["seconds"],
                             steps=env_time["steps"],
@@ -240,34 +236,10 @@ async def main(samples, output, image, compare_image=None):
             medians["other_seconds"] = (
                 medians["seconds"] - medians["environment_seconds"] - medians["policy_seconds"]
             )
-            report["workloads"][label] = dict(medians=medians, samples=values)
+            report["workloads"][label] = dict(
+                first_seconds=first_seconds, medians=medians, samples=values
+            )
             print(label, json.dumps(medians), flush=True)
-            if compare_image:
-                times = {"baseline": [], "optimized": []}
-                backends = {"baseline": reference, "optimized": executor}
-                for repeat in range(samples + 1):
-                    for name in list(backends) if repeat % 2 else list(reversed(backends)):
-                        start = perf_counter()
-                        results = [
-                            r
-                            async for _, _, r in backends[name].evaluate(
-                                [(label, source, 1)], environment
-                            )
-                        ]
-                        elapsed = perf_counter() - start
-                        assert len(results) == 1 and results[0].total_reward == medians["score"]
-                        assert not results[0].artifacts
-                        if repeat:
-                            times[name].append(elapsed)
-                paired = dict(
-                    samples=times,
-                    median_seconds={name: statistics.median(v) for name, v in times.items()},
-                )
-                paired["speedup"] = (
-                    paired["median_seconds"]["baseline"] / paired["median_seconds"]["optimized"]
-                )
-                report["workloads"][label]["paired_uninstrumented"] = paired
-                print(label, "paired", json.dumps(paired), flush=True)
             env.close()
             output.write_text(json.dumps(report, indent=2) + "\n")
     report["synthetic_scheduling"] = await scheduling(samples)
@@ -278,12 +250,8 @@ async def main(samples, output, image, compare_image=None):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--samples", type=int, default=3)
-    parser.add_argument("--output", type=Path, default=Path("evaluator-benchmark.json"))
-    parser.add_argument("--image", default="rsikit-sandbox:local")
-    parser.add_argument(
-        "--compare-image", help="Alternate uninstrumented episodes against this baseline image"
-    )
+    parser.add_argument("--output", type=Path, default=Path("runs/evaluator-benchmark.json"))
     args = parser.parse_args()
     if args.samples < 1:
         parser.error("--samples must be positive")
-    asyncio.run(main(args.samples, args.output, args.image, args.compare_image))
+    asyncio.run(main(args.samples, args.output))

@@ -5,8 +5,13 @@ import unittest
 
 import numpy as np
 
-from examples.elitelist_papers.poker.codec import frame_size, pack, unpack
-from rsikit.sandbox.codec import MAX_ARRAY_BYTES, MAX_MESSAGE
+from examples.elitelist_papers.poker.codec import (
+    MAX_ARRAY_BYTES,
+    MAX_MESSAGE,
+    frame_size,
+    pack,
+    unpack,
+)
 
 
 class NumericTransportTests(unittest.TestCase):

@@ -3,7 +3,6 @@
 import asyncio
 import io
 import json
-import logging
 import tempfile
 import unittest
 from dataclasses import replace
@@ -12,18 +11,16 @@ from unittest.mock import patch
 
 import gymnasium as gym
 from rich.console import Console
-from rich.progress import Progress
 from slick import prompts
 from slick.providers import ProviderError
 from sqlmodel import select
 
 from research.lineagesearch import Config, Family, LineageSearch, Measurement, Study, Trial
-from rsikit import Executor
 from rsikit.evaluation import PolicyError
-from tests.helpers import recorded_run
+from tests.helpers import fake_executor, recorded_run
 from tests.providers import ScriptedProvider
 from tests.test_episode_storage import trajectory
-from tests.test_run import FakeSandbox
+from tests.test_run import FakeEvaluation
 
 ROOT = Path(__file__).resolve().parents[1] / "research/lineagesearch" / "prompts"
 
@@ -148,22 +145,6 @@ class LineageTests(unittest.IsolatedAsyncioTestCase):
         for value in (-1, 100, float("nan"), float("inf")):
             with self.subTest(value=value), self.assertRaises(ValueError):
                 Config(cull_percent=value)
-
-    def test_progress_keeps_overlapping_generation_and_evaluation_visible(self):
-        from rsikit.progress import ProgressHandler
-
-        progress = Progress(console=Console(file=io.StringIO()))
-        handler = ProgressHandler(progress, overlap=True)
-        for event, total in (
-            ("generation_started", 2),
-            ("policy_generated", 0),
-            ("evaluation_started", 5),
-            ("generation_started", 3),
-        ):
-            handler.emit(logging.makeLogRecord(dict(event=event, total=total, msg=event)))
-        self.assertEqual(progress.tasks[handler.generation].total, 5)
-        self.assertEqual(progress.tasks[handler.generation].completed, 1)
-        self.assertTrue(all(task.visible for task in progress.tasks))
 
     def setUp(self):
         root = patch.object(prompts, "TEMPLATE_ROOT", ROOT)
@@ -687,19 +668,19 @@ class LineageTests(unittest.IsolatedAsyncioTestCase):
             max_attempts=1,
             max_repairs=1,
         )
-        sandbox = FakeSandbox()
+        evaluation = FakeEvaluation()
 
         async def execute(implementation, environment, seed):
             if "scipy" in implementation:
                 raise PolicyError("ModuleNotFoundError: No module named 'scipy'")
             return trajectory(7.0, {})
 
-        sandbox.evaluate.side_effect = execute
+        evaluation.evaluate.side_effect = execute
         with tempfile.TemporaryDirectory() as directory, gym.make("CartPole-v1") as env:
             with recorded_run(
                 name="dependency-repair",
                 environment=env,
-                executor=Executor(sandbox=sandbox),
+                executor=fake_executor(evaluation=evaluation),
                 path=Path(directory) / "run",
             ) as (run, rollouts):
 
@@ -868,8 +849,10 @@ class LineageTests(unittest.IsolatedAsyncioTestCase):
                         [families(), experiments(0), "bad JSON", program(0), *sequence(1)]
                     ),
                 ),
-                patch.object(example, "Executor", return_value=Executor(sandbox=FakeSandbox())),
-                patch.object(example, "Console", return_value=Console(file=terminal, width=140)),
+                patch.object(
+                    example, "Executor", return_value=fake_executor(evaluation=FakeEvaluation())
+                ),
+                patch("rsikit.progress.Console", return_value=Console(file=terminal, width=140)),
             ):
                 await example.main()
             summary = json.loads((output / "summary.json").read_text())
@@ -884,12 +867,12 @@ class LineageTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(summary["reason"], "completed")
             self.assertEqual(summary["heldout"]["scores"], {"99": 7, "100": 7})
             for message in (
-                "Attempt budget",
-                "Families complete",
-                "Initial decomposition",
+                "Starting LineageSearch",
+                "Family leaderboard",
+                "selected partition",
                 "Repairing",
                 "Generated Policy",
-                "Evaluating policies",
+                "evaluating",
                 "stagnated",
             ):
                 self.assertIn(message, terminal.getvalue())

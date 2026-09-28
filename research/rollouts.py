@@ -1,6 +1,7 @@
 """Collect seed panels for experiments, explicitly recording raw episodes in a Run."""
 
 import asyncio
+import logging
 from contextlib import AsyncExitStack, aclosing
 
 from rsikit import Executor, Run
@@ -16,6 +17,10 @@ class Rollouts:
     def __init__(self, environment, executor: Executor, run: Run):
         self.environment, self.executor, self.run = environment, executor, run
         self._locks = {}
+        name = getattr(getattr(environment, "spec", None), "id", None) or type(environment).__name__
+        logging.getLogger(__name__).info(
+            "Environment: %s", name, extra={"progress": dict(kind="environment", name=name)}
+        )
 
     async def collect(self, policies, *, seeds=(0,)):
         seeds = tuple(dict.fromkeys(seeds))

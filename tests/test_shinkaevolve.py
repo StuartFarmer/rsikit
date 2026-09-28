@@ -21,13 +21,12 @@ from examples.shinkaevolve import run_search
 from research import shinkaevolve
 from research.shinkaevolve import Config, Evaluation, Generation, ShinkaEvolve
 from research.shinkaevolve.generation import Edit, Mutation
-from rsikit import Executor
 from rsikit.evaluation import PolicyError
-from tests.helpers import recorded_run
+from tests.helpers import fake_executor, recorded_run
 from tests.providers import ScriptedProvider
 from tests.test_alphaevolve import SOURCE, program
 from tests.test_episode_storage import trajectory
-from tests.test_run import FakeSandbox
+from tests.test_run import FakeEvaluation
 
 ROOT = Path(shinkaevolve.__file__).parent / "prompts"
 
@@ -68,8 +67,10 @@ class ShinkaTests(unittest.IsolatedAsyncioTestCase):
                     "OpenRouterAPI",
                     return_value=ScriptedProvider([program(0), program(1)]),
                 ) as create_provider,
-                patch.object(example, "Executor", return_value=Executor(sandbox=FakeSandbox())),
-                patch.object(example, "Console", return_value=console),
+                patch.object(
+                    example, "Executor", return_value=fake_executor(evaluation=FakeEvaluation())
+                ),
+                patch("rsikit.progress.Console", return_value=console),
             ):
                 await example.main()
             self.assertEqual(
@@ -254,7 +255,7 @@ class ShinkaTests(unittest.IsolatedAsyncioTestCase):
                 patch_types=(("full", 1),),
             ),
         )
-        sandbox = FakeSandbox()
+        evaluation = FakeEvaluation()
 
         async def evaluate(implementation, environment, seed):
             if "return 9" in implementation or "return 8" in implementation:
@@ -263,11 +264,15 @@ class ShinkaTests(unittest.IsolatedAsyncioTestCase):
                 return trajectory(100.0, {})
             return trajectory(8.0 if "return 1" in implementation else 7.0, {})
 
-        sandbox.evaluate.side_effect = evaluate
+        evaluation.evaluate.side_effect = evaluate
         with tempfile.TemporaryDirectory() as directory, gym.make("CartPole-v1") as env:
             path = Path(directory) / "run"
             with recorded_run(
-                name="shinka", path=path, environment=env, executor=Executor(sandbox=sandbox)
+                name="shinka",
+                path=path,
+                environment=env,
+                executor=fake_executor(evaluation=evaluation),
+                console=Console(file=io.StringIO()),
             ) as (run, rollouts):
                 await run_search(
                     agent,
@@ -277,7 +282,6 @@ class ShinkaTests(unittest.IsolatedAsyncioTestCase):
                     batch_size=2,
                     generation_concurrency=1,
                     seeds=(0, 1),
-                    console=Console(file=io.StringIO()),
                 )
             with recorded_run(path, environment=env) as (run, rollouts), run.database() as db:
                 rows = db.exec(
@@ -298,9 +302,9 @@ class ShinkaTests(unittest.IsolatedAsyncioTestCase):
                 )
                 self.assertEqual((rows[3].revision, rows[4].revision), (0, 1))
                 self.assertNotEqual(rows[3].policy_id, rows[4].policy_id)
-                self.assertTrue(all(snapshot.complete for snapshot in snapshots))
+                self.assertTrue(all((snapshot.complete for snapshot in snapshots)))
                 self.assertEqual(snapshots[0].islands, [[]])
-                self.assertEqual(max(c["score"] for c in snapshots[-1].islands[0]), 8)
+                self.assertEqual(max((c["score"] for c in snapshots[-1].islands[0])), 8)
                 self.assertEqual(snapshots[-1].seeds, [0, 1])
                 self.assertEqual(len(run.policies()), 4)
         self.assertEqual(agent.completed, 6)

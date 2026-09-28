@@ -6,7 +6,6 @@ import logging
 from uuid import uuid4
 
 from rsikit.evaluation import InfrastructureError
-from rsikit.sandbox.docker import _spawn
 
 logger = logging.getLogger(f"{__package__}.tournament")
 MAX_FRAME = 8 * 1024 * 1024
@@ -274,3 +273,16 @@ async def remove_container(name, process):
                 except ProcessLookupError:
                     pass
                 await asyncio.wait_for(child.wait(), CLEANUP_TIMEOUT)
+
+
+async def _spawn(*args, **kwargs):
+    """Finish acquiring the process handle before cancellation attempts cleanup."""
+    starting = asyncio.create_task(asyncio.create_subprocess_exec(*args, **kwargs))
+    try:
+        return await asyncio.shield(starting)
+    except asyncio.CancelledError:
+        process = await starting
+        if process.returncode is None:
+            process.kill()
+        await process.communicate()
+        raise

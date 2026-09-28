@@ -5,6 +5,7 @@ from contextlib import closing, contextmanager
 
 from rich.console import Group
 from rich.live import Live
+from rich.logging import RichHandler
 from rich.progress import (
     BarColumn,
     MofNCompleteColumn,
@@ -16,7 +17,43 @@ from rich.progress import (
 from rich.table import Table
 from rich.text import Text
 
-from rsikit.progress import ProgressHandler
+
+class _ProgressHandler(RichHandler):
+    def __init__(self, progress, *, overlap=False):
+        super().__init__(
+            console=progress.console,
+            show_path=False,
+            markup=False,
+            highlighter=None,
+            rich_tracebacks=True,
+            tracebacks_show_locals=False,
+        )
+        self.progress = progress
+        self.overlap = overlap
+        self.generation = progress.add_task("Generating policies", total=0, visible=False)
+        self.evaluation = progress.add_task("Evaluating policies", total=0, visible=False)
+
+    def emit(self, record):
+        event = getattr(record, "event", None)
+        if event == "generation_started":
+            if self.overlap:
+                total = self.progress.tasks[self.generation].total + record.total
+                self.progress.update(self.generation, total=total, visible=True)
+            else:
+                self.progress.update(self.evaluation, visible=False)
+                self.progress.reset(self.generation, total=record.total, visible=True)
+        elif event in ("policy_generated", "proposal_discarded"):
+            self.progress.advance(self.generation)
+        elif event == "evaluation_started":
+            if self.overlap:
+                total = self.progress.tasks[self.evaluation].total + record.total
+                self.progress.update(self.evaluation, total=total, visible=True)
+            else:
+                self.progress.update(self.generation, visible=False)
+                self.progress.reset(self.evaluation, total=record.total, visible=True)
+        elif event in ("policy_evaluated", "evaluation_failed"):
+            self.progress.advance(self.evaluation)
+        super().emit(record)
 
 
 def make_progress(console=None):
@@ -46,7 +83,7 @@ class SearchDisplay:
         self.population = self.progress.add_task(
             "    Population evaluated/discarded", total=agent.config.population_size
         )
-        self.handler = ProgressHandler(self.progress)
+        self.handler = _ProgressHandler(self.progress)
         self.progress.update(self.handler.generation, description="    Generating policies")
         self.progress.update(self.handler.evaluation, description="    Evaluating policies")
         self.table_task = self.progress.add_task("      Table blocks", total=None, visible=False)

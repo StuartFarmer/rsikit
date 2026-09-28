@@ -40,26 +40,24 @@ or closes them. See [the inner-loop contract](INNER_LOOP.md).
 `Executor.evaluate(jobs, environment)` is an async stream of
 `(policy_id, seed, episode)`, where each job is `(policy_id, source, seed)`.
 The environment is an unstarted, serializable Gymnasium instance used as a template.
-Each sandbox episode gets fresh environment and policy instances, resets them,
-uses `Evaluator`, and closes them. Host and sandbox Python minor versions must match.
-The caller owns the host template's lifecycle.
+Each episode gets fresh environment and policy instances in a local child process,
+resets them, uses `Evaluator`, and closes them. The caller owns the template.
 
-Use `async with Executor(...)` to reuse a container across batches; its exit removes
-the container. `Run` contexts only release storage. `DockerSandbox` is the sole
-backend: policy, environment and scoring share one fresh episode process. It
-returns complete Episodes through a bounded, data-only protocol. Episode deadlines
-default to 60 seconds; individual actions have no separate deadline. Container
-stdout/stderr logs flow to host logging; existing Rich progress uses episode results.
+Use `async with Executor(concurrency=4, episode_timeout=60)` to bound evaluation
+work. Context exit cancels and reaps outstanding episodes. `Run` contexts only
+release storage. Candidate failures preserve successful siblings; runtime failures
+and cancellation propagate. There is no backend selector or persistent service.
 
-Build the image before execution:
+The launcher puts the entire application in one container:
 
 ```sh
-docker build -t rsikit-sandbox:local -f rsikit/sandbox/Dockerfile .
+./scripts/run examples.inner_loop --output runs/comparison
+./scripts/run examples.inner_loop --resume runs/comparison
 ```
 
-Candidate errors preserve successful siblings and the service. Infrastructure
-failures or cancellation invalidate and remove the service; an explicit retry
-can start a new one. See [sandbox details](IN_PROCESS_SANDBOX.md).
+Rich renders in the main application process. Episode prints are saved as
+`episode.log` artifacts; failures include a bounded log tail. See
+[execution details](IN_PROCESS_SANDBOX.md).
 
 ## Storage and analysis
 
@@ -92,9 +90,9 @@ records. Per-seed scores are explicit caller data; `None` denotes unfinished wor
 Raw trajectories are stored under `episodes/<policy-id>/<seed>.json`, preserving
 numeric arrays, tuples and byte payloads. Episode files are written atomically
 after their artifacts. `load_episode` returns `None` when no episode was saved.
-Both storage and sandbox transport limit each episode to 64 MiB.
+Both storage and process transfer limit each episode to 64 MiB.
 
-Gymnasium recording wrappers run in the sandbox, with output relocated to an
+Gymnasium recording wrappers run in the episode process, with output relocated to an
 isolated episode directory. Files and the final `info["artifacts"]` byte mapping
 are returned as `episode.artifacts`. `save_episode` also writes these files under
 `artifacts/<policy-id>/<seed>/`. Run performs no rendering.
@@ -152,3 +150,48 @@ storage, not an optimizer checkpoint or an additional execution abstraction.
 
 The AlphaEvolve CLI saves its own evaluation and generation records automatically;
 see [experiment history](ALPHAEVOLVE.md#stored-experiment-history).
+
+## Automatic terminal progress
+
+Entering a `Run` context automatically supplies scoped logging. Standard search loops report their work through Python logging, activating the shared Rich dashboard in a terminal. Redirected output stays plain text. Full messages and exception tracebacks are appended to `run.log`; the terminal shows a bounded recent tail.
+
+The leaderboard’s top border shows `<environment> w/ <optimizer>`, a completed-generation progress bar and total elapsed time. Its bottom border shows the run directory. Searches without a fixed generation budget show an unknown total. Proposals, evaluations and recent events appear below. Progress bars live in the PROPOSALS and EVALUATIONS panel titles, each showing completed/total work for the current generation: 44 proposals and 26 evaluations out of a population of 50 show 44/50 and 26/50 respectively. Seeds and repairs do not create extra candidate slots. Discarded/failed work is visibly distinguished from successful evaluation. Elapsed time measures this invocation; resumed runs are labelled and recover counts from existing optimizer history.
+
+The dashboard expands to the terminal height. Tables use dim grey column labels. The leaderboard reserves the configured elite count, capped at ten rows; proposal and evaluation tables each reserve the generation’s candidate count, capped at 25 rows (25 when the count is unknown). Missing rows remain blank, and small terminals may reserve fewer rows. Their height stays fixed as results arrive or a generation clears. The event log fills the remaining height and keeps the newest wrapped lines visible. Proposals and evaluations are tables of completed work, with each new completion inserted at the top and the oldest rows dropping off the bottom. Proposals show Time, ID, Name and Description; evaluations show Time, ID, Name, Score and Duration. Time is the completion timestamp in UTC (`HH:MM:SS`). Time, ID, Score and Duration have fixed widths. Description expands in the proposal table; Name expands in the evaluation table. Both tables clear when a new generation starts; completed rows remain visible until then. Generating/in-progress updates do not create table rows. In-flight, repair, and failed-attempt details remain in the event log. Each policy receives a random unused color for that Run, shared by its leaderboard, proposal and evaluation rows. The Docker launcher enables 256-color output and forwards the host's true-color setting when available. Very long runs use additional distinct RGB colors; terminals with only 256 colors may display some of those as the same shade.
+
+Event log lines use `HH:MM:SS  TYPE     message`: dim UTC timestamps, green SUCCESS, red ERROR, yellow WARNING, cyan INFO and grey DEBUG labels. Types have a fixed seven-character width; multiline details and tracebacks align beneath the message. Completion events determine success without matching message text. Logger paths are omitted from the TUI, while `run.log` retains full timestamps, logger names and exception details. DEBUG records are styled when enabled; the default logging level remains INFO.
+
+No UI setup is needed in application scripts:
+
+```python
+async with Run.create(name="experiment") as run:
+    # Construct the environment, executor and optimizer as usual.
+    await optimizer.run()
+```
+
+The optional `total_generations` field on `search_started` supplies the generation budget; the display counts completed batch events. `leaderboard_size` supplies the row capacity (default ten, display capped at ten); EliteSearch reports its configured elite count.
+
+Optimizers declare optional leaderboard columns once using existing Rich columns:
+
+```python
+leaderboard_columns = {
+    "operation": Column("Operation", no_wrap=True),
+    "parents": Column("Parents", overflow="ellipsis"),
+}
+```
+
+Their normal domain logs carry structured fields, for example:
+
+```python
+logger.info("Starting search", extra={"progress": {
+    "kind": "search_started", "optimizer": "MyOptimizer",
+    "total_candidates": 50, "total_generations": 5,
+    "columns": leaderboard_columns, "resumed": False,
+}})
+```
+
+Candidate events use stable attempt IDs and revisions; leaderboard events include already-ranked rows with standard fields and custom `extras` values. The dashboard preserves optimizer ranking and interprets model-provided strings literally. See the [event contract](superpowers/specs/2026-09-28-automatic-progress-dashboard.md#structured-logging-contract) for fields and lifecycle events. No registration, adapter, or renderer change is needed for another optimizer.
+
+Known-size batches finish when all their candidate slots settle, including standalone generate/update loops. Native paper searches resumed from only a population checkpoint recover known accepted completions; unknown historical outcomes stay unresolved. Application searches use their detailed Run history where available.
+
+AlphaEvolve and ShinkaEvolve's application loops live in `research.alphaevolve.search` and `research.shinkaevolve.search`. Their example entry points remain available. Test/application console injection belongs on `Run.create(..., console=...)` or `Run.open(..., console=...)`, not on the search loop.

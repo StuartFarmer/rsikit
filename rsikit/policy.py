@@ -29,7 +29,7 @@ class Policy(ABC, Generic[Observation, Action]):
         Raw Python defaults to name='Solution' and an empty description.
         The ID hashes the name and exact source; description edits do not change it.
         Loading does not validate source; optimizers use validate_policy explicitly.
-        Execution creates a fresh instance from the returned definition in its sandbox.
+        Execution creates a fresh instance from the returned definition in a fresh evaluation process.
         """
         metadata = {}
         prefix = "# rsikit-policy: "
@@ -181,3 +181,18 @@ def validate_policy(policy: type[Policy]) -> None:
                 f"async reset after await super().reset(seed=seed). Signature mismatch: {exc}"
             ) from exc
         break  # Python uses the last definition of a method in the class body.
+
+
+MAX_SOURCE = 65_536
+
+
+def load_policy(source, observation_space, action_space, instructions):
+    """Load a Solution instance in an evaluation process."""
+    if len(source.encode()) > MAX_SOURCE:
+        raise ValueError("Source exceeds 64 KiB")
+    namespace = {"__name__": "candidate"}
+    exec(compile(source, "candidate.py", "exec"), namespace)
+    solution = namespace["Solution"]
+    if not isinstance(solution, type) or not issubclass(solution, Policy):
+        raise TypeError("Solution must subclass rsikit.Policy")
+    return solution(observation_space, action_space, instructions=instructions)

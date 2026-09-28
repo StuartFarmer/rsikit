@@ -78,7 +78,9 @@ class AlphaEvolve(Baseline):
             self.prompt_ideas = [PromptIdea(**idea) for idea in state["prompt_ideas"]]
             version, internal, gaussian = state["rng"]
             self.rng.setstate((version, tuple(internal), gaussian))
+        self._completed_offset = self.completed
         self._sync()
+        self._log_leaderboard()
         self.checkpoint()
 
     def _sync(self):
@@ -126,6 +128,7 @@ class AlphaEvolve(Baseline):
         for target in range(self.config.islands) if island is None else (island,):
             self.database.register(candidate, target)
         self._sync()
+        self._log_leaderboard()
         self.checkpoint()
 
     def _candidate(self, policy, result):
@@ -142,6 +145,7 @@ class AlphaEvolve(Baseline):
         """Keep rejected evaluations in history but out of the breeding population."""
         for record in self._pending.pop(policy.id, []):
             record.update(status="discarded", error=reason)
+            self._log_candidate(record)
 
     def update_results(self, results):
         # Validate the batch before consuming pending proposals.
@@ -178,6 +182,7 @@ class AlphaEvolve(Baseline):
                     scale = max(1.0, abs(parent.score))
                     idea.reward += max(0.0, canonical.score / scale - parent.score / scale)
                 record.update(status="evaluated", score=candidate.score)
+                self._log_candidate(record)
                 self.completed += 1
                 interval = self.config.migration_interval
                 if interval and self.completed % interval == 0:
@@ -189,6 +194,7 @@ class AlphaEvolve(Baseline):
                     )
             self._pending.pop(policy_id)
         self._sync()
+        self._log_leaderboard()
         self.checkpoint()
 
     def update(self, results: Iterable[tuple[type[Policy], Episode]]) -> None:

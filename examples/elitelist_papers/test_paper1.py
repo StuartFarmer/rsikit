@@ -15,13 +15,12 @@ import cloudpickle
 import numpy as np
 from rich.console import Console
 
-from rsikit import Executor
 from rsikit.evaluation import PolicyError
-from tests.helpers import recorded_run
+from tests.helpers import fake_executor, recorded_run
 from tests.providers import ScriptedProvider
 from tests.test_elitesearch import program
 from tests.test_episode_storage import trajectory
-from tests.test_run import FakeSandbox
+from tests.test_run import FakeEvaluation
 
 
 class Paper1Tests(unittest.IsolatedAsyncioTestCase):
@@ -83,7 +82,7 @@ class Paper1Tests(unittest.IsolatedAsyncioTestCase):
 
     async def test_cli_exports_all_generations_without_heldout_selection(self):
         runner = self.runner()
-        sandbox = FakeSandbox()
+        evaluation = FakeEvaluation()
 
         async def evaluate(source, environment, seed):
             if "action_space.sample" in source:
@@ -92,7 +91,7 @@ class Paper1Tests(unittest.IsolatedAsyncioTestCase):
             # Better search candidates deliberately generalize worse.
             return trajectory(float(value if seed < 100 else 10 - value), {})
 
-        sandbox.evaluate.side_effect = evaluate
+        evaluation.evaluate.side_effect = evaluate
         provider = ScriptedProvider([])
         next_value = 0
         contexts = []
@@ -122,9 +121,9 @@ class Paper1Tests(unittest.IsolatedAsyncioTestCase):
                 patch.dict("os.environ", {"OPENROUTER_API_KEY": "test"}),
                 patch.object(runner, "LoggedOpenRouter", return_value=provider),
                 patch.object(
-                    runner, "Executor", return_value=Executor(sandbox=sandbox)
+                    runner, "Executor", return_value=fake_executor(evaluation=evaluation)
                 ) as executor,
-                patch.object(runner, "Console", return_value=Console(file=io.StringIO())),
+                patch("rsikit.progress.Console", return_value=Console(file=io.StringIO())),
             ):
                 await runner.main(
                     [
@@ -145,7 +144,7 @@ class Paper1Tests(unittest.IsolatedAsyncioTestCase):
                         str(output),
                     ]
                 )
-            self.assertEqual(executor.call_args.kwargs["sandbox"].episode_timeout, 10)
+            self.assertEqual(executor.call_args.kwargs["episode_timeout"], 10)
             manifest = json.loads((output / "experiment.json").read_text())
             context = (output / "context.txt").read_text()
             self.assertEqual(context, manifest["instructions"])
@@ -165,7 +164,8 @@ class Paper1Tests(unittest.IsolatedAsyncioTestCase):
             with zipfile.ZipFile(output / "source.zip") as archive:
                 for name in (
                     "uv.lock",
-                    "rsikit/sandbox/Dockerfile",
+                    "Dockerfile",
+                    "scripts/run",
                     "rsikit/policy.py",
                     "rsikit/envs/tasks.py",
                     "rsikit/progress.py",
@@ -185,14 +185,14 @@ class Paper1Tests(unittest.IsolatedAsyncioTestCase):
 
     async def test_failed_heldout_is_missing_not_zero(self):
         runner = self.runner()
-        sandbox = FakeSandbox()
+        evaluation = FakeEvaluation()
 
         async def evaluate(source, environment, seed):
             if seed >= 100 and "action_space.sample" not in source:
                 raise PolicyError("unseen-state failure")
             return trajectory(7.0, {})
 
-        sandbox.evaluate.side_effect = evaluate
+        evaluation.evaluate.side_effect = evaluate
         with tempfile.TemporaryDirectory() as directory:
             output = Path(directory) / "run"
             with (
@@ -200,8 +200,8 @@ class Paper1Tests(unittest.IsolatedAsyncioTestCase):
                 patch.object(
                     runner, "LoggedOpenRouter", return_value=ScriptedProvider([program(0)])
                 ),
-                patch.object(runner, "Executor", return_value=Executor(sandbox=sandbox)),
-                patch.object(runner, "Console", return_value=Console(file=io.StringIO())),
+                patch.object(runner, "Executor", return_value=fake_executor(evaluation=evaluation)),
+                patch("rsikit.progress.Console", return_value=Console(file=io.StringIO())),
             ):
                 await runner.main(
                     [
@@ -259,13 +259,13 @@ class Paper1Tests(unittest.IsolatedAsyncioTestCase):
         ):
             with self.subTest(env=env, flags=flags), tempfile.TemporaryDirectory() as directory:
                 output = Path(directory) / "run"
-                sandbox = FakeSandbox()
+                evaluation = FakeEvaluation()
 
                 async def evaluate(source, environment, seed):
                     # Search meets the target exactly; held-out results do not.
                     return trajectory(475.0 if seed == 0 else -100.0, {})
 
-                sandbox.evaluate.side_effect = evaluate
+                evaluation.evaluate.side_effect = evaluate
                 provider = ScriptedProvider(
                     [
                         program(0),
@@ -286,8 +286,10 @@ class Paper1Tests(unittest.IsolatedAsyncioTestCase):
                 with (
                     patch.dict("os.environ", {"OPENROUTER_API_KEY": "test"}),
                     patch.object(runner, "LoggedOpenRouter", return_value=provider),
-                    patch.object(runner, "Executor", return_value=Executor(sandbox=sandbox)),
-                    patch.object(runner, "Console", return_value=Console(file=io.StringIO())),
+                    patch.object(
+                        runner, "Executor", return_value=fake_executor(evaluation=evaluation)
+                    ),
+                    patch("rsikit.progress.Console", return_value=Console(file=io.StringIO())),
                 ):
                     await runner.main(
                         [
@@ -339,8 +341,10 @@ class Paper1Tests(unittest.IsolatedAsyncioTestCase):
                 patch.object(
                     runner, "LoggedOpenRouter", return_value=ScriptedProvider([program(0)])
                 ),
-                patch.object(runner, "Executor", return_value=Executor(sandbox=FakeSandbox())),
-                patch.object(runner, "Console", return_value=Console(file=io.StringIO())),
+                patch.object(
+                    runner, "Executor", return_value=fake_executor(evaluation=FakeEvaluation())
+                ),
+                patch("rsikit.progress.Console", return_value=Console(file=io.StringIO())),
                 patch.object(runner, "export_curves", side_effect=RuntimeError("report failed")),
             ):
                 with self.assertRaisesRegex(RuntimeError, "report failed"):

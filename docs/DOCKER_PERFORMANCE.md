@@ -1,5 +1,7 @@
 Docker execution and Vercel Sandbox investigation — 2026-09-19
 
+> Historical report. The standard application now uses [whole-application Docker execution](IN_PROCESS_SANDBOX.md); commands below describe the former implementation.
+
 > Historical benchmark: the separate policy/evaluator and legacy host-environment
 > paths described here have been removed. See [the current sandbox](IN_PROCESS_SANDBOX.md).
 

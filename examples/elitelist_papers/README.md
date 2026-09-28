@@ -166,15 +166,14 @@ history before pooling and excludes changed-context runs by default. Set
 
 ## Run simulations separately
 
-From the repository root, use the existing virtual environment, OpenRouter key
-and Docker image described in the repository README. Host and worker Python minor
-versions must match. This folder adds no simulation dependencies.
+From the repository root, set the OpenRouter key (or use `.env`) and start Docker.
+The launcher builds the application image automatically. Host Python is not used.
 
 ```sh
-rtk proxy .venv/bin/python -B -m examples.elitelist_papers.run --list-envs
-rtk proxy .venv/bin/python -B -m examples.elitelist_papers.run \
+rtk proxy ./scripts/run examples.elitelist_papers.run --list-envs
+rtk proxy ./scripts/run examples.elitelist_papers.run \
   --env CartPole-v1 --search-seed 0 \
-  --output examples/elitelist_papers/runs/pilot-cartpole-0
+  --output runs/pilot-cartpole-0
 ```
 
 The second command makes paid API calls. Defaults are the small pilot above, with
@@ -183,13 +182,13 @@ all terminal output in a file, use the commands printed by the notebook (or):
 
 ```sh
 rtk proxy mkdir -p examples/elitelist_papers/logs
-rtk proxy sh -c 'nohup .venv/bin/python -u -B -m examples.elitelist_papers.run --env CartPole-v1 --search-seed 0 --output examples/elitelist_papers/runs/pilot-cartpole-0 >> examples/elitelist_papers/logs/pilot-cartpole-0.log 2>&1 < /dev/null & echo $!'
+rtk proxy sh -c 'nohup ./scripts/run examples.elitelist_papers.run --env CartPole-v1 --search-seed 0 --output runs/pilot-cartpole-0 >> examples/elitelist_papers/logs/pilot-cartpole-0.log 2>&1 < /dev/null & echo $!'
 ```
 
 New run directories must be new. The CLI
 prints its output path. `status.json` distinguishes running, completed and failed
 work (a hard-killed process can leave status at running). The notebook reloads files
-without contacting the model. Generated policies execute only in the existing Docker sandbox.
+without contacting the model. The entire application, including generated policies, runs in Docker.
 
 ### Resume and execution timeouts
 
@@ -197,8 +196,8 @@ Stop the previous process before resuming; the run's file lock prevents two
 processes from writing the same run. From the repository root:
 
 ```sh
-rtk proxy .venv/bin/python -B -m examples.elitelist_papers.run \
-  --resume examples/elitelist_papers/runs/pilot-Pendulum-v1-0 \
+rtk proxy ./scripts/run examples.elitelist_papers.run \
+  --resume runs/pilot-Pendulum-v1-0 \
   --episode-timeout 10
 ```
 
@@ -238,7 +237,7 @@ explicitly during exploration. Do not silently pool them with fixed-timeout runs
 - `experiment.json`: model, seed panels, search config, resolved environment,
   versions and revision information.
 - `source.zip`: source/prompts used by the local runner and optimizer/evaluator,
-  plus the host lockfile and worker Dockerfile for new runs. This is not yet a
+  plus the lockfile, application Dockerfile and launcher for new runs. This is not yet a
   validated standalone release or a fully pinned worker build.
 - `context.txt`: exact shared environment/evaluation context for the original attempt.
 - `run.sqlite`, `exports/`, `best.py`: existing search evidence and policy code.
@@ -269,7 +268,7 @@ To use that environment as the notebook kernel, install these if needed:
 
 ```sh
 rtk proxy uv pip install --python .venv/bin/python ipykernel matplotlib
-rtk proxy .venv/bin/python -B -m unittest examples.elitelist_papers.test_paper1 examples.elitelist_papers.test_resume -v
+rtk proxy ./scripts/run unittest examples.elitelist_papers.test_paper1 examples.elitelist_papers.test_resume -v
 ```
 
 The notebook uses the standard library and NumPy for analysis; pandas is not

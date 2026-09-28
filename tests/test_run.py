@@ -17,10 +17,10 @@ from sqlmodel import Field, SQLModel, select
 
 import rsikit.generation as generation
 from research.rewards import mean_rewards
-from rsikit import Executor, Policy, generate
+from rsikit import Policy, generate
 from rsikit.evaluation import InfrastructureError, PolicyError
 from rsikit.policy import InvalidPolicy
-from tests.helpers import finish_pending, recorded_run
+from tests.helpers import fake_executor, finish_pending, recorded_run
 from tests.providers import ScriptedProvider
 from tests.test_episode_storage import trajectory
 
@@ -31,11 +31,9 @@ RESPONSE = {
 }
 
 
-class FakeSandbox:
+class FakeEvaluation:
     def __init__(self):
-        self.start = AsyncMock()
         self.evaluate = AsyncMock(return_value=trajectory(7.0, {}))
-        self.close = AsyncMock()
 
 
 class RunTests(unittest.IsolatedAsyncioTestCase):
@@ -50,8 +48,8 @@ class RunTests(unittest.IsolatedAsyncioTestCase):
         self.addCleanup(root.stop)
         self.provider = ScriptedProvider([json.dumps(RESPONSE)])
         self.policy = await generate("test task", provider=self.provider)
-        self.sandbox = FakeSandbox()
-        self.executor = Executor(sandbox=self.sandbox)
+        self.evaluation = FakeEvaluation()
+        self.executor = fake_executor(evaluation=self.evaluation)
 
     def create(self, **kwargs):
         return recorded_run(
@@ -83,8 +81,8 @@ class RunTests(unittest.IsolatedAsyncioTestCase):
             finally:
                 active -= 1
 
-        self.sandbox.evaluate.side_effect = evaluate
-        self.executor = Executor(sandbox=self.sandbox, concurrency=2)
+        self.evaluation.evaluate.side_effect = evaluate
+        self.executor = fake_executor(evaluation=self.evaluation, concurrency=2)
         async with self.create() as (run, rollouts):
             first = asyncio.create_task(mean_rewards(rollouts, [self.policy], seeds=[0]))
             await asyncio.wait_for(first_started.wait(), 1)
@@ -98,25 +96,18 @@ class RunTests(unittest.IsolatedAsyncioTestCase):
                 await asyncio.gather(first, second, duplicate)
             self.assertEqual(run.scores(other), {1: 1, 2: 2})
         self.assertEqual(peak, 2)
-        self.assertEqual(self.sandbox.evaluate.await_count, 3)
-        self.sandbox.start.assert_awaited_once_with(2)
-        self.sandbox.close.assert_awaited_once()
+        self.assertEqual(self.evaluation.evaluate.await_count, 3)
 
-    async def test_async_run_reuses_sandbox_across_batches_repairs_and_resume(self):
+    async def test_async_run_repairs_and_resumes_batches(self):
         async with self.create() as (run, rollouts):
-            self.sandbox.start.assert_not_awaited()
             await mean_rewards(rollouts, [self.policy], seeds=[0])
-            self.sandbox.evaluate.side_effect = PolicyError("bad policy")
+            self.evaluation.evaluate.side_effect = PolicyError("bad policy")
             with self.assertRaises(PolicyError):
                 await mean_rewards(rollouts, [self.policy], seeds=[1])
-            self.sandbox.close.assert_not_awaited()
-            self.sandbox.evaluate.side_effect = None
+            self.evaluation.evaluate.side_effect = None
             await finish_pending(rollouts)
             await mean_rewards(rollouts, [self.policy], seeds=[100])
             self.assertEqual(run.scores(self.policy), {0: 7, 1: 7, 100: 7})
-            self.sandbox.start.assert_awaited_once_with(1)
-            self.sandbox.close.assert_not_awaited()
-        self.sandbox.close.assert_awaited_once()
         with self.assertRaisesRegex(RuntimeError, "closed"):
             run.database()
         with self.assertRaisesRegex(RuntimeError, "closed"):
@@ -131,7 +122,7 @@ class RunTests(unittest.IsolatedAsyncioTestCase):
                 await release.wait()
             return trajectory(float(seed), {})
 
-        self.sandbox.evaluate.side_effect = evaluate
+        self.evaluation.evaluate.side_effect = evaluate
 
         async def batch(seeds):
             return [
@@ -160,7 +151,7 @@ class RunTests(unittest.IsolatedAsyncioTestCase):
                 release.set()
                 queued.cancel()
                 await asyncio.gather(first, queued, return_exceptions=True)
-        self.assertEqual([call.args[2] for call in self.sandbox.evaluate.call_args_list], [0, 1])
+        self.assertEqual([call.args[2] for call in self.evaluation.evaluate.call_args_list], [0, 1])
 
     async def test_resume_only_dispatches_policies_it_locked(self):
         other = await generate(
@@ -174,8 +165,8 @@ class RunTests(unittest.IsolatedAsyncioTestCase):
             await release[seed].wait()
             return trajectory(float(seed), {})
 
-        self.sandbox.evaluate.side_effect = evaluate
-        self.executor = Executor(sandbox=self.sandbox, concurrency=3)
+        self.evaluation.evaluate.side_effect = evaluate
+        self.executor = fake_executor(evaluation=self.evaluation, concurrency=3)
         async with self.create() as (run, rollouts):
             first = asyncio.create_task(mean_rewards(rollouts, [self.policy], seeds=[0]))
             await started[0].wait()
@@ -191,42 +182,16 @@ class RunTests(unittest.IsolatedAsyncioTestCase):
             finally:
                 release[1].set()
                 await asyncio.gather(first, second, resume, return_exceptions=True)
-        self.assertEqual([call.args[2] for call in self.sandbox.evaluate.call_args_list], [0, 1])
+        self.assertEqual([call.args[2] for call in self.evaluation.evaluate.call_args_list], [0, 1])
 
-    async def test_async_run_closes_on_body_failure_and_cancellation(self):
-        for exception in (RuntimeError("generation failed"), asyncio.CancelledError()):
-            with self.subTest(exception=type(exception).__name__):
-                run = self.create() if not self.path.exists() else self.reopen()
-                before = self.sandbox.close.await_count
-                with self.assertRaises(type(exception)):
-                    async with run as (run, rollouts):
-                        await mean_rewards(rollouts, [self.policy], seeds=[before])
-                        raise exception
-                self.assertEqual(self.sandbox.close.await_count, before + 1)
-
-    async def test_async_run_invalidates_failed_sandbox_before_retry(self):
+    async def test_async_run_retries_failed_episode(self):
         async with self.create() as (run, rollouts):
-            self.sandbox.evaluate.side_effect = InfrastructureError("worker died")
+            self.evaluation.evaluate.side_effect = InfrastructureError("worker died")
             with self.assertRaises(InfrastructureError):
                 await mean_rewards(rollouts, [self.policy])
-            self.sandbox.close.assert_awaited_once()
-            self.sandbox.evaluate.side_effect = None
+            self.evaluation.evaluate.side_effect = None
             await finish_pending(rollouts)
-            self.assertEqual(self.sandbox.start.await_count, 2)
             self.assertEqual(run.scores(self.policy), {0: 7})
-        self.assertEqual(self.sandbox.close.await_count, 2)
-
-    async def test_failed_cleanup_must_finish_before_restart(self):
-        self.sandbox.start.side_effect = [InfrastructureError("start failed"), None]
-        self.sandbox.close.side_effect = [InfrastructureError("cleanup failed"), None, None]
-        async with self.create() as (run, rollouts):
-            with self.assertRaisesRegex(InfrastructureError, "start failed"):
-                await mean_rewards(rollouts, [self.policy])
-            await finish_pending(rollouts)
-            self.assertEqual(self.sandbox.start.await_count, 2)
-            self.assertEqual(self.sandbox.close.await_count, 2)
-            self.assertEqual(run.scores(self.policy), {0: 7})
-        self.assertEqual(self.sandbox.close.await_count, 3)
 
     async def test_save_infers_tables_upserts_and_commits_atomically(self):
         class CustomEvaluation(SQLModel, table=True):
@@ -282,8 +247,7 @@ class RunTests(unittest.IsolatedAsyncioTestCase):
                 {self.policy.id: 7.0},
             )
             await mean_rewards(rollouts, [self.policy], seeds=[0, 1])
-            self.assertEqual(self.sandbox.evaluate.await_count, 2)
-            self.sandbox.start.assert_awaited_once_with(1)
+            self.assertEqual(self.evaluation.evaluate.await_count, 2)
             (export,) = (self.path / "exports").glob("*.py")
             restored = Policy.from_file(export)
             self.assertEqual(restored.id, self.policy.id)
@@ -298,7 +262,6 @@ class RunTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(restored.description, RESPONSE["description"])
             self.assertEqual(run.scores(restored), {0: 7.0, 1: 7.0})
             self.assertTrue(export.exists())
-        self.assertEqual(self.sandbox.start.await_count, 1)
         with closing(sqlite3.connect(self.path / "run.sqlite")) as db:
             self.assertEqual(
                 [r[1] for r in db.execute("PRAGMA table_info(settings)")], ["name", "export"]
@@ -335,16 +298,15 @@ class RunTests(unittest.IsolatedAsyncioTestCase):
         async def evaluate(implementation, environment, seed):
             return trajectory(seed * 2.0, {})
 
-        self.sandbox.evaluate.side_effect = evaluate
+        self.evaluation.evaluate.side_effect = evaluate
         with self.create() as (run, rollouts):
             self.assertEqual(await mean_rewards(rollouts, []), {})
-            self.sandbox.start.assert_not_awaited()
             self.assertEqual(await mean_rewards(rollouts, [self.policy]), {self.policy.id: 0.0})
             self.assertEqual(
                 await mean_rewards(rollouts, [self.policy], seeds=(0, 1, 2)), {self.policy.id: 2.0}
             )
             self.assertEqual(run.scores(self.policy), {0: 0.0, 1: 2.0, 2: 4.0})
-            self.assertEqual(self.sandbox.evaluate.await_count, 3)
+            self.assertEqual(self.evaluation.evaluate.await_count, 3)
             with self.assertRaisesRegex(ValueError, "at least one seed"):
                 await mean_rewards(rollouts, [self.policy], seeds=())
 
@@ -357,7 +319,7 @@ class RunTests(unittest.IsolatedAsyncioTestCase):
                 await asyncio.Event().wait()
             return trajectory(7.0, {})
 
-        self.sandbox.evaluate.side_effect = blocked
+        self.evaluation.evaluate.side_effect = blocked
         with self.create() as (run, rollouts):
             task = asyncio.create_task(mean_rewards(rollouts, [self.policy], seeds=[0, 1, 2]))
             await started.wait()
@@ -367,14 +329,13 @@ class RunTests(unittest.IsolatedAsyncioTestCase):
             with self.assertRaises(asyncio.CancelledError):
                 await task
             self.assertEqual(run.scores(self.policy), {0: 7.0, 1: None, 2: None})
-        self.sandbox.close.assert_awaited_once()
         moved = self.path.with_name("moved")
         shutil.move(self.path, moved)
-        self.sandbox.evaluate = AsyncMock(return_value=trajectory(9.0, {}))
+        self.evaluation.evaluate = AsyncMock(return_value=trajectory(9.0, {}))
         with self.reopen(moved) as (run, rollouts):
             await finish_pending(rollouts)
             self.assertEqual(run.scores(self.policy), {0: 7.0, 1: 9.0, 2: 9.0})
-            self.assertEqual([c.args[2] for c in self.sandbox.evaluate.call_args_list], [1, 2])
+            self.assertEqual([c.args[2] for c in self.evaluation.evaluate.call_args_list], [1, 2])
 
     async def test_group_failure_preserves_other_scores_and_artifacts(self):
         async def evaluate(implementation, environment, seed):
@@ -382,8 +343,8 @@ class RunTests(unittest.IsolatedAsyncioTestCase):
                 raise PolicyError("bad action")
             return trajectory(seed, {"nested/result.txt": str(seed).encode()})
 
-        self.sandbox.evaluate.side_effect = evaluate
-        self.executor = Executor(sandbox=self.sandbox, concurrency=2)
+        self.evaluation.evaluate.side_effect = evaluate
+        self.executor = fake_executor(evaluation=self.evaluation, concurrency=2)
         with self.create() as (run, rollouts):
             with self.assertRaisesRegex(PolicyError, "bad action"):
                 await mean_rewards(rollouts, [self.policy], seeds=[0, 1, 2])
@@ -391,11 +352,11 @@ class RunTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(
                 (run.path / "artifacts" / self.policy.id / "2/nested/result.txt").read_bytes(), b"2"
             )
-        self.sandbox.evaluate = AsyncMock(return_value=trajectory(3.0, {}))
+        self.evaluation.evaluate = AsyncMock(return_value=trajectory(3.0, {}))
         with self.reopen() as (run, rollouts):
             await finish_pending(rollouts)
             self.assertEqual(run.scores(self.policy), {0: 0.0, 1: 3.0, 2: 2.0})
-            self.assertEqual(self.sandbox.evaluate.await_count, 1)
+            self.assertEqual(self.evaluation.evaluate.await_count, 1)
 
     async def test_executor_bounds_workers_and_closes_once(self):
         other = await generate(
@@ -417,8 +378,8 @@ class RunTests(unittest.IsolatedAsyncioTestCase):
             finally:
                 active -= 1
 
-        self.sandbox.evaluate.side_effect = evaluate
-        self.executor = Executor(sandbox=self.sandbox, concurrency=2)
+        self.evaluation.evaluate.side_effect = evaluate
+        self.executor = fake_executor(evaluation=self.evaluation, concurrency=2)
         with self.create() as (run, rollouts):
             task = asyncio.create_task(mean_rewards(rollouts, [self.policy, other], seeds=[0, 1]))
             await asyncio.wait_for(started.wait(), 2)
@@ -427,10 +388,8 @@ class RunTests(unittest.IsolatedAsyncioTestCase):
             result = await task
             self.assertEqual(result, {self.policy.id: 7.0, other.id: 7.0})
         self.assertEqual(peak, 2)
-        self.sandbox.start.assert_awaited_once_with(2)
-        self.sandbox.close.assert_awaited_once()
 
-    async def test_cancellation_waits_for_workers_before_closing_sandbox(self):
+    async def test_cancellation_waits_for_workers(self):
         started = asyncio.Event()
         active = 0
 
@@ -445,12 +404,8 @@ class RunTests(unittest.IsolatedAsyncioTestCase):
                 await asyncio.sleep(0)
                 active -= 1
 
-        async def close():
-            self.assertEqual(active, 0)
-
-        self.sandbox.evaluate.side_effect = evaluate
-        self.sandbox.close.side_effect = close
-        self.executor = Executor(sandbox=self.sandbox, concurrency=2)
+        self.evaluation.evaluate.side_effect = evaluate
+        self.executor = fake_executor(evaluation=self.evaluation, concurrency=2)
         async with self.create() as (run, rollouts):
             task = asyncio.create_task(mean_rewards(rollouts, [self.policy], seeds=[0, 1, 2]))
             await asyncio.wait_for(started.wait(), 2)
@@ -458,7 +413,7 @@ class RunTests(unittest.IsolatedAsyncioTestCase):
             with self.assertRaises(asyncio.CancelledError):
                 await task
             self.assertEqual(run.scores(self.policy), {0: None, 1: None, 2: None})
-        self.sandbox.close.assert_awaited_once()
+        self.assertEqual(active, 0)
 
     async def test_invalid_results_artifact_paths_and_startup_failure_remain_pending(self):
         with self.create() as (run, rollouts):
@@ -466,34 +421,13 @@ class RunTests(unittest.IsolatedAsyncioTestCase):
                 (trajectory(float("nan")), "finite"),
                 (trajectory(1.0, {"../../../../outside": b"bad"}), "Artifact path"),
             ]:
-                self.sandbox.evaluate.return_value = outcome
+                self.evaluation.evaluate.return_value = outcome
                 with self.assertRaisesRegex(ValueError, diagnostic):
                     await mean_rewards(rollouts, [self.policy])
                 self.assertEqual(run.scores(self.policy), {0: None})
-            self.sandbox.start.side_effect = InfrastructureError("start failed")
+            self.evaluation.evaluate.side_effect = InfrastructureError("start failed")
             with self.assertRaisesRegex(InfrastructureError, "start failed"):
                 await finish_pending(rollouts)
-            self.assertEqual(self.sandbox.close.await_count, 3)
-
-            entered, release, finished = asyncio.Event(), asyncio.Event(), asyncio.Event()
-
-            async def start(workers):
-                entered.set()
-                await release.wait()
-                finished.set()
-
-            async def close():
-                self.assertTrue(finished.is_set())
-
-            self.sandbox.start.side_effect = start
-            self.sandbox.close.side_effect = close
-            pending = asyncio.create_task(finish_pending(rollouts))
-            await entered.wait()
-            pending.cancel()
-            await asyncio.sleep(0)
-            release.set()
-            with self.assertRaises(asyncio.CancelledError):
-                await pending
         self.assertFalse((self.path.parent / "outside").exists())
 
     async def test_run_ownership_identity_and_export_opt_out(self):

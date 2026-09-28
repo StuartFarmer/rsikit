@@ -7,7 +7,7 @@ from pathlib import Path
 import numpy as np
 
 from rsikit import Episode, Policy, Run
-from rsikit.sandbox import codec
+from rsikit import episode as codec
 
 
 def trajectory(reward=3.0, artifacts=None):
@@ -23,6 +23,22 @@ def trajectory(reward=3.0, artifacts=None):
 
 
 class EpisodeStorageTests(unittest.TestCase):
+    def test_pre_migration_saved_json(self):
+        # Literal old-format fixture, independent of the current encoder.
+        saved = {
+            "observations": ["list", [0, 1]],
+            "actions": ["list", [0]],
+            "rewards": ["list", [7.0]],
+            "terminations": ["list", [True]],
+            "truncations": ["list", [False]],
+            "infos": ["list", [["dict", []], ["dict", []]]],
+            "artifacts": ["dict", [["log.txt", ["bytes", "aGk="]]]],
+        }
+        episode = codec.decode_episode(saved)
+        self.assertEqual(episode.total_reward, 7.0)
+        self.assertEqual(episode.artifacts, {"log.txt": b"hi"})
+        self.assertEqual(codec.encode_episode(episode), saved)
+
     def test_codec_roundtrip_preserves_values_and_rejects_misalignment(self):
         episode = trajectory(artifacts={"log.txt": b"hello"})
         data = codec.encode_episode(episode)

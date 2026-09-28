@@ -7,13 +7,13 @@ the upstream ShinkaEvolve framework. See [provenance](../research/shinkaevolve/N
 
 ## Run an experiment
 
-Use the existing OpenRouter/Box2D installation and Docker worker described in the
+Use the existing OpenRouter/Box2D installation and application image described in the
 [README](../README.md). No image rebuild is needed for this optimizer alone.
 With `OPENROUTER_API_KEY` exported:
 
 ```sh
-.venv/bin/python -B -m examples.shinkaevolve --env LunarLander-v3 --generations 10 --batch-size 25 --seeds 0 1 2 3 4 5 6 7 8 9
-.venv/bin/python -B -m examples.shinkaevolve --env BipedalWalker-v3 --generations 10 --batch-size 25 --seeds 0 1 2 3 4 5 6 7 8 9
+./scripts/run examples.shinkaevolve --env LunarLander-v3 --generations 10 --batch-size 25 --seeds 0 1 2 3 4 5 6 7 8 9
+./scripts/run examples.shinkaevolve --env BipedalWalker-v3 --generations 10 --batch-size 25 --seeds 0 1 2 3 4 5 6 7 8 9
 ```
 
 The environment presets are shared with AlphaEvolve: continuous LunarLander with
@@ -32,7 +32,7 @@ gets its own SQLite database, Python exports, `run.log`, and `experiment.json`.
 Videos use the existing replay command and do not need model calls:
 
 ```sh
-.venv/bin/python -B -m examples.replay runs/YOUR_RUN --env LunarLander-v3 --top 3 --seeds 10 11 12
+./scripts/run examples.replay runs/YOUR_RUN --env LunarLander-v3 --top 3 --seeds 10 11 12
 ```
 
 ## Python loop
@@ -72,7 +72,7 @@ with make_environment("LunarLander-v3") as env:
 This shows the success path. `examples.shinkaevolve.run_search` adds runtime
 repair, saving incomplete batches, logging, and progress. It calls
 `generator.evaluation_failed(failures)` and `await generator.repair(policy,
-diagnostic)` for sandbox policy errors. Repair returns a replacement Policy or
+diagnostic)` for policy errors. Repair returns a replacement Policy or
 `None` when that candidate is discarded. Provider and infrastructure errors
 remain run errors rather than being treated as low fitness.
 

@@ -27,7 +27,7 @@ class BlackjackTrainTests(unittest.IsolatedAsyncioTestCase):
                     "OpenRouterAPI",
                     return_value=ScriptedProvider([program(0), program(1)]),
                 ),
-                patch.object(elitesearch, "Console", return_value=Console(file=io.StringIO())),
+                patch("rsikit.progress.Console", return_value=Console(file=io.StringIO())),
             ):
                 await blackjack_train.main(
                     [

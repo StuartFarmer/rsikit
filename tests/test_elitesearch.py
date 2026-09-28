@@ -16,10 +16,10 @@ from slick.providers import ProviderError
 from sqlmodel import select
 
 from research.elitesearch import Config, EliteSearch, Generation, Measurement, Organism
-from rsikit import Executor, Policy
-from tests.helpers import recorded_run
+from rsikit import Policy
+from tests.helpers import fake_executor, recorded_run
 from tests.providers import ScriptedProvider
-from tests.test_run import FakeSandbox
+from tests.test_run import FakeEvaluation
 
 
 def program(value):
@@ -369,7 +369,7 @@ class EliteSearchTests(unittest.IsolatedAsyncioTestCase):
         with tempfile.TemporaryDirectory() as directory:
             output = Path(directory) / "run"
             terminal = io.StringIO()
-            sandbox = FakeSandbox()
+            evaluation = FakeEvaluation()
             with (
                 patch(
                     "sys.argv",
@@ -402,12 +402,12 @@ class EliteSearchTests(unittest.IsolatedAsyncioTestCase):
                     "OpenRouterAPI",
                     return_value=ScriptedProvider([program(i) for i in range(4)]),
                 ),
-                patch.object(example, "Executor", return_value=Executor(sandbox=sandbox)),
-                patch.object(example, "Console", return_value=Console(file=terminal, width=140)),
+                patch.object(
+                    example, "Executor", return_value=fake_executor(evaluation=evaluation)
+                ),
+                patch("rsikit.progress.Console", return_value=Console(file=terminal, width=140)),
             ):
                 await example.main()
-            sandbox.start.assert_awaited_once()
-            sandbox.close.assert_awaited_once()
             summary = json.loads((output / "summary.json").read_text())
             self.assertEqual(summary["generations"], 2)
             self.assertEqual(summary["organisms"], 4)
@@ -444,8 +444,10 @@ class EliteSearchTests(unittest.IsolatedAsyncioTestCase):
                 patch.dict("os.environ", {"OPENROUTER_API_KEY": "test"}),
                 patch.object(example, "OpenRouterAPI", return_value=provider) as constructor,
                 patch.object(provider, "acall", side_effect=stalled_response),
-                patch.object(example, "Executor", return_value=Executor(sandbox=FakeSandbox())),
-                patch.object(example, "Console", return_value=Console(file=io.StringIO())),
+                patch.object(
+                    example, "Executor", return_value=fake_executor(evaluation=FakeEvaluation())
+                ),
+                patch("rsikit.progress.Console", return_value=Console(file=io.StringIO())),
             ):
                 with self.assertRaises(TimeoutError):
                     await asyncio.wait_for(

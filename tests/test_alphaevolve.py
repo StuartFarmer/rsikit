@@ -24,11 +24,11 @@ from research.alphaevolve.generation import (
 from research.alphaevolve.improved import AlphaEvolve, Config, InvalidCandidate
 from research.alphaevolve.original.agent import Guidance
 from research.rewards import mean_rewards
-from rsikit import Executor, Policy
-from tests.helpers import recorded_run
+from rsikit import Policy
+from tests.helpers import fake_executor, recorded_run
 from tests.providers import ScriptedProvider
 from tests.test_episode_storage import trajectory
-from tests.test_run import FakeSandbox
+from tests.test_run import FakeEvaluation
 
 ROOT = Path(alphaevolve.__file__).parent
 SOURCE = """from rsikit import Policy
@@ -122,13 +122,13 @@ class AlphaEvolveTests(unittest.IsolatedAsyncioTestCase):
     async def test_two_generations_persist_only_at_evaluation_and_update_selection(self):
         provider = ScriptedProvider([program(i) for i in range(20)])
         agent = AlphaEvolve("Improve score", provider, config=Config(mode="rewrite"))
-        sandbox = FakeSandbox()
+        evaluation = FakeEvaluation()
 
         async def evaluate(implementation, environment, seed):
             score = float(implementation.split("return ")[1].split()[0])
             return trajectory(score, {"result.txt": str(score).encode()})
 
-        sandbox.evaluate.side_effect = evaluate
+        evaluation.evaluate.side_effect = evaluate
         with (
             tempfile.TemporaryDirectory() as folder,
             gym.make("CartPole-v1", max_episode_steps=2) as environment,
@@ -136,7 +136,7 @@ class AlphaEvolveTests(unittest.IsolatedAsyncioTestCase):
                 name="loop",
                 path=Path(folder) / "run",
                 environment=environment,
-                executor=Executor(sandbox=sandbox, concurrency=2),
+                executor=fake_executor(evaluation=evaluation, concurrency=2),
             ) as (run, rollouts),
         ):
             for generation in range(2):
@@ -157,7 +157,6 @@ class AlphaEvolveTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(len(list(run.path.rglob("*.py"))), (generation + 1) * 10)
                 self.assertEqual(len(list(run.path.rglob("result.txt"))), (generation + 1) * 10)
         self.assertEqual((agent.generation_calls, agent.completed), (20, 20))
-        self.assertEqual(sandbox.start.await_count, 2)
         self.assertGreater(len({row["parent"].policy.id for row in agent.attempts[10:]}), 1)
         with self.assertRaises(KeyError):
             agent.update_scores(scores)

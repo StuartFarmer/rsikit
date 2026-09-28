@@ -1,6 +1,7 @@
 """Bounded, overlapping program generation and evaluation (paper §2.6)."""
 
 import asyncio
+import logging
 from collections.abc import Mapping
 
 from rsikit.evaluation import PolicyError
@@ -33,6 +34,30 @@ async def search(
     ):
         if not isinstance(value, int) or isinstance(value, bool) or value < minimum:
             raise ValueError(f"{name} must be an integer >= {minimum}")
+    from .agent import AlphaEvolve
+
+    reporting = isinstance(generator, AlphaEvolve)
+    logger = logging.getLogger(__name__)
+    offset = generator._attempt_offset + len(generator.attempts) if reporting else 0
+    if reporting:
+        generator._streaming_progress = (offset, evaluation_batch_size, proposals)
+    logger.info(
+        "Starting AlphaEvolve paper search",
+        extra={
+            "progress": dict(
+                kind="search_started",
+                optimizer="AlphaEvolve (paper)",
+                total_candidates=proposals + offset,
+                completed_candidates_before=generator._completed_offset if reporting else 0,
+                columns=generator.leaderboard_columns if reporting else {},
+                resumed=offset > 0,
+            )
+        },
+    )
+    if reporting:
+        generator._log_leaderboard()
+    closed_groups = set()
+    outcome = "completed"
     pending = {}
     tasks = []
     slots = asyncio.Semaphore(generation_concurrency)
@@ -40,6 +65,29 @@ async def search(
     def emit(event, policies):
         if on_event is not None:
             on_event(event, list(policies))
+        if reporting:
+            groups = {}
+            for row in generator.attempts:
+                if row["id"] > offset:
+                    groups.setdefault(row["batch"], []).append(row)
+            for group, rows in groups.items():
+                index = (rows[0]["id"] - offset - 1) // evaluation_batch_size
+                expected = min(evaluation_batch_size, proposals - index * evaluation_batch_size)
+                if (
+                    group not in closed_groups
+                    and len(rows) == expected
+                    and all(row["status"] in ("evaluated", "discarded") for row in rows)
+                ):
+                    logger.info(
+                        "Finished batch %s",
+                        group,
+                        extra={
+                            "progress": dict(
+                                kind="batch_finished", batch_id=str(group), status="completed"
+                            )
+                        },
+                    )
+                    closed_groups.add(group)
 
     def ready(policies, event="generated"):
         pending.update((policy.id, policy) for policy in policies)
@@ -64,6 +112,8 @@ async def search(
         while policies:
             batch = [policy for policy in policies if policy.id not in measured]
             try:
+                if reporting:
+                    generator.evaluation_started(batch)
                 results = await evaluate_batch(batch) if batch else {}
                 if not isinstance(results, Mapping) or set(results) != {p.id for p in batch}:
                     raise ValueError("Evaluator must return exactly the evaluated policy IDs")
@@ -162,9 +212,31 @@ async def search(
         tasks = [asyncio.create_task(produce()) for _ in range(workers)]
         tasks.append(asyncio.create_task(consume()))
         await asyncio.gather(*tasks)
-    except BaseException:
+    except BaseException as exc:
+        outcome = "cancelled" if isinstance(exc, asyncio.CancelledError) else "failed"
         for task in tasks:
             task.cancel()
         await asyncio.gather(*tasks, return_exceptions=True)
         emit("failed", pending.values())
         raise
+    finally:
+        groups = (
+            dict.fromkeys(row.get("batch") for row in generator.attempts if row["id"] > offset)
+            if reporting
+            else {}
+        )
+        for group in groups:
+            logger.info(
+                "Finished batch %s",
+                group,
+                extra={
+                    "progress": dict(kind="batch_finished", batch_id=str(group), status=outcome)
+                },
+            )
+        logger.info(
+            "Search %s",
+            outcome,
+            extra={"progress": dict(kind="search_finished", status=outcome, reason=outcome)},
+        )
+        if reporting:
+            generator._streaming_progress = None

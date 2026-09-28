@@ -10,8 +10,9 @@ import rsikit
 from research.alphaevolve.paper.evaluation import assess
 from research.rollouts import Rollouts
 from rsikit.evaluation import InfrastructureError, PolicyError
+from tests.helpers import fake_executor
 from tests.test_episode_storage import trajectory
-from tests.test_run import FakeSandbox
+from tests.test_run import FakeEvaluation
 
 SOURCE = "from rsikit import Policy\nclass Solution(Policy):\n    async def act(self, observation): return 0\n"
 
@@ -23,13 +24,13 @@ class EvaluationTests(unittest.IsolatedAsyncioTestCase):
         self.addCleanup(directory.cleanup)
         self.environment = gym.make("CartPole-v1")
         self.addCleanup(self.environment.close)
-        self.sandbox = FakeSandbox()
+        self.evaluation = FakeEvaluation()
         self.run = rsikit.Run.create(
             name="shared-evaluation",
             path=Path(directory.name) / "run",
         )
         self.rollouts = Rollouts(
-            self.environment, rsikit.Executor(sandbox=self.sandbox, concurrency=2), self.run
+            self.environment, fake_executor(evaluation=self.evaluation, concurrency=2), self.run
         )
         self.addCleanup(self.run.close)
         self.good = rsikit.Policy.from_text(SOURCE, name="Good")
@@ -66,7 +67,7 @@ class EvaluationTests(unittest.IsolatedAsyncioTestCase):
                 raise PolicyError("invalid action")
             return trajectory(float(seed + 2), {})
 
-        self.sandbox.evaluate.side_effect = evaluate
+        self.evaluation.evaluate.side_effect = evaluate
         results = await assess(self.rollouts, [self.good, self.bad], seeds=iter([0, 1, 0]))
         self.assertEqual(results[self.good.id].seed_scores, {0: 2, 1: 3})
         self.assertEqual(
@@ -76,10 +77,10 @@ class EvaluationTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(results[self.bad.id].accepted)
         self.assertEqual(results[self.bad.id].metrics, {})
         self.assertEqual(self.run.scores(self.bad), {0: 2, 1: None})
-        self.sandbox.evaluate.side_effect = None
+        self.evaluation.evaluate.side_effect = None
         recovered = await assess(self.rollouts, [self.good, self.bad], seeds=[0, 1])
         self.assertEqual(recovered[self.bad.id].seed_scores, {0: 2, 1: 7})
-        self.assertEqual(self.sandbox.evaluate.await_count, 5)
+        self.assertEqual(self.evaluation.evaluate.await_count, 5)
 
     async def test_screening_handles_failure_rejection_and_success_separately(self):
         low = rsikit.Policy.from_text(SOURCE + "# low\n", name="Low")
@@ -89,7 +90,7 @@ class EvaluationTests(unittest.IsolatedAsyncioTestCase):
                 raise PolicyError("broken")
             return trajectory(0.0 if source.endswith("# low\n") else float(10 + seed), {})
 
-        self.sandbox.evaluate.side_effect = evaluate
+        self.evaluation.evaluate.side_effect = evaluate
         results = await assess(
             self.rollouts,
             [self.good, self.bad, low],
@@ -103,7 +104,7 @@ class EvaluationTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(results[low.id].accepted)
         self.assertEqual(results[self.good.id].features, {"mean_reward": 11, "reward_std": 1})
         self.assertEqual(self.run.scores(low), {0: 0})
-        self.assertEqual(self.sandbox.evaluate.await_count, 4)
+        self.assertEqual(self.evaluation.evaluate.await_count, 4)
 
     async def test_invalid_configuration_and_infrastructure_do_not_become_bad_fitness(self):
         for kwargs in (
@@ -115,8 +116,7 @@ class EvaluationTests(unittest.IsolatedAsyncioTestCase):
         ):
             with self.subTest(kwargs=kwargs), self.assertRaises(ValueError):
                 await assess(self.rollouts, [self.good], **kwargs)
-        self.sandbox.start.assert_not_awaited()
-        self.sandbox.evaluate.side_effect = InfrastructureError("offline")
+        self.evaluation.evaluate.side_effect = InfrastructureError("offline")
         with self.assertRaisesRegex(InfrastructureError, "offline"):
             await assess(self.rollouts, [self.good])
 

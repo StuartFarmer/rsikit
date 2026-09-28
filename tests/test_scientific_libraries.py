@@ -1,6 +1,7 @@
 """Small numerical checks, run during image construction and restricted execution."""
 
 import json
+import unittest
 from importlib.metadata import version
 
 
@@ -40,6 +41,11 @@ def check():
         name: version(name)
         for name in ("numpy", "scipy", "control", "cvxpy", "scikit-learn", "torch")
     }
+
+
+class ScientificLibrariesTests(unittest.TestCase):
+    def test_numerical_operations(self):
+        check()
 
 
 if __name__ == "__main__":

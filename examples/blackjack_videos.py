@@ -23,7 +23,6 @@ from rsikit.envs import BitcoinEnv, BlackjackEnv
 from rsikit.envs.bitcoin import TRAIN_DATA, load_prices
 from rsikit.envs.bitcoin_render import BitcoinRenderer
 from rsikit.envs.blackjack_render import BlackjackRenderer
-from rsikit.sandbox.docker import DockerSandbox
 
 
 def evaluation_panel(
@@ -291,7 +290,7 @@ async def export(
     with trace_environment(environment=environment) as env:
         async with Executor(
             concurrency=8,
-            sandbox=DockerSandbox(episode_timeout=experiment.get("episode_timeout", 60.0)),
+            episode_timeout=experiment.get("episode_timeout", 60.0),
         ) as executor:
             completed = 0
             async for pid, seed, result in executor.evaluate(jobs, env):

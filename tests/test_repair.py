@@ -1,4 +1,4 @@
-"""Diagnostic-driven repair before generation returns and after sandbox failures."""
+"""Diagnostic-driven repair before generation returns and after evaluation failures."""
 
 import asyncio
 import io
@@ -20,13 +20,12 @@ from research.alphaevolve import improved, original, paper
 from research.alphaevolve.generation import _PolicyResponse
 from research.alphaevolve.history import Evaluation, Generation
 from research.alphaevolve.improved import AlphaEvolve, Config
-from rsikit import Executor
 from rsikit.evaluation import InfrastructureError, PolicyError
-from tests.helpers import recorded_run
+from tests.helpers import fake_executor, recorded_run
 from tests.providers import ScriptedProvider
 from tests.test_alphaevolve import SOURCE, program
 from tests.test_episode_storage import trajectory
-from tests.test_run import FakeSandbox
+from tests.test_run import FakeEvaluation
 
 ROOT = Path(alphaevolve.__file__).parent
 
@@ -65,21 +64,22 @@ class RepairTests(unittest.IsolatedAsyncioTestCase):
                 agent = variant.AlphaEvolve("task", provider, config=variant.Config(islands=1))
                 if variant is paper:
                     self.addCleanup(agent.close)
-                sandbox = FakeSandbox()
+                evaluation = FakeEvaluation()
 
                 async def evaluate(source, environment, seed):
                     if any(f"return {i}" in source for i in (9, 8, 7)):
                         raise PolicyError("bad action")
                     return trajectory(7.0, {})
 
-                sandbox.evaluate.side_effect = evaluate
+                evaluation.evaluate.side_effect = evaluate
                 with (
                     gym.make("CartPole-v1") as env,
                     recorded_run(
                         name="concurrent-repairs",
+                        console=Console(file=io.StringIO()),
                         path=Path(directory) / "run",
                         environment=env,
-                        executor=Executor(sandbox=sandbox, concurrency=3),
+                        executor=fake_executor(evaluation=evaluation, concurrency=3),
                     ) as (run, rollouts),
                 ):
                     task = asyncio.create_task(
@@ -90,7 +90,6 @@ class RepairTests(unittest.IsolatedAsyncioTestCase):
                             generations=1,
                             batch_size=4,
                             generation_concurrency=2,
-                            console=Console(file=io.StringIO()),
                         )
                     )
                     try:
@@ -183,7 +182,7 @@ class RepairTests(unittest.IsolatedAsyncioTestCase):
         agent = AlphaEvolve(
             "task", provider, config=Config(islands=1, max_repairs=1, mode="rewrite")
         )
-        sandbox = FakeSandbox()
+        evaluation = FakeEvaluation()
         checked = []
 
         async def evaluate(implementation, environment, seed):
@@ -194,16 +193,17 @@ class RepairTests(unittest.IsolatedAsyncioTestCase):
                 return trajectory(100.0, {})  # A partial success must never enter selection.
             return trajectory(8.0 if "return 1" in implementation else 7.0, {})
 
-        sandbox.evaluate.side_effect = evaluate
+        evaluation.evaluate.side_effect = evaluate
         output = io.StringIO()
         with (
             tempfile.TemporaryDirectory() as directory,
             gym.make("CartPole-v1", max_episode_steps=3) as env,
             recorded_run(
                 name="discard",
+                console=Console(file=output, width=140),
                 path=Path(directory) / "run",
                 environment=env,
-                executor=Executor(sandbox=sandbox, concurrency=2),
+                executor=fake_executor(evaluation=evaluation, concurrency=2),
             ) as (run, rollouts),
         ):
             await run_search(
@@ -214,7 +214,6 @@ class RepairTests(unittest.IsolatedAsyncioTestCase):
                 batch_size=2,
                 generation_concurrency=1,
                 seeds=[0, 1],
-                console=Console(file=output, width=140),
             )
             self.assertEqual(agent.completed, 2)
             self.assertEqual(agent.best.name, "Policy 1")
@@ -338,7 +337,7 @@ class RepairTests(unittest.IsolatedAsyncioTestCase):
     async def test_runtime_repair_reuses_successful_scores_and_original_budget(self):
         provider = ScriptedProvider([program(0), program(9), program(1)])
         agent = AlphaEvolve("task", provider)
-        sandbox = FakeSandbox()
+        evaluation = FakeEvaluation()
         checked = []
 
         async def evaluate(implementation, environment, seed):
@@ -347,25 +346,25 @@ class RepairTests(unittest.IsolatedAsyncioTestCase):
                 raise PolicyError("Action outside action_space")
             return trajectory(7.0, {})
 
-        sandbox.evaluate.side_effect = evaluate
+        evaluation.evaluate.side_effect = evaluate
+        output = io.StringIO()
         with (
             tempfile.TemporaryDirectory() as directory,
             gym.make("CartPole-v1", max_episode_steps=3) as env,
             recorded_run(
                 name="repair",
+                console=Console(file=output, width=140),
                 path=Path(directory) / "run",
                 environment=env,
-                executor=Executor(sandbox=sandbox, concurrency=2),
+                executor=fake_executor(evaluation=evaluation, concurrency=2),
             ) as (run, rollouts),
         ):
-            output = io.StringIO()
             await run_search(
                 agent,
                 run,
                 rollouts,
                 generations=1,
                 batch_size=2,
-                console=Console(file=output, force_terminal=False, width=140),
             )
             self.assertEqual(checked.count(SOURCE), 1)
             self.assertEqual(len(checked), 3)
@@ -388,7 +387,7 @@ class RepairTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(agent._pending, {})
         self.assertIn("exhausted after 1", agent.attempts[-1]["error"])
         self.assertEqual(len(provider.calls), 2)
-        sandbox = FakeSandbox()
+        evaluation = FakeEvaluation()
 
         async def evaluate(implementation, environment, seed):
             if seed == 0:
@@ -396,10 +395,10 @@ class RepairTests(unittest.IsolatedAsyncioTestCase):
             await asyncio.sleep(0)
             raise InfrastructureError("Docker stopped")
 
-        sandbox.evaluate.side_effect = evaluate
+        evaluation.evaluate.side_effect = evaluate
         with gym.make("CartPole-v1") as env:
             with self.assertRaisesRegex(InfrastructureError, "Docker stopped"):
-                async for _ in Executor(sandbox=sandbox, concurrency=2).evaluate(
+                async for _ in fake_executor(evaluation=evaluation, concurrency=2).evaluate(
                     [(policy.id, policy._implementation, seed) for seed in (0, 1)], env
                 ):
                     pass

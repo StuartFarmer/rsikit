@@ -18,7 +18,7 @@ class SelfHealer:
     async def repair(
         self, reference: str, failed: str, diagnostic: str, *, provider=None, record=None
     ) -> type[Policy]:
-        """Repair a full policy from validation or sandbox diagnostics."""
+        """Repair a full policy from validation or execution diagnostics."""
         schema = _PolicyResponse.model_json_schema()
         context = render(
             "original/prompts/repair.j2",

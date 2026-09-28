@@ -9,6 +9,7 @@ import logging
 import math
 import os
 import secrets
+import subprocess
 from dataclasses import asdict, replace
 from pathlib import Path
 from time import perf_counter
@@ -16,7 +17,7 @@ from time import perf_counter
 from rich.console import Console
 from slick import prompts
 
-from examples.elitelist_papers.run import LoggedOpenRouter, command_output
+from examples.elitelist_papers.run import LoggedOpenRouter
 from research.elitesearch import Config
 
 from .baselines import policies as references
@@ -27,6 +28,21 @@ from .search import PokerSearch, write_json
 from .tournament import CONTRACT, Tournament, TournamentConfig
 
 logger = logging.getLogger(__name__)
+
+
+def command_output(*command):
+    """Optional host provenance for poker's separate Docker workflow."""
+    try:
+        result = subprocess.run(
+            command,
+            cwd=Path(__file__).resolve().parents[3],
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    return result.stdout.strip() if result.returncode == 0 else None
 
 
 def parser():

@@ -31,11 +31,11 @@ parent IDs and measured results remain in the run database.
 
 ## Run
 
-Use the existing OpenRouter setup and scientific Docker worker from the README.
+Use the existing OpenRouter setup and scientific application image from the README.
 This command makes paid model calls; no additional Docker rebuild is required:
 
 ```sh
-.venv/bin/python -B -m examples.elitesearch \
+./scripts/run examples.elitesearch \
   --env BipedalWalker-v3 \
   --elites 10 --population 50 --generations 20 \
   --new-fraction 0.2 --remix-fraction 0.4 --remix-parents 3 \

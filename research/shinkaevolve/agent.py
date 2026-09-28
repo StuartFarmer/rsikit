@@ -15,6 +15,7 @@ from decimal import Decimal
 from typing import Literal
 
 from pydantic import BaseModel, Field, StrictBool, ValidationError
+from rich.table import Column
 from slick import parse, render
 from slick.providers import Provider, ProviderError
 from sqlmodel import SQLModel
@@ -126,6 +127,72 @@ class ShinkaEvolve:
         self.completed = self.generation_calls = self.repair_calls = self.meta_calls = (
             self.novelty_calls
         ) = 0
+
+    leaderboard_columns = {
+        "island": Column("Island"),
+        "model": Column("Model"),
+        "patch": Column("Patch"),
+        "parents": Column("Parents"),
+    }
+
+    def _log_candidate(self, row, *, status=None):
+        policy = self._policies.get(row.policy_id)
+        state = status or {"repaired": "generated", "failed": "repairing", "error": "failed"}.get(
+            row.status, row.status
+        )
+        logger.info(
+            "%s: %s — %s",
+            policy.name if policy else f"Attempt {row.attempt}",
+            state,
+            policy.description if policy else "",
+            extra={
+                "progress": dict(
+                    kind="candidate",
+                    batch_id=str(row.generation),
+                    attempt_id=str(row.attempt),
+                    revision=row.revision,
+                    status=state,
+                    proposal_done=policy is not None,
+                    policy_id=row.policy_id or "—",
+                    name=policy.name if policy else "",
+                    description=policy.description if policy else "",
+                    score=row.score,
+                    error=row.error,
+                )
+            },
+        )
+
+    def evaluation_started(self, policies):
+        for policy in policies:
+            for row in self._pending.get(policy.id, ()):
+                self._log_candidate(row, status="evaluating")
+
+    def _log_leaderboard(self):
+        rows = []
+        for candidate in sorted(self._archive.values(), key=lambda item: -item.score):
+            row = next(
+                item for item in reversed(self.evaluations) if item.policy_id == candidate.policy.id
+            )
+            rows.append(
+                dict(
+                    id=candidate.policy.id,
+                    name=candidate.policy.name,
+                    description=candidate.policy.description,
+                    score=candidate.score,
+                    generation=row.generation,
+                    extras=dict(
+                        island=row.island,
+                        model=row.model,
+                        patch=row.patch,
+                        parents=", ".join(p[:6] for p in row.parents) or "—",
+                    ),
+                )
+            )
+        logger.info(
+            "ShinkaEvolve leaderboard: %s entries",
+            len(rows),
+            extra={"progress": dict(kind="leaderboard", rows=rows)},
+        )
 
     @property
     def best(self) -> type[Policy] | None:
@@ -284,6 +351,20 @@ class ShinkaEvolve:
         self._batch_start, self._event_start = len(self.evaluations), len(self.events)
         self.generations.append(Generation(number=len(self.generations) + 1))
         logger.info(
+            "Generation %s",
+            len(self.generations),
+            extra={
+                "progress": dict(
+                    kind="batch_started",
+                    batch_id=str(len(self.generations)),
+                    label=f"Generation {len(self.generations)}",
+                    total_candidates=n,
+                    optimizer="ShinkaEvolve",
+                    columns=self.leaderboard_columns,
+                )
+            },
+        )
+        logger.info(
             "Generating %s policies (concurrency=%s)",
             n,
             concurrency,
@@ -325,6 +406,7 @@ class ShinkaEvolve:
             parents=[p.policy.id for p in parents],
         )
         self.evaluations.append(row)
+        self._log_candidate(row)
         reference = parents[0].policy._implementation if parents else ""
         failures = []
         try:
@@ -386,6 +468,7 @@ class ShinkaEvolve:
                         policy.description,
                         extra={"event": "policy_generated", "policy_id": policy.id},
                     )
+                    self._log_candidate(row)
                     return row
                 except InvalidPolicy as exc:
                     row.error = str(exc)
@@ -398,6 +481,7 @@ class ShinkaEvolve:
                 row.error,
                 extra={"event": "proposal_discarded"},
             )
+            self._log_candidate(row)
             return row
         except asyncio.CancelledError:
             row.status = "cancelled"
@@ -446,6 +530,7 @@ class ShinkaEvolve:
         for policy_id, diagnostic in failures.items():
             for row in self._pending[policy_id]:
                 row.status, row.error = "failed", diagnostic
+                self._log_candidate(row)
 
     async def repair(self, policy: type[Policy], diagnostic: str) -> type[Policy] | None:
         self.evaluation_failed({policy.id: diagnostic})
@@ -484,6 +569,8 @@ class ShinkaEvolve:
         self._pending.setdefault(replacement.id, []).extend(replacements)
         self.evaluations.extend(replacements)
         self._policies[replacement.id] = replacement
+        for row in replacements:
+            self._log_candidate(row)
         logger.info("Repaired %s → %s — %s", policy.name, replacement.name, replacement.description)
         return replacement
 
@@ -499,6 +586,7 @@ class ShinkaEvolve:
                 self._finish(row, score)
 
     def _finish(self, row: Evaluation, score: float | None = None) -> None:
+        self._log_candidate(row)
         if row.attempt in self._counted:
             return
         gain = Decimal(0)
@@ -530,6 +618,8 @@ class ShinkaEvolve:
             and self.completed % self.config.migration_interval == 0
         ):
             self.migrate()
+
+        self._log_leaderboard()
 
     def prune(self, island) -> None:
         if len(island) > self.config.archive_size:

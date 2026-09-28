@@ -116,7 +116,7 @@ class InnerLoopTests(unittest.IsolatedAsyncioTestCase):
             async def close(self):
                 raise RuntimeError("cleanup also failed")
 
-        with self.assertLogs("rsikit.sandbox", level="ERROR") as logged:
+        with self.assertLogs("rsikit.evaluation", level="ERROR") as logged:
             with self.assertRaisesRegex(RuntimeError, "^policy failed$"):
                 await self.run_counter(Broken)
         self.assertIn("cleanup also failed", logged.output[0])

@@ -1,8 +1,7 @@
 # Containerized RSIKit Application Implementation Plan
 
 > **For agentic workers:** Use superpowers:executing-plans to implement this plan
-> task-by-task in the current session. Track the checkboxes below. Implementation
-> has not started; this document is the requested plan.
+> task-by-task in the current session. Track the checkboxes below. Implemented on the user-provided branch; see the execution report below.
 
 **Goal:** Launch a complete research application with one Docker command and
 remove the standard research sandbox subsystem.
@@ -67,31 +66,31 @@ its top-level `rsikit` export. Move the current `load_policy` function to policy
 it returns an actual `Solution` instance, not another `Policy` wrapper.
 Keep `encode_episode` / `decode_episode` signatures in `rsikit.episode` for storage.
 
-- [ ] Write failing behavioral checks: candidate/environment share a child PID;
+- [x] Write failing behavioral checks: candidate/environment share a child PID;
   that PID differs from the controller; four episodes have fresh state; distinct
   seeds and instruction overrides survive; every transition and video artifact returns.
-- [ ] Add timeout/cancellation tests using an infinite synchronous loop and an
+- [x] Add timeout/cancellation tests using an infinite synchronous loop and an
   ordinary subprocess. Assert the failed process tree is gone, successful siblings
   remain available, and a later episode works. Test a result larger than the OS pipe
   buffer under a deadline, abrupt exit, invalid action, and failed initialization.
-- [ ] Pin old JSON compatibility with a hand-written saved episode fixture and
+- [x] Pin old JSON compatibility with a hand-written saved episode fixture and
   reopen a pre-migration Run. Preserve source identity and cached score semantics.
-- [ ] Run the new checks against the current implementation and inspect failures.
-- [ ] Reuse the existing semaphore/result aggregation. Replace sandbox lifecycle
+- [x] Run the new checks against the current implementation and inspect failures.
+- [x] Reuse the existing semaphore/result aggregation. Replace sandbox lifecycle
   and requests with fresh `multiprocessing.Process` children and standard connection
   transfer. Retain forkserver on Linux; use spawn where unavailable. Keep child
   process-group cleanup in the parent and consume results before joining children.
-- [ ] Instantiate `Solution` directly; keep generation/validation source-only until
+- [x] Instantiate `Solution` directly; keep generation/validation source-only until
   the child loads it. Classify policy load/call failures and invalid actions as
   `PolicyError`, deadlines as `PolicyTimeout`, and runtime failures as
   `InfrastructureError`, preserving current repair-loop behavior. Keep exception
   conversion in the execution boundary, not in a replacement policy subclass.
-- [ ] Move environment preparation/cleanup into evaluation, preserving the ordinary
+- [x] Move environment preparation/cleanup into evaluation, preserving the ordinary
   `Evaluator` API. Redirect child prints into a log artifact and include at most
   4 KiB of its tail in failure diagnostics. Enforce the existing artifact/result cap.
-- [ ] Move disk codec functions into `episode.py` without changing their representation.
+- [x] Move disk codec functions into `episode.py` without changing their representation.
   Retain cloudpickle only for environment definitions required by multiprocessing.
-- [ ] Run `rtk proxy .venv/bin/python -m unittest tests.test_execution
+- [x] Run `rtk proxy .venv/bin/python -m unittest tests.test_execution
   tests.test_evaluator tests.test_episode_storage -v`; require all checks to pass.
 
 ### Task 2: Package and launch the complete application
@@ -107,32 +106,32 @@ Environment overrides: `RSIKIT_RUNS_DIR`, `RSIKIT_ENV_FILE`, `RSIKIT_CPUS`,
 `RSIKIT_MEMORY`; defaults are repository `runs/`, optional repository `.env`,
 4 CPUs and 8 GiB RAM. Application arguments are passed unchanged.
 
-- [ ] Write launcher tests with an executable Docker stub recording argument
+- [x] Write launcher tests with an executable Docker stub recording argument
   arrays: another working directory, spaces in paths, multiword arguments, missing
   Docker/build failure, unset credentials, and propagation of a nonzero exit code.
-- [ ] Run the failing tests before implementing the launcher.
-- [ ] Adapt the existing scientific-library image: install the full local project
+- [x] Run the failing tests before implementing the launcher.
+- [x] Adapt the existing scientific-library image: install the full local project
   with model-provider, Box2D and video extras; copy `research/`, `examples/`, tests,
   Jinja templates, documentation needed for snapshots, and bundled datasets.
   Install dependencies before copying frequently edited source to use layer caching.
   Keep CPU-only Torch and single-thread numerical-library environment defaults.
-- [ ] Exclude `.git`, `.venv`, secrets, run databases, outputs, logs and caches from
+- [x] Exclude `.git`, `.venv`, secrets, run databases, outputs, logs and caches from
   the build context. Do not copy the old minimal replacement `rsikit.__init__`.
-- [ ] Implement a Bash launcher with quoted arrays, repository-relative paths,
+- [x] Implement a Bash launcher with quoted arrays, repository-relative paths,
   `--rm --init`, conditional terminal attachment, invoking UID/GID, temporary HOME,
   read-only image, writable `/tmp` (1 GiB), 512 PID limit, and the output bind mount.
   Forward configured credentials at runtime only, without printing their values.
   Use `exec docker run ...` for signal and exit-status propagation.
-- [ ] Inspect the built image on the host and pass its ID as `RSIKIT_IMAGE_ID`;
+- [x] Inspect the built image on the host and pass its ID as `RSIKIT_IMAGE_ID`;
   pass `RSIKIT_GIT_REVISION` when Git is available. Neither requires a Docker
   client or Git checkout inside the container. Keep the full source snapshot to
   identify uncommitted changes.
-- [ ] Reject the specialized poker module with its separate launch instructions;
+- [x] Reject the specialized poker module with its separate launch instructions;
   no implicit nested-Docker fallback. Keep normal outbound networking enabled.
-- [ ] Build the image; check imports, templates, datasets and scientific operations
+- [x] Build the image; check imports, templates, datasets and scientific operations
   inside it. Verify a synthetic secret file and existing run data are absent from
   image layers, while a runtime sentinel variable is visible to the app.
-- [ ] Run a real foreground/PTY smoke and a redirected-output smoke. Send SIGINT
+- [x] Run a real foreground/PTY smoke and a redirected-output smoke. Send SIGINT
   during evaluation; verify cleanup, exit status and preserved mounted output.
 
 ### Task 3: Migrate runners, progress and resume
@@ -149,25 +148,25 @@ moving its reusable fixtures and useful cold/warm measurements.
 Replace `sandbox=DockerSandbox(episode_timeout=x)` with `episode_timeout=x` on
 `Executor`; default callers need no execution-backend configuration.
 
-- [ ] Add an end-to-end container test with the existing scripted LLM provider:
+- [x] Add an end-to-end container test with the existing scripted LLM provider:
   generation, evaluation and `Run` persistence occur in that one container; the
   expected score, exported policy, episode JSON and readable Rich output exist.
   Use no paid API calls. Reopen the mounted run in a second container and verify
   successful seeds are reused and unfinished work resumes.
-- [ ] Migrate real callers and test doubles to the local executor contract.
+- [x] Migrate real callers and test doubles to the local executor contract.
   Keep search algorithms and `Rollouts` behavior unchanged. Do not add a generic
   backend interface solely to accommodate existing fake-sandbox tests.
-- [ ] Leave Rich/logging in the main Python process. Remove host log forwarding,
+- [x] Leave Rich/logging in the main Python process. Remove host log forwarding,
   remote progress parsing and Docker readiness messages for standard runners.
-- [ ] Update snapshots to include the root Dockerfile and launcher. Replace
+- [x] Update snapshots to include the root Dockerfile and launcher. Replace
   in-container `docker image inspect` / host-Git lookups with provenance supplied
   by the launcher: `RSIKIT_IMAGE_ID` and optional `RSIKIT_GIT_REVISION`, plus the
   existing source snapshot.
   Preserve original run manifests and append execution changes on resume.
-- [ ] Change notebook-generated commands to use `scripts/run` and mounted
+- [x] Change notebook-generated commands to use `scripts/run` and mounted
   `runs/...` paths. Keep notebook analysis on the host and historical-data loading
   compatible. Compile notebook cells and exercise generated CLI arguments.
-- [ ] Run all standard runner, repair, storage, progress and resume tests in the
+- [x] Run all standard runner, repair, storage, progress and resume tests in the
   application image; confirm no test depends on a nested Docker daemon.
 
 ### Task 4: Detach poker dependencies and delete the obsolete subsystem
@@ -182,31 +181,31 @@ still-relevant poker transport tests and saved-episode codec checks.
 hidden-card protection and per-table cancellation. Its Dockerfile extends the new
 application image; poker does not become part of the generic launcher.
 
-- [ ] Move `_spawn` into poker's pool module; move frame/read/reap helpers into its
+- [x] Move `_spawn` into poker's pool module; move frame/read/reap helpers into its
   service; move policy loading, source bounds and seccomp dependencies into its
   private candidate module. Share only genuine application/storage utilities.
-- [ ] Adjust poker's image and imports, preserving its current UID changes and
+- [x] Adjust poker's image and imports, preserving its current UID changes and
   capabilities. No new security model or poker algorithm changes.
-- [ ] Rebuild poker and run its existing real-Docker, cancellation, private-memory,
+- [x] Rebuild poker and run its existing real-Docker, cancellation, private-memory,
   Numba, scoring and display tests. Require unchanged outcomes.
-- [ ] Remove the standard sandbox package, public `DockerSandbox`, service protocols,
+- [x] Remove the standard sandbox package, public `DockerSandbox`, service protocols,
   backend selector code, obsolete benchmarks and tests that only exercise deleted
   transports. Keep historical benchmark reports labelled as historical.
-- [ ] Search all runtime imports, docs and notebook sources for stale sandbox
+- [x] Search all runtime imports, docs and notebook sources for stale sandbox
   dependencies. Confirm the standard application has no Docker subprocess calls.
 
 ### Task 5: Verify the complete workflow and measure the result
 
-- [ ] Run the full repository suite inside the new application container, plus
+- [x] Run the full repository suite inside the new application container, plus
   paper-runner tests and poker's separate suite. Run Ruff on all changed code.
   Report pre-existing unrelated check failures explicitly.
-- [ ] Smoke a reviewed fixed policy, a scripted multi-generation search, timeout,
+- [x] Smoke a reviewed fixed policy, a scripted multi-generation search, timeout,
   cancellation and resume through the real launcher. Outputs must survive `--rm`.
-- [ ] Compare cold build/start separately from warm Packing, CartPole and Blackjack
+- [x] Compare cold build/start separately from warm Packing, CartPole and Blackjack
   evaluations using the same reviewed sources/seeds as the existing benchmark.
   Record process startup and useful evaluation time; explain regressions rather
   than rebuilding a persistent worker service speculatively.
-- [ ] Verify the delivered user instructions reduce to `scripts/run MODULE ARGS`,
+- [x] Verify the delivered user instructions reduce to `scripts/run MODULE ARGS`,
   environment setup and the output directory. Review the final diff for leftover
   wrappers and duplicate lifecycle code. Keep implementation changes reviewable;
   do not publish an image or push changes as part of this plan.
@@ -226,3 +225,11 @@ is gone; preserving poker separately is an explicit scope choice.
 - [Python multiprocessing](https://docs.python.org/3/library/multiprocessing.html):
   process contexts, connections and process lifetime management. Terminating a
   process does not itself terminate descendants, so lifecycle tests remain necessary.
+
+## Implementation evidence
+
+Completed on 2026-09-28. See [execution behavior and timings](../../IN_PROCESS_SANDBOX.md#application-migration-measurements--2026-09-28)
+and [raw measurements](../../application-benchmark-2026-09-28.json).
+The image, launcher, local executor, runner migration and core sandbox removal are implemented.
+Independent review found no blocking runtime defects; corrected three documented workflows.
+Cold source rebuild reused dependency layers; a clean dependency download/build was not measured.

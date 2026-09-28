@@ -40,7 +40,7 @@ Shared modules available to every algorithm and runner:
 - `rsikit.Policy.from_text` / `from_file` and `to_text` / `to_file`: canonical solution
   loading and saving, preserving source and identity without host execution.
 - `rsikit.envs.tasks`: environment presets and `make_environment`.
-- `rsikit.progress`: `ProgressHandler` and `show_scores`.
+- `rsikit.progress`: automatic Run-scoped logging and the shared Rich dashboard; optimizers emit domain events and declare optional leaderboard columns.
 - `rsikit`: `Policy`, `Run`, and `Executor` with Docker evaluation.
 
 Each optimizer composes its own `SelfHealer` in `healing.py`, with task context,

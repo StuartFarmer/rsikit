@@ -14,6 +14,7 @@ from statistics import fmean
 from typing import Literal
 
 from pydantic import BaseModel, Field, ValidationError
+from rich.table import Column
 from slick import parse, render
 from slick.providers import Provider, ProviderError
 
@@ -102,9 +103,97 @@ class AlphaEvolve(Optimizer):
         # ponytail: in-memory attempt history; bound it if searches exceed RAM.
         self.attempts: list[dict] = []
         self._attempt_offset = 0
+        self._batch_number = 0
+        self._streaming_progress = None
         self._prior_failures: list[dict] = []
         self.events: list[dict] = []
         self.generation_calls = self.repair_calls = self.meta_calls = self.completed = 0
+
+    leaderboard_columns = {"island": Column("Island"), "parent": Column("Parent")}
+
+    def _log_batch(self, batch, total, *, streaming=False):
+        logger.info(
+            "Starting %s %s",
+            "batch" if streaming else "generation",
+            batch,
+            extra={
+                "progress": dict(
+                    kind="batch_started",
+                    batch_id=str(batch),
+                    label=f"{'Batch' if streaming else 'Generation'} {batch}",
+                    total_candidates=total,
+                    optimizer=f"AlphaEvolve ({type(self).__module__.split('.')[-2]})",
+                    columns=self.leaderboard_columns,
+                )
+            },
+        )
+
+    def _log_candidate(self, row, *, status=None, restored=False):
+        policy = row.get("policy")
+        state = status or {"repaired": "generated", "rejected": "failed", "error": "failed"}.get(
+            row["status"], row["status"]
+        )
+        logger.info(
+            "%s: %s — %s",
+            policy.name if policy else f"Attempt {row['id']}",
+            state,
+            policy.description if policy else "",
+            extra={
+                "progress": dict(
+                    kind="candidate",
+                    batch_id=str(row.get("batch", self._batch_number)),
+                    attempt_id=str(row["id"]),
+                    revision=row.get("revision", 0),
+                    status=state,
+                    proposal_done=policy is not None,
+                    policy_id=policy.id if policy else "—",
+                    name=policy.name if policy else "",
+                    description=policy.description if policy else "",
+                    score=row.get("score"),
+                    error=row.get("error"),
+                    restored=restored,
+                )
+            },
+        )
+
+    def evaluation_started(self, policies):
+        for policy in policies:
+            for row in self._pending.get(policy.id, ()):
+                self._log_candidate(row, status="evaluating")
+
+    def _log_leaderboard(self):
+        rows = []
+        seen = set()
+        for island, candidate in sorted(
+            enumerate(self.islands), key=lambda pair: -pair[1].score if pair[1] else math.inf
+        ):
+            if candidate is None or candidate.policy.id in seen:
+                continue
+            seen.add(candidate.policy.id)
+            record = next(
+                (
+                    row
+                    for row in reversed(self.attempts)
+                    if row.get("policy") is not None and row["policy"].id == candidate.policy.id
+                ),
+                {},
+            )
+            parent = record.get("parent")
+            rows.append(
+                dict(
+                    id=candidate.policy.id,
+                    name=candidate.policy.name,
+                    description=candidate.policy.description,
+                    score=candidate.score,
+                    generation=record.get("batch"),
+                    extras=dict(island=island, parent=parent.policy.id[:6] if parent else "—"),
+                )
+            )
+        logger.info(
+            "AlphaEvolve leaderboard: %s entries",
+            len(rows),
+            extra={"progress": dict(kind="leaderboard", rows=rows)},
+        )
 
     @property
     def best(self) -> type[Policy] | None:
@@ -221,7 +310,7 @@ class AlphaEvolve(Optimizer):
         raise InvalidCandidate(f"Repair exhausted after {len(repairs)} repairs: {diagnostic}")
 
     async def repair(self, policy: type[Policy], diagnostic: str) -> type[Policy] | None:
-        """Repair an unevaluated policy after a sandbox failure, preserving its ancestry.
+        """Repair an unevaluated policy after a episode failure, preserving its ancestry.
 
         The same budget covers generation and runtime repairs. The caller evaluates
         the returned replacement through Run; failed versions remain in storage.
@@ -229,6 +318,8 @@ class AlphaEvolve(Optimizer):
         """
         records = self._pending[policy.id]
         record = max(records, key=lambda row: len(row.get("repairs", [])))
+        for row in records:
+            self._log_candidate(row, status="repairing")
         parent = record["parent"]
         reference = policy._implementation if parent is None else parent.policy._implementation
         try:
@@ -238,10 +329,12 @@ class AlphaEvolve(Optimizer):
         except InvalidPolicy as exc:
             for row in self._pending.pop(policy.id):
                 row.update(status="discarded", error=str(exc))
+                self._log_candidate(row)
             logger.warning("Discarded %s: %s", policy.name, exc)
             return None
         for row in records:
             row.update(policy=replacement, status="repaired", revision=row.get("revision", 0) + 1)
+            self._log_candidate(row)
         self._pending.pop(policy.id)
         self._pending.setdefault(replacement.id, []).extend(records)
         logger.info("Repaired %s → %s — %s", policy.name, replacement.name, replacement.description)
@@ -280,6 +373,9 @@ class AlphaEvolve(Optimizer):
             concurrency,
             extra={"event": "generation_started", "total": n},
         )
+        if self._streaming_progress is None:
+            self._batch_number += 1
+            self._log_batch(self._batch_number, n)
         slots = asyncio.Semaphore(concurrency)
 
         async def propose():
@@ -336,9 +432,12 @@ class AlphaEvolve(Optimizer):
                     improvement = (score - parent.score) / max(1.0, abs(parent.score))
                     idea.reward += max(0.0, improvement)
                 record.update(status="evaluated", score=score)
+                self._log_candidate(record)
                 self.completed += 1
                 if self.config.reset_interval and self.completed % self.config.reset_interval == 0:
                     self.reset_islands()
+
+        self._log_leaderboard()
 
     def sample(self) -> tuple[int, _Candidate, list[_Candidate]]:
         island_id = self.rng.choice(
@@ -368,7 +467,15 @@ class AlphaEvolve(Optimizer):
             ]
         )[-3:]
         record = {"id": attempt_id, "model": model_id, "status": "generating"}
+        if self._streaming_progress is not None:
+            offset, size, total = self._streaming_progress
+            group = (attempt_id - offset - 1) // size
+            record["batch"] = f"stream-{offset}-{group + 1}"
+            self._log_batch(record["batch"], min(size, total - group * size), streaming=True)
+        else:
+            record["batch"] = self._batch_number
         self.attempts.append(record)
+        self._log_candidate(record)
         try:
             parent = idea = None
             island_id = self._founding_island(attempt_id)
@@ -423,6 +530,7 @@ class AlphaEvolve(Optimizer):
                 policy.description,
                 extra={"event": "policy_generated", "policy_id": policy.id},
             )
+            self._log_candidate(record)
             return record
         except InvalidPolicy as exc:
             record.update(status="discarded", error=f"{type(exc).__name__}: {exc}")
@@ -432,6 +540,7 @@ class AlphaEvolve(Optimizer):
                 exc,
                 extra={"event": "proposal_discarded"},
             )
+            self._log_candidate(record)
             return None
         except (
             ValidationError,
