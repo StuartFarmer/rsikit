@@ -689,7 +689,7 @@ class LineageTests(unittest.IsolatedAsyncioTestCase):
         )
         sandbox = FakeSandbox()
 
-        async def execute(implementation, environment, seed, call_timeout):
+        async def execute(implementation, environment, seed):
             if "scipy" in implementation:
                 raise PolicyError("ModuleNotFoundError: No module named 'scipy'")
             return trajectory(7.0, {})

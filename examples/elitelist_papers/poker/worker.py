@@ -9,10 +9,10 @@ from time import monotonic
 
 import gymnasium as gym
 
+from poker import candidate as sandbox_worker
+from poker.candidate import run_candidate
+from poker.codec import encode_space, frame_size, pack, unpack
 from poker.game import CandidateFailure, derived_seed, run_block
-from rsikit.sandbox import worker as sandbox_worker
-from rsikit.sandbox.codec import encode_space, frame_size, pack, unpack
-from rsikit.sandbox.worker import run_candidate
 
 
 def run_seat(channel, uid, directory, process_group):

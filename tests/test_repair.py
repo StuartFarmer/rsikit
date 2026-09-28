@@ -67,7 +67,7 @@ class RepairTests(unittest.IsolatedAsyncioTestCase):
                     self.addCleanup(agent.close)
                 sandbox = FakeSandbox()
 
-                async def evaluate(source, environment, seed, timeout):
+                async def evaluate(source, environment, seed):
                     if any(f"return {i}" in source for i in (9, 8, 7)):
                         raise PolicyError("bad action")
                     return trajectory(7.0, {})
@@ -186,7 +186,7 @@ class RepairTests(unittest.IsolatedAsyncioTestCase):
         sandbox = FakeSandbox()
         checked = []
 
-        async def evaluate(implementation, environment, seed, call_timeout):
+        async def evaluate(implementation, environment, seed):
             checked.append((implementation, seed))
             if "return 9" in implementation or "return 8" in implementation:
                 if seed == 1:
@@ -341,7 +341,7 @@ class RepairTests(unittest.IsolatedAsyncioTestCase):
         sandbox = FakeSandbox()
         checked = []
 
-        async def evaluate(implementation, environment, seed, call_timeout):
+        async def evaluate(implementation, environment, seed):
             checked.append(implementation)
             if "return 9" in implementation:
                 raise PolicyError("Action outside action_space")
@@ -390,7 +390,7 @@ class RepairTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(provider.calls), 2)
         sandbox = FakeSandbox()
 
-        async def evaluate(implementation, environment, seed, call_timeout):
+        async def evaluate(implementation, environment, seed):
             if seed == 0:
                 raise PolicyError("bad policy")
             await asyncio.sleep(0)

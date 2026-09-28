@@ -6,35 +6,23 @@ import sys
 from collections.abc import AsyncIterator, Iterable
 from contextlib import asynccontextmanager
 from time import perf_counter
-from typing import Protocol
 
 import cloudpickle
 import gymnasium as gym
 
 from .episode import Episode
 from .evaluation import InfrastructureError, PolicyError
-from .sandbox.docker import InProcessDockerSandbox
-
-
-class Sandbox(Protocol):
-    async def start(self, workers: int) -> None: ...
-    async def evaluate(
-        self, implementation: str, environment: bytes, seed: int, call_timeout: float
-    ) -> Episode: ...
-    async def close(self) -> None: ...
+from .sandbox.docker import DockerSandbox
 
 
 class Executor:
-    """Own worker concurrency, policy call timeouts, and sandbox lifecycle."""
+    """Own worker concurrency and the Docker sandbox lifecycle."""
 
-    def __init__(
-        self, *, sandbox: Sandbox | None = None, concurrency: int = 1, call_timeout: float = 10.0
-    ):
+    def __init__(self, *, sandbox: DockerSandbox | None = None, concurrency: int = 1):
         if concurrency < 1:
             raise ValueError("concurrency must be at least 1")
-        self.sandbox = InProcessDockerSandbox() if sandbox is None else sandbox
+        self.sandbox = DockerSandbox() if sandbox is None else sandbox
         self.concurrency = concurrency
-        self.call_timeout = call_timeout
         self._busy = asyncio.Condition()
         self._slots = asyncio.Semaphore(concurrency)
         self._users = 0
@@ -147,7 +135,6 @@ class Executor:
                             implementation,
                             definition,
                             seed,
-                            self.call_timeout,
                         )
                         return policy_id, seed, episode
                     except asyncio.CancelledError:

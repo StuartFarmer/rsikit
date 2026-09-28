@@ -256,7 +256,7 @@ class ShinkaTests(unittest.IsolatedAsyncioTestCase):
         )
         sandbox = FakeSandbox()
 
-        async def evaluate(implementation, environment, seed, call_timeout):
+        async def evaluate(implementation, environment, seed):
             if "return 9" in implementation or "return 8" in implementation:
                 if seed == 1:
                     raise PolicyError("Action outside action_space")

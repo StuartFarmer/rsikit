@@ -1,0 +1,135 @@
+{
+  "date": "2026-09-28T11:52:13.827992+00:00",
+  "host": "macOS-26.4-arm64-arm-64bit-Mach-O",
+  "python": "3.14.2",
+  "srt_cli_version": "1.0.0",
+  "srt_package_version": "0.0.77",
+  "packages": {
+    "numpy": "2.5.3",
+    "gymnasium": "1.3.0",
+    "cloudpickle": "3.1.2"
+  },
+  "image": "sha256:f38a258b2b94094b3e7f3822c07f34e81db36e238ee39d15f90a8a29fea0a0b7",
+  "scope": "Same reviewed policies/seeds; native interpreter per job versus warm Docker forkserver. Startup recorded separately. Not equivalent resource limits or dependency environments.",
+  "source_sha256": {
+    "/Users/stuart/Developer/AI/rsikit/examples/benchmark_srt.py": "65258fc555b4bafe547345fabf4fc1854413165438e046af8eac482bb47be1d4",
+    "examples/srt_sandbox.py": "6bfded140dfbe906d22e830f9017ab8f35bd0037d9720008ca8876b5553124a0",
+    "rsikit/sandbox/__init__.py": "a5765739631bb96bdeea1d164075a95d5cc3e447fdd67ab5b3fe38a7c0c17182",
+    "rsikit/sandbox/check_libraries.py": "acdb17e1a59355ba03b8b5f03e98f9021672e07b434658b7e86c493704443764",
+    "rsikit/sandbox/codec.py": "d988e2c0e33b80d86d389a7435693aab7d24dfa037dd9450115f4676a60676a4",
+    "rsikit/sandbox/docker.py": "23482872ca69562da1bd50fb4048ece0316e2bba21d24765e6b23bc555a6fc95",
+    "rsikit/sandbox/evaluate.py": "b918488de104f692bad0d89de928253c84d1aab988140ec80dccf3dfdefe0001",
+    "rsikit/sandbox/in_process.py": "5a3c27f046dcb2724a97700959ed21ff06274db6c47bc2429345f7bbdd17ecbc",
+    "rsikit/sandbox/service.py": "34c81de8df832a8b6300ca9cb0d4b7ebc4249fcb209e5d50e21bff74db2ba937",
+    "rsikit/sandbox/worker.py": "8cca448d278ca850423a8549d5c624c6f102f77071b6002543f75469db24034b"
+  },
+  "startup_seconds": {
+    "srt": 0.01728900009766221,
+    "docker": 0.9394482499919832
+  },
+  "workloads": {
+    "packing": {
+      "seconds": {
+        "srt": [
+          0.2707844157703221,
+          0.2729500001296401,
+          0.2721731658093631,
+          0.25718504190444946,
+          0.2576106251217425
+        ],
+        "docker": [
+          0.019847833085805178,
+          0.015410874970257282,
+          0.02145462529733777,
+          0.012373792007565498,
+          0.021705749910324812
+        ]
+      },
+      "first_seconds": {
+        "docker": 0.01289950031787157,
+        "srt": 0.27373295882716775
+      },
+      "median_seconds": {
+        "srt": 0.2707844157703221,
+        "docker": 0.019847833085805178
+      },
+      "score": 0.5,
+      "steps": 1
+    },
+    "cartpole": {
+      "seconds": {
+        "srt": [
+          0.2629236658103764,
+          0.3409272078424692,
+          0.26626245817169547,
+          0.26140387495979667,
+          0.2632366670295596
+        ],
+        "docker": [
+          0.02675883425399661,
+          0.022340374998748302,
+          0.027834583073854446,
+          0.020873459056019783,
+          0.030167959164828062
+        ]
+      },
+      "first_seconds": {
+        "docker": 0.02327504102140665,
+        "srt": 0.27013624971732497
+      },
+      "median_seconds": {
+        "srt": 0.2632366670295596,
+        "docker": 0.02675883425399661
+      },
+      "score": 500.0,
+      "steps": 500
+    },
+    "blackjack": {
+      "seconds": {
+        "srt": [
+          0.30624229088425636,
+          0.31954049970954657,
+          0.3000102499499917,
+          0.3098883330821991,
+          0.3046218752861023
+        ],
+        "docker": [
+          0.08260545926168561,
+          0.07522049965336919,
+          0.0800204579718411,
+          0.07371166720986366,
+          0.07916962495073676
+        ]
+      },
+      "first_seconds": {
+        "docker": 0.08214933285489678,
+        "srt": 0.30176237504929304
+      },
+      "median_seconds": {
+        "srt": 0.30624229088425636,
+        "docker": 0.07916962495073676
+      },
+      "score": -45.5,
+      "steps": 2485
+    }
+  },
+  "cleanup_probes": [
+    {
+      "detached": false,
+      "survived_cleanup": false
+    },
+    {
+      "detached": true,
+      "survived_cleanup": true
+    }
+  ],
+  "memory_limit_probe": {
+    "exit_code": 1,
+    "stdout": "",
+    "stderr": "Traceback (most recent call last):\n  File \"<string>\", line 1, in <module>\n    import resource; resource.setrlimit(resource.RLIMIT_AS, (64*1024*1024,)*2); print('limit accepted'); x=bytearray(128*1024*1024); print('allocation succeeded')\n                     ~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\nValueError: current limit exceeds maximum limit\n"
+  },
+  "batch8_concurrency4_seconds": {
+    "srt": 0.5479093329049647,
+    "docker": 0.031215500086545944
+  }
+}

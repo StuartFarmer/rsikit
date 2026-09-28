@@ -1,19 +1,75 @@
 """Whole rollouts share a process inside Docker, never on the host."""
 
+import os
+import tempfile
 import unittest
+from pathlib import Path
 
-from rsikit import Executor, InProcessDockerSandbox
+from rsikit import DockerSandbox, Executor, run_program
 from rsikit.envs import CirclePackingEnv
 from rsikit.evaluation import PolicyError, PolicyTimeout
 from tests.test_persistent_sandbox import PACKING
 
 
-class InProcessTests(unittest.IsolatedAsyncioTestCase):
-    async def test_both_backends_return_every_transition(self):
+class DockerTests(unittest.IsolatedAsyncioTestCase):
+    async def test_invalid_run_program_deadline_does_not_create_an_environment(self):
+        created = []
+
+        def environment():
+            created.append(True)
+            return CirclePackingEnv(1)
+
+        with tempfile.TemporaryDirectory() as folder:
+            path = Path(folder) / "policy.py"
+            path.write_text(PACKING)
+            with self.assertRaises(ValueError):
+                await run_program(path, environment, episode_timeout=0)
+        self.assertEqual(created, [])
+
+    async def test_run_program_moves_environment_into_docker_and_preserves_options(self):
+        import gymnasium as gym
+
+        host_pid = os.getpid()
+
+        class Environment(gym.Env):
+            observation_space = gym.spaces.Discrete(1)
+            action_space = gym.spaces.Discrete(1)
+
+            def reset(self, *, seed=None, options=None):
+                import os
+
+                assert os.getpid() != host_pid
+                assert seed == 3
+                return 0, {}
+
+            def step(self, action):
+                return 0, 1, False, False, {}
+
+        source = """from rsikit import Policy
+class Solution(Policy):
+    async def reset(self, *, seed=None):
+        assert seed == 7
+        assert self.instructions == "explicit instructions"
+    async def act(self, observation):
+        return 0
+"""
+        with tempfile.TemporaryDirectory() as folder:
+            path = Path(folder) / "policy.py"
+            path.write_text(source)
+            result = await run_program(
+                path,
+                Environment,
+                env_seed=3,
+                policy_seed=7,
+                max_steps=2,
+                instructions="explicit instructions",
+            )
+        self.assertEqual(result.total_reward, 2)
+        self.assertEqual(result.truncations, [False, True])
+
+    async def test_returns_every_transition(self):
         import gymnasium as gym
         import numpy as np
-
-        from rsikit import DockerSandbox
 
         source = "from rsikit import Policy\nclass Solution(Policy):\n    async def act(self, o): return 0\n"
         with gym.make("CartPole-v1", max_episode_steps=3) as env:
@@ -22,23 +78,19 @@ class InProcessTests(unittest.IsolatedAsyncioTestCase):
             for _ in range(3):
                 obs, *_ = env.step(0)
                 expected.append(obs.copy())
-            for backend in (DockerSandbox, InProcessDockerSandbox):
-                with self.subTest(backend=backend.__name__):
-                    async with Executor(sandbox=backend()) as executor:
-                        results = [
-                            episode
-                            async for _, _, episode in executor.evaluate(
-                                [("constant", source, 42)], env
-                            )
-                        ]
-                    episode = results[0]
-                    np.testing.assert_array_equal(episode.observations, expected)
-                    self.assertEqual(episode.actions, [0, 0, 0])
-                    self.assertEqual(episode.rewards, [1.0, 1.0, 1.0])
-                    self.assertEqual(episode.terminations, [False, False, False])
-                    self.assertEqual(episode.truncations, [False, False, True])
-                    self.assertEqual(len(episode.infos), 4)
-                    self.assertEqual(episode.infos[-1]["episode"]["l"], 3)
+            async with Executor(sandbox=DockerSandbox()) as executor:
+                results = [
+                    episode
+                    async for _, _, episode in executor.evaluate([("constant", source, 42)], env)
+                ]
+            episode = results[0]
+            np.testing.assert_array_equal(episode.observations, expected)
+            self.assertEqual(episode.actions, [0, 0, 0])
+            self.assertEqual(episode.rewards, [1.0, 1.0, 1.0])
+            self.assertEqual(episode.terminations, [False, False, False])
+            self.assertEqual(episode.truncations, [False, False, True])
+            self.assertEqual(len(episode.infos), 4)
+            self.assertEqual(episode.infos[-1]["episode"]["l"], 3)
 
     async def test_shared_process_fresh_episodes_and_artifacts(self):
         class Environment(CirclePackingEnv):
@@ -73,7 +125,7 @@ class InProcessTests(unittest.IsolatedAsyncioTestCase):
         return np.array""",
         )
         pids = []
-        async with Executor(concurrency=2) as executor:
+        async with Executor(sandbox=DockerSandbox(), concurrency=2) as executor:
             for _ in range(2):
                 results = [
                     r
@@ -90,9 +142,45 @@ class InProcessTests(unittest.IsolatedAsyncioTestCase):
                     pids.append(result.artifacts["policy.txt"])
         self.assertEqual(len(set(pids)), 4)
 
+    async def test_container_output_reaches_host_logging_without_corrupting_results(self):
+        source = PACKING.replace(
+            "return np.array",
+            """import os
+        print("policy log: café")
+        os.write(1, b"raw stdout\\n")
+        os.write(2, b"raw stderr\\n")
+        return np.array""",
+        )
+        with self.assertLogs("rsikit.sandbox.docker", level="INFO") as logs:
+            async with Executor(sandbox=DockerSandbox()) as executor:
+                (result,) = [
+                    r
+                    async for _, _, r in executor.evaluate(
+                        [("logs", source, 1)], CirclePackingEnv(1)
+                    )
+                ]
+        self.assertEqual(result.total_reward, 0.5)
+        output = "\n".join(logs.output)
+        for text in ("policy log: café", "raw stdout", "raw stderr"):
+            self.assertIn(text, output)
+
+    async def test_prints_are_forwarded_even_when_the_episode_times_out(self):
+        source = PACKING.replace(
+            "return np.array",
+            'print("before timeout")\n        while True: pass\n        return np.array',
+        )
+        with self.assertLogs("rsikit.sandbox.docker", level="INFO") as logs:
+            async with Executor(sandbox=DockerSandbox(episode_timeout=0.3)) as executor:
+                with self.assertRaises(PolicyTimeout):
+                    _ = [
+                        r
+                        async for r in executor.evaluate([("logs", source, 1)], CirclePackingEnv(1))
+                    ]
+        self.assertIn("before timeout", "\n".join(logs.output))
+
     async def test_errors_timeouts_and_process_exit_allow_next_episode(self):
-        sandbox = InProcessDockerSandbox(episode_timeout=0.3)
-        async with Executor(sandbox=sandbox, call_timeout=0.001) as executor:
+        sandbox = DockerSandbox(episode_timeout=0.3)
+        async with Executor(sandbox=sandbox) as executor:
             cases = [
                 ("invalid python!", PolicyError),
                 (
@@ -140,7 +228,7 @@ class InProcessTests(unittest.IsolatedAsyncioTestCase):
         time.sleep(0.03)
         return np.array""",
         )
-        async with Executor(sandbox=InProcessDockerSandbox(), call_timeout=0.001) as executor:
+        async with Executor(sandbox=DockerSandbox()) as executor:
             (result,) = [
                 r
                 async for _, _, r in executor.evaluate([("spawn", source, 1)], CirclePackingEnv(1))
@@ -172,7 +260,7 @@ class InProcessTests(unittest.IsolatedAsyncioTestCase):
         subprocess.run([sys.executable, "-c", "import os\\ntry: os.setpgid(0, 0)\\nexcept PermissionError: pass\\nelse: raise AssertionError('Child changed process group')"], check=True)
         return np.array""",
         )
-        async with Executor(sandbox=InProcessDockerSandbox()) as executor:
+        async with Executor(sandbox=DockerSandbox()) as executor:
             (result,) = [
                 r
                 async for _, _, r in executor.evaluate([("groups", source, 1)], CirclePackingEnv(1))

@@ -20,7 +20,7 @@ from research.rollouts import Rollouts
 from rsikit import Episode, Executor, Run
 from rsikit.envs import BitcoinEnv, BlackjackEnv, CirclePackingEnv
 from rsikit.policy import Policy
-from rsikit.sandbox.docker import DockerSandbox, InProcessDockerSandbox
+from rsikit.sandbox.docker import DockerSandbox
 
 
 class TimedEnvironment(gym.Wrapper):
@@ -83,7 +83,7 @@ async def scheduling(samples):
                 async def close(self):
                     pass
 
-                async def evaluate(self, implementation, environment, seed, call_timeout):
+                async def evaluate(self, implementation, environment, seed):
                     nonlocal active, peak
                     start = perf_counter()
                     waits.append(start - arrived[implementation])
@@ -166,8 +166,8 @@ async def scheduling(samples):
     return report
 
 
-async def main(samples, output, image, compare_image=None, in_process=False):
-    backend = InProcessDockerSandbox if in_process else DockerSandbox
+async def main(samples, output, image, compare_image=None):
+    backend = DockerSandbox
     report = {
         "backend": backend.__name__,
         "host": platform.platform(),
@@ -281,12 +281,9 @@ if __name__ == "__main__":
     parser.add_argument("--output", type=Path, default=Path("evaluator-benchmark.json"))
     parser.add_argument("--image", default="rsikit-sandbox:local")
     parser.add_argument(
-        "--in-process", action="store_true", help="Run policy and environment in one Docker process"
-    )
-    parser.add_argument(
         "--compare-image", help="Alternate uninstrumented episodes against this baseline image"
     )
     args = parser.parse_args()
     if args.samples < 1:
         parser.error("--samples must be positive")
-    asyncio.run(main(args.samples, args.output, args.image, args.compare_image, args.in_process))
+    asyncio.run(main(args.samples, args.output, args.image, args.compare_image))

@@ -3,7 +3,6 @@
 import asyncio
 import base64
 import json
-import socket
 import sys
 import unittest
 from types import SimpleNamespace
@@ -18,7 +17,6 @@ from rsikit.evaluation import InfrastructureError, PolicyError, PolicyTimeout
 from rsikit.execution import Executor
 from rsikit.sandbox.codec import decode_episode, encode_episode
 from rsikit.sandbox.docker import DockerSandbox
-from rsikit.sandbox.evaluate import ProcessPolicy
 from tests.test_episode_storage import trajectory
 
 
@@ -39,7 +37,7 @@ def request(source=PACKING, environment=None, seed=1, timeout=3):
         ).decode(),
         "python": list(sys.version_info[:2]),
         "seed": seed,
-        "call_timeout": timeout,
+        "episode_timeout": timeout,
     }
 
 
@@ -89,7 +87,7 @@ class ServiceTests(unittest.IsolatedAsyncioTestCase):
             error = await self.process.stderr.read()
             self.fail(f"Service failed before readiness: {error.decode()}")
         self.ready = json.loads(line)
-        self.assertEqual(self.ready["protocol"], 2)
+        self.assertEqual(self.ready["protocol"], 3)
         self.assertIs(self.ready["ready"], True)
 
     async def cleanup_service(self):
@@ -168,6 +166,29 @@ class ServiceTests(unittest.IsolatedAsyncioTestCase):
 
 
 class ProtocolTests(unittest.IsolatedAsyncioTestCase):
+    async def test_noisy_logs_are_bounded_sanitized_and_drained_without_newlines(self):
+        sandbox = DockerSandbox()
+        sandbox.process = await asyncio.create_subprocess_exec(
+            sys.executable,
+            "-c",
+            "import os; os.write(2, b'hello\\x1b[31m' + b'x' * 262144)",
+            stderr=asyncio.subprocess.PIPE,
+        )
+        try:
+            with (
+                patch("rsikit.sandbox.docker.MAX_LOG", 128),
+                self.assertLogs("rsikit.sandbox.docker", level="INFO") as logs,
+            ):
+                await asyncio.wait_for(sandbox._read_logs(), 5)
+            await sandbox.process.wait()
+            output = "\n".join(logs.output)
+            self.assertIn("hello", output)
+            self.assertNotIn("\x1b", output)
+            self.assertIn("log limit reached", output)
+            self.assertLess(len(output), 400)
+        finally:
+            await sandbox.close()
+
     def test_episode_timeout_rejects_invalid_deadlines(self):
         for timeout in (0, -1, float("nan"), float("inf")):
             with self.subTest(timeout=timeout), self.assertRaises(ValueError):
@@ -191,31 +212,6 @@ class ProtocolTests(unittest.IsolatedAsyncioTestCase):
         finally:
             await process.communicate()
 
-    async def test_candidate_timeout_closes_backpressured_socket(self):
-        channel, peer = socket.socketpair()
-        channel.setsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF, 4096)
-        env = CirclePackingEnv(1)
-        policy = ProcessPolicy(
-            env.observation_space,
-            env.action_space,
-            source=PACKING,
-            channel=channel,
-            call_timeout=0.05,
-        )
-        policy.ready = True
-        try:
-            with self.assertRaises(PolicyTimeout):
-                await asyncio.wait_for(
-                    policy._request({"command": "start", "source": "x" * 524288}), 0.5
-                )
-            self.assertFalse(policy.ready)
-            self.assertEqual(channel.fileno(), -1)
-            await policy._destroy()  # Cleanup remains idempotent.
-        finally:
-            channel.close()
-            peer.close()
-            env.close()
-
     async def test_cancelled_write_invalidates_pending_jobs(self):
         sandbox = DockerSandbox()
         writing = asyncio.Event()
@@ -232,7 +228,7 @@ class ProtocolTests(unittest.IsolatedAsyncioTestCase):
         sandbox.close = AsyncMock()
         sibling = asyncio.get_running_loop().create_future()
         sandbox._pending["sibling"] = sibling
-        pending = asyncio.create_task(sandbox.evaluate(PACKING, b"", 1, 3))
+        pending = asyncio.create_task(sandbox.evaluate(PACKING, b"", 1))
         await writing.wait()
         pending.cancel()
         with self.assertRaises(asyncio.CancelledError):
@@ -240,7 +236,7 @@ class ProtocolTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsInstance(sibling.exception(), InfrastructureError)
         self.assertEqual(sandbox._pending, {})
         with self.assertRaises(InfrastructureError):
-            await sandbox.evaluate(PACKING, b"", 1, 3)
+            await sandbox.evaluate(PACKING, b"", 1)
 
     async def test_duplicate_response_invalidates_other_jobs(self):
         sandbox = DockerSandbox()
@@ -341,7 +337,7 @@ class PersistentTests(unittest.IsolatedAsyncioTestCase):
             await sandbox.start(1)
             self.assertEqual(
                 (
-                    await sandbox.evaluate(source, cloudpickle.dumps(CirclePackingEnv(1)), 1, 3)
+                    await sandbox.evaluate(source, cloudpickle.dumps(CirclePackingEnv(1)), 1)
                 ).total_reward,
                 0.5,
             )
@@ -360,7 +356,7 @@ class PersistentTests(unittest.IsolatedAsyncioTestCase):
                 )
                 jobs = [
                     asyncio.create_task(
-                        sandbox.evaluate(bad, cloudpickle.dumps(CirclePackingEnv(1)), seed, 60)
+                        sandbox.evaluate(bad, cloudpickle.dumps(CirclePackingEnv(1)), seed)
                     )
                     for seed in (1, 2)
                 ]
@@ -457,7 +453,7 @@ class PersistentTests(unittest.IsolatedAsyncioTestCase):
                         children.append(identity["pid"])
                         if "directory" in identity:
                             directories.append(identity["directory"])
-            self.assertEqual(len(set(children)), 8)
+            self.assertEqual(len(set(children)), 4)
             self.assertIsNone(process.returncode)
 
             class CheckCleanup(CirclePackingEnv):
@@ -475,9 +471,9 @@ class PersistentTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNotNone(process.returncode)
 
     async def test_timeout_then_success_reuses_service(self):
-        sandbox = DockerSandbox()
+        sandbox = DockerSandbox(episode_timeout=0.1)
         bad = PACKING.replace("return np.array", "while True: pass\n        return np.array")
-        async with Executor(sandbox=sandbox, call_timeout=0.1) as executor:
+        async with Executor(sandbox=sandbox) as executor:
             with self.assertRaises(PolicyTimeout):
                 _ = [
                     item async for item in executor.evaluate([("bad", bad, 1)], CirclePackingEnv(1))
@@ -500,7 +496,7 @@ class PersistentTests(unittest.IsolatedAsyncioTestCase):
             "\n        import asyncio\n        await asyncio.sleep(0.05)\n        return 4",
         )
         sandbox = DockerSandbox(episode_timeout=0.5)
-        async with Executor(sandbox=sandbox, concurrency=2, call_timeout=3) as executor:
+        async with Executor(sandbox=sandbox, concurrency=2) as executor:
             results = []
             with self.assertRaisesRegex(PolicyTimeout, "Episode.*0.5s") as caught:
                 async for result in executor.evaluate(
@@ -545,7 +541,7 @@ class PersistentTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(sandbox.ready, ready)
             self.assertIs(sandbox.process, process)
 
-    async def test_environment_death_fails_all_waiters_and_restart_works(self):
+    async def test_episode_death_is_a_policy_failure_and_restart_works(self):
         class Broken(CirclePackingEnv):
             def reset(self, **kwargs):
                 import os
@@ -557,18 +553,18 @@ class PersistentTests(unittest.IsolatedAsyncioTestCase):
             await sandbox.start(2)
             results = await asyncio.wait_for(
                 asyncio.gather(
-                    sandbox.evaluate(PACKING, cloudpickle.dumps(Broken(1)), 1, 3),
-                    sandbox.evaluate(PACKING, cloudpickle.dumps(Broken(1)), 2, 3),
+                    sandbox.evaluate(PACKING, cloudpickle.dumps(Broken(1)), 1),
+                    sandbox.evaluate(PACKING, cloudpickle.dumps(Broken(1)), 2),
                     return_exceptions=True,
                 ),
                 10,
             )
-            self.assertTrue(all(isinstance(result, InfrastructureError) for result in results))
+            self.assertTrue(all(isinstance(result, PolicyError) for result in results))
             await sandbox.close()
             await sandbox.start(1)
             self.assertEqual(
                 (
-                    await sandbox.evaluate(PACKING, cloudpickle.dumps(CirclePackingEnv(1)), 1, 3)
+                    await sandbox.evaluate(PACKING, cloudpickle.dumps(CirclePackingEnv(1)), 1)
                 ).total_reward,
                 0.5,
             )

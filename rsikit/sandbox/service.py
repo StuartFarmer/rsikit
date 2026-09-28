@@ -13,8 +13,6 @@ from tempfile import TemporaryDirectory
 
 from rsikit.evaluation import InfrastructureError, PolicyError, PolicyTimeout
 from rsikit.sandbox.evaluate import error_result, run_evaluation
-from rsikit.sandbox.in_process import run_in_process
-from rsikit.sandbox.worker import run_candidate
 
 MAX_FRAME = 64 * 1024 * 1024
 PRELOAD_PID = os.getpid()
@@ -100,10 +98,9 @@ async def serve(workers, output):
     await send(
         {
             "ready": True,
-            "protocol": 2,
+            "protocol": 3,
             "supervisor_pid": os.getpid(),
             "forkserver_pid": ready["forkserver_pid"],
-            "in_process": True,
         }
     )
     active = set()
@@ -114,34 +111,15 @@ async def serve(workers, output):
             episode_timeout = request.get("episode_timeout", 60.0)
             if not math.isfinite(episode_timeout) or episode_timeout <= 0:
                 raise InfrastructureError("episode_timeout must be positive and finite")
-            in_process = request.get("in_process", False)
-            if type(in_process) is not bool:
-                raise InfrastructureError("in_process must be a boolean")
             with TemporaryDirectory() as directory:
                 result_reader, result_writer = socket.socketpair()
-                channels = [result_writer]
-                if in_process:
-                    processes = [
-                        context.Process(
-                            target=run_in_process, args=(request, result_writer, directory)
-                        )
-                    ]
-                else:
-                    policy_side, environment_side = socket.socketpair()
-                    channels.extend((policy_side, environment_side))
-                    processes = [
-                        context.Process(target=run_candidate, args=(policy_side, directory)),
-                        context.Process(
-                            target=run_evaluation,
-                            args=(request, environment_side, result_writer, directory),
-                        ),
-                    ]
+                process = context.Process(
+                    target=run_evaluation, args=(request, result_writer, directory)
+                )
                 transport = None
                 try:
-                    for process in processes:
-                        process.start()
-                    for channel in channels:
-                        channel.close()
+                    process.start()
+                    result_writer.close()
                     reader, transport = await asyncio.open_connection(
                         sock=result_reader, limit=MAX_FRAME + 1
                     )
@@ -150,16 +128,12 @@ async def serve(workers, output):
                     except asyncio.TimeoutError as exc:
                         raise PolicyTimeout(f"Episode exceeded {episode_timeout:g}s") from exc
                     except (InfrastructureError, ValueError, ConnectionError) as exc:
-                        if in_process:
-                            raise PolicyError(
-                                f"Episode process exited without a valid result: {exc}"
-                            ) from exc
-                        raise
+                        raise PolicyError(
+                            f"Episode process exited without a valid result: {exc}"
+                        ) from exc
                 finally:
-                    for process in reversed(processes):
-                        reap(process, group=in_process)
-                    for channel in channels:
-                        channel.close()
+                    reap(process, group=True)
+                    result_writer.close()
                     if transport is not None:
                         transport.close()
                         await transport.wait_closed()

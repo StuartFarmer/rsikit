@@ -37,7 +37,7 @@ class HistoryTests(unittest.IsolatedAsyncioTestCase):
                 path = Path(directory) / "run"
                 sandbox = FakeSandbox()
 
-                async def evaluate(implementation, environment, seed, call_timeout):
+                async def evaluate(implementation, environment, seed):
                     return trajectory(
                         float(implementation.split("return ")[1].split()[0]) + seed, {}
                     )

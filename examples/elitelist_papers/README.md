@@ -199,15 +199,13 @@ processes from writing the same run. From the repository root:
 ```sh
 rtk proxy .venv/bin/python -B -m examples.elitelist_papers.run \
   --resume examples/elitelist_papers/runs/pilot-Pendulum-v1-0 \
-  --policy-timeout 1 --episode-timeout 10
+  --episode-timeout 10
 ```
 
-`--policy-timeout` is seconds per policy call (`act`, `reset`, `close`), default 10.
 `--episode-timeout` is wall-clock seconds per episode evaluation on each seed,
 default **10**, for the worker to return its episode result. Docker startup,
 queueing and final process cleanup are outside this limit; it is not a total across seeds.
-Both must be
-positive and finite. Lower limits apply to unfinished and future evaluations;
+The limit must be positive and finite. Lower limits apply to unfinished and future evaluations;
 already completed scores remain cached and are **not** certified under the new limit.
 The notebook prints a detached resume command so this terminal can remain free.
 Existing runs inherit their saved limits unless explicitly overridden; use
@@ -220,7 +218,7 @@ An interrupted model call can need another request; hosted model responses are
 not deterministic. An interrupted repair still consumes its recorded repair budget.
 Candidates already discarded stay discarded.
 
-You may override timeouts, worker/model concurrency, or increase `--generations`
+You may override the episode timeout, worker/model concurrency, or increase `--generations`
 (the **total** generation budget, not additional generations). Search-defining
 settings such as the environment, seeds and model cannot change on resume.
 Registered early stopping is preserved as originally configured, including for

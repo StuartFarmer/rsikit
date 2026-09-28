@@ -2,6 +2,7 @@
 
 import asyncio
 import base64
+import codecs
 import json
 import logging
 import math
@@ -13,6 +14,7 @@ from rsikit.evaluation import InfrastructureError, PolicyError, PolicyTimeout
 from rsikit.sandbox.codec import decode_episode
 
 MAX_RESULT = 64 * 1024 * 1024
+MAX_LOG = 1024 * 1024
 
 
 async def _spawn(*args, **kwargs):
@@ -29,7 +31,11 @@ async def _spawn(*args, **kwargs):
 
 
 class DockerSandbox:
-    _in_process = False
+    """Policy, environment and scoring share a fresh process inside Docker.
+
+    Protects the host, not scoring integrity. The supervisor bounds the whole
+    episode and reaps its descendants; it does not impose per-action deadlines.
+    """
 
     def __init__(self, *, image: str = "rsikit-sandbox:local", episode_timeout: float = 60.0):
         if not math.isfinite(episode_timeout) or episode_timeout <= 0:
@@ -40,6 +46,7 @@ class DockerSandbox:
         self.process = None
         self.ready = None
         self._reader = None
+        self._logs = None
         self._cleanup_task = None
         self._pending = {}
         self._write_lock = asyncio.Lock()
@@ -96,15 +103,16 @@ class DockerSandbox:
                 f"from rsikit.sandbox.service import main; main({workers})",
                 stdin=asyncio.subprocess.PIPE,
                 stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.DEVNULL,
+                stderr=asyncio.subprocess.PIPE,
                 limit=MAX_RESULT + 1,
             )
+            self._logs = asyncio.create_task(self._read_logs())
             line = await asyncio.wait_for(self.process.stdout.readline(), 60)
             ready = json.loads(line)
             if (
                 not isinstance(ready, dict)
                 or ready.get("ready") is not True
-                or ready.get("protocol") != 2
+                or ready.get("protocol") != 3
                 or any(
                     type(ready.get(key)) is not int or ready[key] <= 0
                     for key in ("supervisor_pid", "forkserver_pid")
@@ -114,8 +122,6 @@ class DockerSandbox:
                     "Invalid sandbox readiness message; rebuild the Docker image"
                 )
             self.ready = ready
-            if self._in_process and ready.get("in_process") is not True:
-                raise InfrastructureError("Rebuild the Docker image for InProcessDockerSandbox")
             self._reader = asyncio.create_task(self._read_results())
         except BaseException as exc:
             try:
@@ -125,6 +131,23 @@ class DockerSandbox:
             if isinstance(exc, asyncio.CancelledError):
                 raise
             raise InfrastructureError(f"Docker sandbox failed to start: {exc}") from exc
+
+    async def _read_logs(self):
+        logger = logging.getLogger(__name__)
+        decoder = codecs.getincrementaldecoder("utf-8")(errors="replace")
+        remaining = MAX_LOG
+        # ponytail: cap forwarded logs per container; add per-job budgets if needed.
+        # Continue draining after the cap so noisy policies cannot block on stderr.
+        while chunk := await self.process.stderr.read(4096):
+            if not remaining:
+                continue
+            text = decoder.decode(chunk[:remaining], final=len(chunk) >= remaining)
+            remaining -= min(len(chunk), remaining)
+            text = "".join(c if c.isprintable() or c in "\n\t" else "\ufffd" for c in text)
+            if text:
+                logger.info("Sandbox: %s", text.rstrip("\n"), extra={"event": "sandbox_log"})
+            if not remaining:
+                logger.info("Sandbox log limit reached; further output discarded")
 
     def _fail_pending(self, error):
         self._failure = self._failure or error
@@ -190,7 +213,14 @@ class DockerSandbox:
             logging.getLogger(__name__).error("Sandbox cleanup failed: %s", task.exception())
 
     async def evaluate(
-        self, implementation: str, environment: bytes, seed: int, call_timeout: float
+        self,
+        implementation: str,
+        environment: bytes,
+        seed: int | None,
+        *,
+        policy_seed=...,
+        max_steps: int | None = None,
+        instructions: str | None = None,
     ) -> Episode:
         if self._failure is not None:
             raise self._failure
@@ -206,9 +236,10 @@ class DockerSandbox:
                     "environment": base64.b64encode(environment).decode(),
                     "python": list(sys.version_info[:2]),
                     "seed": seed,
-                    "call_timeout": call_timeout,
+                    "policy_seed": seed if policy_seed is ... else policy_seed,
+                    "max_steps": max_steps,
+                    "instructions": instructions,
                     "episode_timeout": self.episode_timeout,
-                    "in_process": self._in_process,
                 },
             },
             allow_nan=False,
@@ -271,6 +302,10 @@ class DockerSandbox:
                     self._reader.cancel()
                     await asyncio.gather(self._reader, return_exceptions=True)
                     self._reader = None
+                if self._logs is not None:
+                    self._logs.cancel()
+                    await asyncio.gather(self._logs, return_exceptions=True)
+                    self._logs = None
                 if self.process is not None:
                     if self.process.stdin is not None:
                         self.process.stdin.close()
@@ -282,13 +317,3 @@ class DockerSandbox:
                         await self.process.communicate()
                     self.process = None
                 self.ready = None
-
-
-class InProcessDockerSandbox(DockerSandbox):
-    """Policy and environment share a fresh process inside the restricted container.
-
-    Protects the host, not scoring integrity. The supervisor enforces
-    episode_timeout; Executor.call_timeout is not applied to individual calls.
-    """
-
-    _in_process = True

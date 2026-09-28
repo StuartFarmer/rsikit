@@ -1,5 +1,9 @@
 Docker execution and Vercel Sandbox investigation — 2026-09-19
 
+> Historical benchmark: the separate policy/evaluator and legacy host-environment
+> paths described here have been removed. See [the current sandbox](IN_PROCESS_SANDBOX.md).
+
+
 The baseline measurements favored keeping Docker for local execution. Container
 startup was about 112 ms and was amortized across a run. Repeated Python process
 and import work was the larger optimization target. The implemented persistent

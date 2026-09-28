@@ -51,7 +51,7 @@ class RunTests(unittest.IsolatedAsyncioTestCase):
         self.provider = ScriptedProvider([json.dumps(RESPONSE)])
         self.policy = await generate("test task", provider=self.provider)
         self.sandbox = FakeSandbox()
-        self.executor = Executor(sandbox=self.sandbox, call_timeout=4)
+        self.executor = Executor(sandbox=self.sandbox)
 
     def create(self, **kwargs):
         return recorded_run(
@@ -68,7 +68,7 @@ class RunTests(unittest.IsolatedAsyncioTestCase):
         first_started, second_started, release = (asyncio.Event() for _ in range(3))
         active = peak = 0
 
-        async def evaluate(implementation, environment, seed, call_timeout):
+        async def evaluate(implementation, environment, seed):
             nonlocal active, peak
             active += 1
             peak = max(peak, active)
@@ -125,7 +125,7 @@ class RunTests(unittest.IsolatedAsyncioTestCase):
     async def test_cancel_queued_submission_does_not_interrupt_active_batch(self):
         started, release = asyncio.Event(), asyncio.Event()
 
-        async def evaluate(implementation, environment, seed, call_timeout):
+        async def evaluate(implementation, environment, seed):
             if seed == 0:
                 started.set()
                 await release.wait()
@@ -169,7 +169,7 @@ class RunTests(unittest.IsolatedAsyncioTestCase):
         started = [asyncio.Event(), asyncio.Event()]
         release = [asyncio.Event(), asyncio.Event()]
 
-        async def evaluate(implementation, environment, seed, call_timeout):
+        async def evaluate(implementation, environment, seed):
             started[seed].set()
             await release[seed].wait()
             return trajectory(float(seed), {})
@@ -284,7 +284,6 @@ class RunTests(unittest.IsolatedAsyncioTestCase):
             await mean_rewards(rollouts, [self.policy], seeds=[0, 1])
             self.assertEqual(self.sandbox.evaluate.await_count, 2)
             self.sandbox.start.assert_awaited_once_with(1)
-            self.assertEqual(self.sandbox.evaluate.call_args.args[3], 4)
             (export,) = (self.path / "exports").glob("*.py")
             restored = Policy.from_file(export)
             self.assertEqual(restored.id, self.policy.id)
@@ -333,7 +332,7 @@ class RunTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(len(run.policies()), 1)
 
     async def test_default_seed_means_and_empty_batch(self):
-        async def evaluate(implementation, environment, seed, call_timeout):
+        async def evaluate(implementation, environment, seed):
             return trajectory(seed * 2.0, {})
 
         self.sandbox.evaluate.side_effect = evaluate
@@ -352,7 +351,7 @@ class RunTests(unittest.IsolatedAsyncioTestCase):
     async def test_interruption_and_resume_after_move(self):
         started = asyncio.Event()
 
-        async def blocked(implementation, environment, seed, call_timeout):
+        async def blocked(implementation, environment, seed):
             if seed == 1:
                 started.set()
                 await asyncio.Event().wait()
@@ -378,7 +377,7 @@ class RunTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual([c.args[2] for c in self.sandbox.evaluate.call_args_list], [1, 2])
 
     async def test_group_failure_preserves_other_scores_and_artifacts(self):
-        async def evaluate(implementation, environment, seed, call_timeout):
+        async def evaluate(implementation, environment, seed):
             if seed == 1:
                 raise PolicyError("bad action")
             return trajectory(seed, {"nested/result.txt": str(seed).encode()})

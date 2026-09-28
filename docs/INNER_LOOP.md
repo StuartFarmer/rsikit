@@ -119,12 +119,12 @@ episode = await run_program(Path("solution.py"), "CartPole-v1", max_steps=100)
 print(episode.total_reward, episode.actions)
 ```
 
-`run_program` creates, resets, and closes its instances and returns an `Episode`.
-The source must export `Solution(Policy)`. It reads source as data and executes
-it in Docker; never import generated source on the host. Its environment remains
-on the host. One remote policy instance and asyncio event loop persist throughout
-the episode. For execution with both instances in Docker, use `Executor`; see
-[InProcessDockerSandbox](IN_PROCESS_SANDBOX.md).
+`run_program` creates an environment template, then runs reset, policy execution,
+steps and scoring in a fresh Docker process. It closes both the container and the
+host template. The source must export `Solution(Policy)`; never import generated
+source on the host. `env_seed`, `policy_seed`, `instructions`, and `max_steps`
+apply inside the worker. Use `async with Executor(...)` for repeated evaluations
+in one warm container; see [DockerSandbox](IN_PROCESS_SANDBOX.md).
 
 Build the worker with:
 
@@ -133,14 +133,16 @@ docker build -t rsikit-sandbox:local -f rsikit/sandbox/Dockerfile .
 ```
 
 The worker runs non-root, without network or host mounts, with a read-only
-filesystem and resource limits. `call_timeout` defaults to 10 seconds per policy
-call in `run_program`. This is research isolation, not a hostile multi-tenant
-service. Direct trusted policies have no hard execution deadline.
+filesystem and resource limits. `episode_timeout` defaults to 60 seconds for the
+whole episode, including policy initialization, reset, actions, and close. There
+is no per-call timeout. The policy can inspect its environment and scoring state;
+this is research isolation, not a hostile multi-tenant service. Direct trusted
+`Evaluator` calls have no hard execution deadline.
 
-The isolated policy protocol supports Box, Discrete, Dict, Tuple, and Text spaces
-with bounded numeric array and JSON payloads. Unsupported spaces fail before
-source execution; direct evaluation can use other Gymnasium spaces. This policy
-channel has no pickle transport or fallback to local execution.
+Caller-provided environment templates travel inward using cloudpickle; their
+imports must be available in the image, or their definitions serialized by value.
+Only bounded JSON episode data returns to the host. Gymnasium spaces stay inside
+the worker; there is no separate action/observation transport or local fallback.
 
 ## Failures
 

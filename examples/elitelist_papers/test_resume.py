@@ -125,7 +125,7 @@ class ResumeTests(unittest.IsolatedAsyncioTestCase):
     async def test_resume_reuses_cached_seeds_and_records_lower_timeout(self):
         first = FakeSandbox()
 
-        async def interrupted(source, environment, seed, call_timeout):
+        async def interrupted(source, environment, seed):
             if seed == 1:
                 raise InfrastructureError("interrupted worker")
             return trajectory(7.0)
@@ -134,8 +134,8 @@ class ResumeTests(unittest.IsolatedAsyncioTestCase):
         second = FakeSandbox()
         jobs = []
 
-        async def finish(source, environment, seed, call_timeout):
-            jobs.append((seed, call_timeout))
+        async def finish(source, environment, seed):
+            jobs.append(seed)
             return trajectory(7.0)
 
         second.evaluate.side_effect = finish
@@ -146,9 +146,7 @@ class ResumeTests(unittest.IsolatedAsyncioTestCase):
                 patch.object(
                     runner, "LoggedOpenRouter", return_value=ScriptedProvider([program(0)])
                 ),
-                patch.object(
-                    runner, "Executor", return_value=Executor(sandbox=first, call_timeout=6)
-                ),
+                patch.object(runner, "Executor", return_value=Executor(sandbox=first)),
                 patch.object(runner, "Console", return_value=Console(file=io.StringIO())),
             ):
                 with self.assertRaisesRegex(InfrastructureError, "interrupted worker"):
@@ -167,7 +165,7 @@ class ResumeTests(unittest.IsolatedAsyncioTestCase):
                             "1",
                             "--heldout-seeds",
                             "100",
-                            "--policy-timeout",
+                            "--episode-timeout",
                             "6",
                             "--output",
                             str(output),
@@ -177,11 +175,13 @@ class ResumeTests(unittest.IsolatedAsyncioTestCase):
             snapshot = (output / "source.zip").read_bytes()
 
             # Real Executor construction must receive the requested new timeout.
+            deadlines = []
+
             def executor(**kwargs):
+                deadlines.append(kwargs["sandbox"].episode_timeout)
                 return Executor(
                     sandbox=second,
                     concurrency=kwargs["concurrency"],
-                    call_timeout=kwargs["call_timeout"],
                 )
 
             provider = ScriptedProvider([])
@@ -191,24 +191,21 @@ class ResumeTests(unittest.IsolatedAsyncioTestCase):
                 patch.object(runner, "Executor", side_effect=executor),
                 patch.object(runner, "Console", return_value=Console(file=io.StringIO())),
             ):
-                await runner.main(
-                    ["--resume", str(output), "--policy-timeout", "0.25", "--episode-timeout", "5"]
-                )
+                await runner.main(["--resume", str(output), "--episode-timeout", "0.25"])
             self.assertEqual(provider.calls, [])
-            self.assertEqual(sorted(seed for seed, _ in jobs), [1, 100, 100])
-            self.assertTrue(all(timeout == 0.25 for _, timeout in jobs))
+            self.assertEqual(sorted(jobs), [1, 100, 100])
+            self.assertEqual(deadlines, [0.25])
             self.assertEqual((output / "experiment.json").read_bytes(), manifest)
             self.assertEqual((output / "source.zip").read_bytes(), snapshot)
             attempts = json.loads((output / "attempts.json").read_text())
-            self.assertEqual([a["policy_timeout"] for a in attempts], [6, 0.25])
-            self.assertEqual(attempts[-1]["episode_timeout"], 5)
+            self.assertEqual([a["episode_timeout"] for a in attempts], [6, 0.25])
+            self.assertEqual(attempts[-1]["episode_timeout"], 0.25)
             self.assertEqual(attempts[-1]["status"], "completed")
             original_context = (output / attempts[0]["context"]).read_text()
             resumed_context = (output / attempts[-1]["context"]).read_text()
-            self.assertIn("6 seconds per policy call", original_context)
-            self.assertIn("0.25 seconds per policy call", resumed_context)
-            self.assertIn("5 seconds per episode", resumed_context)
-            self.assertNotIn("6 seconds per policy call", resumed_context)
+            self.assertIn("6 seconds per episode", original_context)
+            self.assertIn("0.25 seconds per episode", resumed_context)
+            self.assertNotIn("6 seconds per episode", resumed_context)
             self.assertIn("Early stopping is disabled", resumed_context)
             self.assertNotEqual(attempts[0]["context_sha256"], attempts[-1]["context_sha256"])
             summary = json.loads((output / "summary.json").read_text())
@@ -252,7 +249,7 @@ class ResumeTests(unittest.IsolatedAsyncioTestCase):
                     recorded_run(output, environment=env),
                 ):
                     with self.assertRaises(SystemExit):
-                        await runner.main(["--resume", str(output), "--policy-timeout", "1"])
+                        await runner.main(["--resume", str(output), "--episode-timeout", "1"])
             self.assertEqual((output / "status.json").read_bytes(), before)
 
     async def test_legacy_completed_run_extends_budget_then_resumes_without_model_calls(self):
@@ -287,7 +284,7 @@ class ResumeTests(unittest.IsolatedAsyncioTestCase):
             # This fixture represents the manifests written before resume and early stopping.
             (output / "attempts.json").unlink()
             manifest = json.loads((output / "experiment.json").read_text())
-            manifest.pop("policy_timeout")
+            manifest["policy_timeout"] = 10  # Old manifests may retain the removed option.
             manifest.pop("no_early_stop")
             manifest.pop("target_score")
             manifest["config"].pop("target_score")
@@ -303,7 +300,7 @@ class ResumeTests(unittest.IsolatedAsyncioTestCase):
                     )
                 ]
             )
-            for flags in (["--generations", "2", "--policy-timeout", "0.3"], []):
+            for flags in (["--generations", "2", "--episode-timeout", "0.3"], []):
                 with (
                     patch.dict("os.environ", {"OPENROUTER_API_KEY": "test"}),
                     patch.object(runner, "LoggedOpenRouter", return_value=provider),
@@ -314,7 +311,7 @@ class ResumeTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(len(provider.calls), 1)
             self.assertEqual(json.loads((output / "summary.json").read_text())["generations"], 2)
             attempts = json.loads((output / "attempts.json").read_text())
-            self.assertEqual([a["policy_timeout"] for a in attempts], [10, 0.3, 0.3])
+            self.assertEqual([a["episode_timeout"] for a in attempts], [10, 0.3, 0.3])
             self.assertEqual([a["generations"] for a in attempts], [1, 2, 2])
             self.assertEqual(json.loads((output / "experiment.json").read_text()), manifest)
 

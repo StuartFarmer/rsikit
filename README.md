@@ -15,9 +15,8 @@ This is an experimental release; APIs may change.
 - `Episode`: records observations, actions, rewards, flags, infos, and artifacts.
 - `Optimizer`: the `propose(n)` / `update(policy_episode_pairs)` protocol, implemented by all three AlphaEvolve variants.
 - `Run`: persists one optimizer run: configuration, checkpoints, policies, and episodes.
-- `Executor`: owns concurrency and timeouts, using a configurable sandbox.
-- `DockerSandbox`: reuses one container across a run, with independent evaluation processes.
-- `InProcessDockerSandbox`: runs policy and environment together inside Docker, avoiding per-action IPC.
+- `Executor`: owns concurrency and the Docker sandbox lifecycle.
+- `DockerSandbox`: reuses one warm container; policy, environment and scoring share a fresh process per episode.
 - `AlphaEvolve`: evolutionary search using Slick and Gymnasium feedback.
 - `ShinkaEvolve`: island archives, adaptive model selection, and diff/rewrite/crossover search.
 - `LineageSearch`: diverse approach families, measured refinement and pivots, and stagnation-based completion.
@@ -67,21 +66,21 @@ See [execution, runs, and recovery](docs/RUNS.md).
 
 Docker episodes default to a 60-second wall-clock limit per seed. Exceeding it
 raises a recoverable `PolicyTimeout` and terminates that episode's workers while
-other episodes continue. With `DockerSandbox`, `call_timeout` separately limits each policy call.
+other episodes continue. There are no separate per-action deadlines.
 
-`Executor` defaults to `InProcessDockerSandbox`. To configure its episode timeout:
+`Executor` defaults to `DockerSandbox`. To configure its episode timeout:
 
 ```python
-from rsikit import Executor, InProcessDockerSandbox
+from rsikit import Executor, DockerSandbox
 
-executor = Executor(sandbox=InProcessDockerSandbox(episode_timeout=60), concurrency=4)
+executor = Executor(sandbox=DockerSandbox(episode_timeout=60), concurrency=4)
 ```
 
-It keeps the restricted Docker container and a fresh process per episode, but
-lets the policy share memory with the environment. It protects the host rather
-than hidden environment state or scoring integrity. Its external `episode_timeout`
-covers the complete rollout; `call_timeout` is not applied. Rebuild the sandbox
-image before using it. See [performance measurements](docs/IN_PROCESS_SANDBOX.md).
+The policy shares memory with its environment and scoring state. Docker protects
+the host; scores are not protected from a policy deliberately tampering with the
+evaluator. LLM calls, API credentials, storage, and Rich/TUI rendering stay on the
+host. Container logs feed host logging, and progress updates as episodes finish.
+Rebuild the image after upgrading. See [sandbox details](docs/IN_PROCESS_SANDBOX.md).
 
 ## Setup
 
@@ -108,10 +107,9 @@ docker build -t rsikit-sandbox:local -f rsikit/sandbox/Dockerfile .
 .venv/bin/python -B -m examples.circle_packing /path/to/solution.py
 ```
 
-A program exports `Solution(Policy)`. One policy instance persists throughout an
-episode. Executor evaluates both environment and agent inside the container, sharing
-an episode process by default; `DockerSandbox` uses separate processes. The
-lower-level `run_program` helper still keeps its environment on the host.
+A program exports `Solution(Policy)`. One policy instance and event loop persist
+throughout an episode. Both `Executor` and `run_program` execute the environment,
+policy and scoring together inside Docker. Generated code never runs on the host.
 
 For caller-owned instances, use `Evaluator(env, policy, max_steps=1000)` and
 `await evaluator.run(observation, info=info)` after resetting both objects.

@@ -71,8 +71,8 @@ class Paper1Tests(unittest.IsolatedAsyncioTestCase):
                 ["--population", "0"],
                 ["--max-steps", "0"],
                 ["--episode-timeout", "nan"],
-                ["--policy-timeout", "0"],
-                ["--policy-timeout", "nan"],
+                ["--episode-timeout", "0"],
+                ["--episode-timeout", "nan"],
                 ["--seeds", "-1"],
                 ["--target-score", "nan"],
             ):
@@ -85,7 +85,7 @@ class Paper1Tests(unittest.IsolatedAsyncioTestCase):
         runner = self.runner()
         sandbox = FakeSandbox()
 
-        async def evaluate(source, environment, seed, call_timeout):
+        async def evaluate(source, environment, seed):
             if "action_space.sample" in source:
                 return trajectory(-2.0, {})
             value = int(source.split("return ")[-1].strip())
@@ -150,7 +150,6 @@ class Paper1Tests(unittest.IsolatedAsyncioTestCase):
             context = (output / "context.txt").read_text()
             self.assertEqual(context, manifest["instructions"])
             self.assertIn("10 seconds per episode", context)
-            self.assertIn("10 seconds per policy call", context)
             self.assertIn("mean search reward >= 475", context)
             self.assertTrue(all(context in prompt for prompt in contexts))
             rows = list(csv.DictReader(io.StringIO((output / "curves.csv").read_text())))
@@ -188,7 +187,7 @@ class Paper1Tests(unittest.IsolatedAsyncioTestCase):
         runner = self.runner()
         sandbox = FakeSandbox()
 
-        async def evaluate(source, environment, seed, call_timeout):
+        async def evaluate(source, environment, seed):
             if seed >= 100 and "action_space.sample" not in source:
                 raise PolicyError("unseen-state failure")
             return trajectory(7.0, {})
@@ -262,7 +261,7 @@ class Paper1Tests(unittest.IsolatedAsyncioTestCase):
                 output = Path(directory) / "run"
                 sandbox = FakeSandbox()
 
-                async def evaluate(source, environment, seed, call_timeout):
+                async def evaluate(source, environment, seed):
                     # Search meets the target exactly; held-out results do not.
                     return trajectory(475.0 if seed == 0 else -100.0, {})
 

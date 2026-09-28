@@ -11,7 +11,6 @@ from gymnasium.utils.env_checker import check_env
 from rsikit import envs
 from rsikit.evaluation import PolicyError
 from rsikit.policy import Policy
-from rsikit.sandbox.codec import decode_space, encode_space
 from tests.helpers import run_episode
 
 
@@ -157,7 +156,7 @@ class BlackjackTests(unittest.TestCase):
     def test_shoes_seeding_validation_and_gym_contract(self):
         env = self.env()
         check_env(env, skip_render_check=True)
-        space = decode_space(encode_space(env.observation_space))
+        space = env.observation_space
         for decks in (1, 2, 6, 8):
             a, b = self.env(decks=decks), self.env(decks=decks)
             self.assertEqual(

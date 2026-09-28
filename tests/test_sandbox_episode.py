@@ -6,8 +6,7 @@ import subprocess
 import tempfile
 import unittest
 from pathlib import Path
-from types import SimpleNamespace
-from unittest.mock import AsyncMock, patch
+from unittest.mock import patch
 
 import gymnasium as gym
 import numpy as np
@@ -16,8 +15,8 @@ from gymnasium import spaces
 from research.rewards import mean_rewards
 from rsikit.evaluation import InfrastructureError, PolicyError, PolicyTimeout
 from rsikit.policy import Policy
-from rsikit.sandbox import SandboxPolicy, run_program
-from rsikit.sandbox.codec import decode, decode_space, dumps, encode, encode_space, loads
+from rsikit.sandbox import run_program
+from rsikit.sandbox.codec import decode, dumps, encode, loads
 from tests.helpers import finish_pending, recorded_run, run_episode
 
 INSTRUCTIONS = "Count from zero.\nPreserve café and π exactly."
@@ -79,20 +78,6 @@ class CodecSmoke(unittest.TestCase):
         self.assertIsInstance(restored["a"], tuple)
         self.assertEqual(restored["a"][1], value["a"][1])
         self.assertEqual(restored[3], 4)
-        space = spaces.Dict(
-            [
-                ("z", spaces.Box(-np.inf, np.inf, (2,), dtype=np.float32)),
-                (
-                    "a",
-                    spaces.Tuple(
-                        (spaces.Discrete(3, start=-1), spaces.Text(8, min_length=0, charset="aπ"))
-                    ),
-                ),
-            ]
-        )
-        recovered = decode_space(loads(dumps(encode_space(space))))
-        self.assertEqual(list(recovered.spaces), ["z", "a"])
-        self.assertEqual(recovered, space)
         for encoded in (
             ["array", "O", [1], "AAAAAAAAAAA="],
             ["array", "f8", [1_000_000], ""],
@@ -100,38 +85,19 @@ class CodecSmoke(unittest.TestCase):
         ):
             with self.assertRaises((ValueError, TypeError)):
                 decode(encoded)
-        with self.assertRaises(InfrastructureError):
-            SandboxPolicy(
-                spaces.MultiDiscrete([2, 3]),
-                spaces.Discrete(2),
-                instructions="",
-                source="raise AssertionError('must not run')",
-            )
-
-
-class ClientFailureSmoke(unittest.IsolatedAsyncioTestCase):
-    async def test_cleanup_cannot_replace_timeout_or_cancellation(self):
-        for trigger, expected in (
-            (asyncio.TimeoutError, PolicyTimeout),
-            (asyncio.CancelledError, asyncio.CancelledError),
-        ):
-            policy = SandboxPolicy(
-                spaces.Discrete(2), spaces.Discrete(2), instructions="", source=COUNTER_SOURCE
-            )
-            policy.ready = True
-            policy.process = SimpleNamespace(
-                stdin=SimpleNamespace(write=lambda _: None, drain=AsyncMock()),
-                stdout=SimpleNamespace(readline=AsyncMock(side_effect=trigger)),
-            )
-            policy._destroy = AsyncMock(side_effect=InfrastructureError("cleanup unavailable"))
-            with self.assertRaises(expected) as caught:
-                await policy.act(0)
-            self.assertIsInstance(caught.exception.cleanup_error, InfrastructureError)
 
 
 class SandboxEpisodeSmoke(unittest.IsolatedAsyncioTestCase):
     @classmethod
     def setUpClass(cls):
+        import sys
+
+        import cloudpickle
+
+        # The test-only environment module is not installed in the worker image.
+        cloudpickle.register_pickle_by_value(sys.modules[__name__])
+        cls.addClassCleanup(cloudpickle.unregister_pickle_by_value, sys.modules[__name__])
+
         if shutil.which("docker") is None:
             raise unittest.SkipTest("Docker is not installed; no local source execution fallback")
         try:
@@ -150,7 +116,7 @@ class SandboxEpisodeSmoke(unittest.IsolatedAsyncioTestCase):
             path = Path(directory) / "solution.py"
             path.write_text(source, encoding="utf-8")
             episode = await run_program(
-                path, CounterEnv, env_seed=1, policy_seed=2, max_steps=5, call_timeout=timeout
+                path, CounterEnv, env_seed=1, policy_seed=2, max_steps=5, episode_timeout=timeout
             )
             return episode.final_step
 
@@ -658,44 +624,14 @@ class Solution(Policy):
             with self.assertRaises(PolicyError):
                 await self.run_source(COUNTER_SOURCE.replace("return action", body))
         timeout_source = COUNTER_SOURCE.replace("return action", "while True: pass")
-        instances = []
-
-        def factory(observation_space, action_space, *, instructions):
-            policy = SandboxPolicy(
-                observation_space,
-                action_space,
-                instructions=instructions,
-                source=timeout_source,
-                call_timeout=0.5,
-            )
-            instances.append(policy)
-            return policy
-
         with self.assertRaises(PolicyTimeout):
-            await run_episode(CounterEnv, factory, env_seed=1, policy_seed=2, max_steps=5)
-        self.assertIsNone(instances[0].process)
-        result = await asyncio.create_subprocess_exec(
-            "docker",
-            "inspect",
-            instances[0].container_name,
-            stdout=asyncio.subprocess.DEVNULL,
-            stderr=asyncio.subprocess.DEVNULL,
-        )
-        self.assertNotEqual(await result.wait(), 0)
+            await self.run_source(timeout_source, timeout=0.5)
+        from rsikit import DockerSandbox
+
+        sandbox = DockerSandbox(image="rsikit-intentionally-missing:local")
         with self.assertRaises(InfrastructureError):
-            await run_episode(
-                CounterEnv,
-                lambda obs, act, **kw: SandboxPolicy(
-                    obs,
-                    act,
-                    **kw,
-                    source=COUNTER_SOURCE,
-                    image="rsikit-intentionally-missing:local",
-                ),
-                env_seed=1,
-                policy_seed=2,
-                max_steps=5,
-            )
+            await sandbox.start(1)
+        self.assertIsNone(sandbox.process)
 
     async def test_batches_share_one_container_with_independent_environment_processes(self):
         import json
@@ -796,7 +732,8 @@ class Solution(Policy):
             name="stuck",
         )
         sandbox = DockerSandbox()
-        executor = Executor(sandbox=sandbox, call_timeout=0.1)
+        sandbox.episode_timeout = 0.1
+        executor = Executor(sandbox=sandbox)
         with (
             tempfile.TemporaryDirectory() as directory,
             gym.make("CartPole-v1") as env,
@@ -828,7 +765,7 @@ class Solution(Policy):
                         raise
                 return process
 
-            executor.call_timeout = 60
+            sandbox.episode_timeout = 60
             with patch("rsikit.sandbox.docker.asyncio.create_subprocess_exec", delayed_create):
                 pending = asyncio.create_task(finish_pending(rollouts))
                 await asyncio.wait_for(started.wait(), 10)

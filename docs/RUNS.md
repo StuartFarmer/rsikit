@@ -45,11 +45,11 @@ uses `Evaluator`, and closes them. Host and sandbox Python minor versions must m
 The caller owns the host template's lifecycle.
 
 Use `async with Executor(...)` to reuse a container across batches; its exit removes
-the container. `Run` contexts only release storage. `InProcessDockerSandbox` is the
-default: policy and environment share one fresh episode process inside Docker.
-`DockerSandbox` puts them in separate processes to isolate environment state and
-supports per-policy-call deadlines. Both return complete Episodes through a bounded,
-data-only protocol. Episode deadlines default to 60 seconds.
+the container. `Run` contexts only release storage. `DockerSandbox` is the sole
+backend: policy, environment and scoring share one fresh episode process. It
+returns complete Episodes through a bounded, data-only protocol. Episode deadlines
+default to 60 seconds; individual actions have no separate deadline. Container
+stdout/stderr logs flow to host logging; existing Rich progress uses episode results.
 
 Build the image before execution:
 

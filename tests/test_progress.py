@@ -84,7 +84,7 @@ class ProgressTests(unittest.IsolatedAsyncioTestCase):
         sandbox = FakeSandbox()
         second_started, release = asyncio.Event(), asyncio.Event()
 
-        async def evaluate(implementation, environment, seed, call_timeout):
+        async def evaluate(implementation, environment, seed):
             if "# second" in implementation:
                 second_started.set()
                 await release.wait()

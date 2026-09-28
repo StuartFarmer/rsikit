@@ -124,7 +124,7 @@ class AlphaEvolveTests(unittest.IsolatedAsyncioTestCase):
         agent = AlphaEvolve("Improve score", provider, config=Config(mode="rewrite"))
         sandbox = FakeSandbox()
 
-        async def evaluate(implementation, environment, seed, call_timeout):
+        async def evaluate(implementation, environment, seed):
             score = float(implementation.split("return ")[1].split()[0])
             return trajectory(score, {"result.txt": str(score).encode()})
 

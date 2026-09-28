@@ -1,16 +1,12 @@
 """Bounded numeric frames preserve values without Python deserialization."""
 
-import socket
 import struct
-import threading
-import time
 import unittest
 
 import numpy as np
-from gymnasium import spaces
 
-from rsikit.sandbox.codec import MAX_ARRAY_BYTES, MAX_MESSAGE, frame_size, pack, unpack
-from rsikit.sandbox.evaluate import ProcessPolicy
+from examples.elitelist_papers.poker.codec import frame_size, pack, unpack
+from rsikit.sandbox.codec import MAX_ARRAY_BYTES, MAX_MESSAGE
 
 
 class NumericTransportTests(unittest.TestCase):
@@ -62,51 +58,3 @@ class NumericTransportTests(unittest.TestCase):
         for value in (np.array([object()]), np.zeros(MAX_ARRAY_BYTES + 1, dtype=np.uint8)):
             with self.assertRaises(ValueError):
                 pack({"action": value})
-
-
-class ExchangeTests(unittest.IsolatedAsyncioTestCase):
-    async def test_fragmented_response_obeys_one_absolute_deadline(self):
-        for delay in (0, 0.03):
-            left, right = socket.socketpair()
-            policy = ProcessPolicy(
-                spaces.Discrete(2), spaces.Discrete(2), source="", channel=left, call_timeout=0.05
-            )
-            packet = pack({"action": 1})
-
-            def respond():
-                try:
-                    right.recv(100)
-                    for byte in packet:
-                        time.sleep(delay)
-                        right.sendall(bytes([byte]))
-                except OSError:
-                    pass
-                finally:
-                    right.close()
-
-            thread = threading.Thread(target=respond)
-            thread.start()
-            start = time.monotonic()
-            try:
-                if delay:
-                    with self.assertRaises(TimeoutError):
-                        await policy._exchange_with_timeout(
-                            pack({"command": "act", "observation": 0})
-                        )
-                    self.assertLess(time.monotonic() - start, 0.2)
-                else:
-                    self.assertEqual(
-                        unpack(
-                            await policy._exchange_with_timeout(
-                                pack({"command": "act", "observation": 0})
-                            )
-                        ),
-                        {"action": 1},
-                    )
-            finally:
-                left.close()
-                thread.join()
-
-
-if __name__ == "__main__":
-    unittest.main()

@@ -255,7 +255,7 @@ class VariantTests(unittest.IsolatedAsyncioTestCase):
         ):
             sandbox = FakeSandbox()
 
-            async def evaluate(source, environment, seed, timeout):
+            async def evaluate(source, environment, seed):
                 return trajectory(float(source.split("return ")[1].split()[0]) + seed, {})
 
             sandbox.evaluate.side_effect = evaluate
@@ -311,7 +311,7 @@ class VariantTests(unittest.IsolatedAsyncioTestCase):
         with tempfile.TemporaryDirectory() as directory, gym.make("CartPole-v1") as environment:
             sandbox = FakeSandbox()
 
-            async def evaluate(source, environment, seed, timeout):
+            async def evaluate(source, environment, seed):
                 return trajectory(float(source.split("return ")[1].split()[0]) + seed, {})
 
             sandbox.evaluate.side_effect = evaluate
@@ -340,7 +340,7 @@ class VariantTests(unittest.IsolatedAsyncioTestCase):
         with tempfile.TemporaryDirectory() as directory, gym.make("CartPole-v1") as environment:
             sandbox = FakeSandbox()
 
-            async def evaluate(source, environment, seed, timeout):
+            async def evaluate(source, environment, seed):
                 return trajectory(float(seed), {})
 
             sandbox.evaluate.side_effect = evaluate
@@ -401,7 +401,7 @@ class VariantTests(unittest.IsolatedAsyncioTestCase):
                 sandbox = FakeSandbox()
                 started = asyncio.Event()
 
-                async def evaluate(source, environment, seed, timeout):
+                async def evaluate(source, environment, seed):
                     if "return 0" in source:
                         started.set()
                         if cancel:
@@ -514,7 +514,7 @@ class VariantTests(unittest.IsolatedAsyncioTestCase):
                     await asyncio.Event().wait()
                 return response
 
-            async def evaluate(source, environment, seed, timeout):
+            async def evaluate(source, environment, seed):
                 if "return 1" in source:
                     await generating.wait()
                 return trajectory(7, {})
@@ -589,7 +589,7 @@ class VariantTests(unittest.IsolatedAsyncioTestCase):
                     await sibling_saved.wait()
                 return response
 
-            async def evaluate(source, environment, seed, timeout):
+            async def evaluate(source, environment, seed):
                 if "return 1" in source:
                     await sibling_started.wait()
                     raise PolicyError("bad concurrent action")

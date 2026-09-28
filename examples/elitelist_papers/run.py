@@ -54,7 +54,6 @@ TASKS = (
 )
 ROOT = Path(__file__).resolve().parents[2]
 EXECUTION_OPTIONS = (
-    "policy_timeout",
     "episode_timeout",
     "concurrency",
     "generation_concurrency",
@@ -270,9 +269,6 @@ async def main(argv=None):
         default=10,
         help="Wall-clock seconds per episode evaluation (default: 10)",
     )
-    parser.add_argument(
-        "--policy-timeout", type=float, default=10, help="Seconds per policy call (act/reset/close)"
-    )
     parser.add_argument("--max-steps", type=int, help="Override the environment episode limit")
     parser.add_argument("--search-seed", type=int, default=0)
     parser.add_argument("--seeds", type=int, nargs="+", default=list(range(10)))
@@ -304,7 +300,6 @@ async def main(argv=None):
         except (OSError, ValueError) as exc:
             parser.error(f"Cannot resume: {exc}")
         inherited = {key: saved.get(key, parser.get_default(key)) for key in vars(args)}
-        inherited["policy_timeout"] = saved.get("policy_timeout", 10)
         for key in EXECUTION_OPTIONS:
             if history and key in history[-1]:
                 inherited[key] = history[-1][key]
@@ -339,8 +334,6 @@ async def main(argv=None):
         parser.error("--max-repairs and --search-seed must be nonnegative")
     if not math.isfinite(args.episode_timeout) or args.episode_timeout <= 0:
         parser.error("--episode-timeout must be positive and finite")
-    if not math.isfinite(args.policy_timeout) or args.policy_timeout <= 0:
-        parser.error("--policy-timeout must be positive and finite")
     if args.target_score is not None and not math.isfinite(args.target_score):
         parser.error("--target-score must be finite")
     if any(seed < 0 for seed in args.seeds + args.heldout_seeds):
@@ -401,8 +394,6 @@ async def main(argv=None):
             "for the worker to return its episode result. Policy initialization and environment "
             "steps must fit this limit. Docker startup, queueing and final process cleanup are "
             "outside this limit. This is not a total budget across all seeds.\n"
-            f"Call limit: {args.policy_timeout:g} seconds per policy call (act/reset/close), "
-            "also subject to the episode limit. Keep all computation bounded.\n"
             "A timeout is an evaluation failure, not a truncated successful episode or a zero reward. "
             "Search-time failures enter the repair loop, within the repair budget.\n"
             "The policy receives observations, not rewards or info/action masks; episode state "
@@ -410,7 +401,6 @@ async def main(argv=None):
         )
         executor = Executor(
             concurrency=args.concurrency,
-            call_timeout=args.policy_timeout,
             sandbox=DockerSandbox(episode_timeout=args.episode_timeout),
         )
         try:
@@ -462,10 +452,7 @@ async def main(argv=None):
                         dict(
                             **(json.loads(old_status.read_text()) if old_status.exists() else {}),
                             **{
-                                key: saved.get(
-                                    key, 10 if key == "policy_timeout" else getattr(args, key)
-                                )
-                                for key in EXECUTION_OPTIONS
+                                key: saved.get(key, getattr(args, key)) for key in EXECUTION_OPTIONS
                             },
                             kind="original",
                             source="source.zip",

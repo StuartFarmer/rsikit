@@ -61,7 +61,7 @@ class EvaluationTests(unittest.IsolatedAsyncioTestCase):
                 EvaluationResult(**kwargs)
 
     async def test_policy_failure_preserves_successful_siblings_and_cached_episodes(self):
-        async def evaluate(source, environment, seed, timeout):
+        async def evaluate(source, environment, seed):
             if source.endswith("# fails\n") and seed == 1:
                 raise PolicyError("invalid action")
             return trajectory(float(seed + 2), {})
@@ -84,7 +84,7 @@ class EvaluationTests(unittest.IsolatedAsyncioTestCase):
     async def test_screening_handles_failure_rejection_and_success_separately(self):
         low = rsikit.Policy.from_text(SOURCE + "# low\n", name="Low")
 
-        async def evaluate(source, environment, seed, timeout):
+        async def evaluate(source, environment, seed):
             if source.endswith("# fails\n"):
                 raise PolicyError("broken")
             return trajectory(0.0 if source.endswith("# low\n") else float(10 + seed), {})

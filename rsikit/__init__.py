@@ -8,13 +8,12 @@ from .optimization import Optimizer
 from .policy import Policy
 from .run import Run
 from .sandbox import run_program
-from .sandbox.docker import DockerSandbox, InProcessDockerSandbox
+from .sandbox.docker import DockerSandbox
 
 __all__ = [
     "DockerSandbox",
     "Episode",
     "Evaluator",
-    "InProcessDockerSandbox",
     "Executor",
     "Optimizer",
     "Policy",

@@ -101,8 +101,8 @@ async def main(samples, output):
     definition = cloudpickle.dumps(env)
 
     async def packing(sandbox):
-        score, artifacts = await sandbox.evaluate(PACKING, definition, 1, 10)
-        assert score == 0.5 and artifacts == {}, (score, artifacts)
+        episode = await sandbox.evaluate(PACKING, definition, 1)
+        assert episode.total_reward == 0.5 and episode.artifacts == {}
 
     starts, evaluations, closes = [], [], []
     for _ in range(samples):
@@ -175,13 +175,13 @@ async def main(samples, output):
                 await measure(f"{label}_batch16_c{concurrency}", batch, count=3, jobs=16)
         environment.close()
 
-    async def legacy():
+    async def single_episode():
         episode = await run_program(CARTPOLE, "CartPole-v1", env_seed=1, policy_seed=1)
         info = episode.infos[-1]
         assert info["episode"]["r"] == 500.0 and info["episode"]["l"] == 500
 
-    await legacy()
-    await measure("legacy_cartpole500_total", legacy)
+    await single_episode()
+    await measure("single_cartpole500_total", single_episode)
 
 
 if __name__ == "__main__":
