@@ -6,11 +6,11 @@ from pathlib import Path
 from unittest.mock import patch
 
 import rsikit
-from rsikit.generation.edits import InvalidCandidate, check_program
+from rsikit.policy import InvalidPolicy, validate_policy
 
 
 class PolicyContractTests(unittest.TestCase):
-    def test_public_construction_validates_source_without_executing_it(self):
+    def test_loading_preserves_source_and_validation_is_explicit(self):
         self.assertTrue(hasattr(rsikit.Policy, "from_text"), "Policy owns source loading")
         source = (
             "raise AssertionError('must not execute')\n"
@@ -22,13 +22,27 @@ class PolicyContractTests(unittest.TestCase):
         self.assertEqual((policy.name, policy.description), ("Example", "Description"))
         self.assertEqual(policy._implementation, source)
         self.assertEqual(policy.id, rsikit.Policy.from_text(source, name="Example").id)
+        validate_policy(policy)
         for invalid in (
             "pass",
+            "def broken(:",
             source + "class Solution: pass\n",
             source.replace("async def act(self, observation)", "def __init__(self)"),
         ):
-            with self.subTest(source=invalid), self.assertRaises(InvalidCandidate):
-                rsikit.Policy.from_text(invalid, name="Invalid")
+            with self.subTest(source=invalid):
+                candidate = rsikit.Policy.from_text(invalid, name="Invalid")
+                self.assertEqual(candidate._implementation, invalid)
+                restored = rsikit.Policy.from_text(candidate.to_text())
+                self.assertEqual(restored.id, candidate.id)
+                with self.assertRaises(InvalidPolicy):
+                    validate_policy(candidate)
+
+    def test_policy_validation_does_not_interpret_evolution_markers(self):
+        policy = rsikit.Policy.from_text(
+            "# EVOLVE-BLOCK-START\nfrom rsikit import Policy\n"
+            "class Solution(Policy):\n    async def act(self, observation): return 0\n"
+        )
+        validate_policy(policy)
 
     def test_text_and_file_round_trips_preserve_identity_and_source(self):
         self.assertTrue(hasattr(rsikit.Policy, "from_text"), "Policy owns source loading")
@@ -104,13 +118,15 @@ class PolicyContractTests(unittest.TestCase):
             )
             with self.subTest(signature=signature):
                 if signature in valid:
-                    check_program(source)
+                    validate_policy(rsikit.Policy.from_text(source))
                 else:
-                    with self.assertRaisesRegex(InvalidCandidate, "instructions"):
-                        check_program(source)
-        check_program(
-            "class Solution:\n    def __init__(self): pass\n"
-            "    def __init__(self, *args, **kwargs): pass\n"
+                    with self.assertRaisesRegex(InvalidPolicy, "instructions"):
+                        validate_policy(rsikit.Policy.from_text(source))
+        validate_policy(
+            rsikit.Policy.from_text(
+                "class Solution:\n    def __init__(self): pass\n"
+                "    def __init__(self, *args, **kwargs): pass\n"
+            )
         )
 
 

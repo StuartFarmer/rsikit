@@ -19,6 +19,7 @@ import rsikit.generation as generation
 from research.rewards import mean_rewards
 from rsikit import Executor, Policy, generate
 from rsikit.evaluation import InfrastructureError, PolicyError
+from rsikit.policy import InvalidPolicy
 from tests.helpers import finish_pending, recorded_run
 from tests.providers import ScriptedProvider
 from tests.test_episode_storage import trajectory
@@ -520,11 +521,15 @@ class RunTests(unittest.IsolatedAsyncioTestCase):
             await mean_rewards(rollouts, [policy])
             (export,) = (self.path / "exports").glob("*.py")
             self.assertEqual(export.parent, self.path / "exports")
-        with self.assertRaisesRegex(ValueError, "Solution"):
-            await generate(
-                "task",
-                provider=ScriptedProvider([json.dumps({**RESPONSE, "implementation": "pass"})]),
-            )
+        from rsikit.policy import validate_policy
+
+        candidate = await generate(
+            "task",
+            provider=ScriptedProvider([json.dumps({**RESPONSE, "implementation": "pass"})]),
+        )
+        self.assertEqual(candidate._implementation, "pass")
+        with self.assertRaisesRegex(InvalidPolicy, "Solution"):
+            validate_policy(candidate)
 
 
 if __name__ == "__main__":

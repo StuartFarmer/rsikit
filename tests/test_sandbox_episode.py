@@ -201,9 +201,9 @@ class SandboxEpisodeSmoke(unittest.IsolatedAsyncioTestCase):
 
         from examples.alphaevolve import run_search
         from research import alphaevolve
+        from research.alphaevolve.generation import _PolicyResponse
         from research.alphaevolve.improved import AlphaEvolve
         from rsikit.envs.tasks import make_environment
-        from rsikit.generation.edits import Program
         from tests.providers import ScriptedProvider
 
         if importlib.util.find_spec("Box2D") is None:
@@ -229,7 +229,7 @@ class SandboxEpisodeSmoke(unittest.IsolatedAsyncioTestCase):
                     self.assertEqual(restored.spec.max_episode_steps, 3)
                     provider = ScriptedProvider(
                         [
-                            Program(
+                            _PolicyResponse(
                                 name="Random motors",
                                 description="Exercise continuous actions and environment instructions.",
                                 implementation=f"""from rsikit import Policy
@@ -270,10 +270,10 @@ class Solution(Policy):
 
         from examples.shinkaevolve import run_search
         from research import shinkaevolve
+        from research.alphaevolve.generation import _PolicyResponse
         from research.shinkaevolve import Config, Evaluation, Generation, ShinkaEvolve
         from rsikit import Executor
         from rsikit.envs.tasks import make_environment
-        from rsikit.generation.edits import Program
         from tests.providers import ScriptedProvider
 
         try:
@@ -302,12 +302,12 @@ class Solution(Policy):
             ):
                 provider = ScriptedProvider(
                     [
-                        Program(
+                        _PolicyResponse(
                             name="RandomPolicy",
                             description="Sample a valid action.",
                             implementation=implementation,
                         ),
-                        Program(
+                        _PolicyResponse(
                             name="RandomPolicyV2",
                             description="Sample another valid action.",
                             implementation=implementation + "\n# second generation\n",
@@ -356,16 +356,18 @@ class Solution(Policy):
         from examples import cartpole
         from examples.alphaevolve import run_search
         from research import alphaevolve
+        from research.alphaevolve.generation import _PolicyResponse
         from research.alphaevolve.improved import AlphaEvolve, Config
         from rsikit import Executor
-        from rsikit.generation.edits import Program
         from tests.providers import ScriptedProvider
 
         initial = "from rsikit import Policy\nclass Solution(Policy):\n    async def act(self, observation):\n        return 0\n"
         provider = ScriptedProvider(
             [
-                Program(description="Test policy approach.", name="Left", implementation=initial),
-                Program(
+                _PolicyResponse(
+                    description="Test policy approach.", name="Left", implementation=initial
+                ),
+                _PolicyResponse(
                     description="Test policy approach.",
                     name="Balance",
                     implementation=Path(cartpole.__file__).read_text(),
@@ -415,9 +417,9 @@ class Solution(Policy):
 
         from examples.alphaevolve import run_search
         from research import alphaevolve
+        from research.alphaevolve.generation import _PolicyResponse
         from research.alphaevolve.improved import AlphaEvolve
         from rsikit import Executor
-        from rsikit.generation.edits import Program
         from tests.providers import ScriptedProvider
 
         broken = """from rsikit import Policy
@@ -434,9 +436,13 @@ class Solution(Policy):
 """
         provider = ScriptedProvider(
             [
-                Program(name="Malformed", description="Baseline.", implementation=broken + "}"),
-                Program(name="Constructor error", description="Baseline.", implementation=broken),
-                Program(
+                _PolicyResponse(
+                    name="Malformed", description="Baseline.", implementation=broken + "}"
+                ),
+                _PolicyResponse(
+                    name="Constructor error", description="Baseline.", implementation=broken
+                ),
+                _PolicyResponse(
                     name="Repaired", description="Inherit the constructor.", implementation=fixed
                 ),
             ]

@@ -25,8 +25,9 @@ from sqlmodel import SQLModel
 from research.rewards import Measurement
 from rsikit import Policy
 from rsikit.generation import WORKER_LIBRARIES
-from rsikit.generation.edits import InvalidCandidate, Program, check_program, check_rewrite
+from rsikit.policy import InvalidPolicy, validate_policy
 
+from .generation import InvalidCandidate, _PolicyResponse, check_rewrite, evolution_regions
 from .healing import SelfHealer
 from .records import Family, Study, Trial
 
@@ -186,13 +187,13 @@ class LineageSearch:
             raise InvalidCandidate("Vote must identify one of the numbered proposals")
         return generated.candidate - 1
 
-    async def implement(self, data: dict, approach: dict, *, provider, record=None) -> Program:
-        schema = Program.model_json_schema()
+    async def implement(self, data: dict, approach: dict, *, provider, record=None) -> type[Policy]:
+        schema = _PolicyResponse.model_json_schema()
         context = render("implement.j2", instance=self, schema=schema, data=data, approach=approach)
         raw, _ = await provider.acall(context)
         if record is not None:
             record["raw"] = raw
-        return parse(raw, Program)
+        return parse(raw, _PolicyResponse).to_policy()
 
     @staticmethod
     def _check_approaches(generated, count):
@@ -278,7 +279,7 @@ class LineageSearch:
                     slots[index] = await self._call(
                         operation, *args, family_id=family_id, repair=repair, record=record
                     )
-                except InvalidCandidate as exc:
+                except InvalidPolicy as exc:
                     errors.append(str(exc))
                     # Keep full history in study.calls, not in every future prompt.
                     feedback[:] = [dict(error=str(exc), raw=record.get("raw", ""))]
@@ -327,7 +328,7 @@ class LineageSearch:
             async def vote():
                 try:
                     return await self._call(self.elect, decision, data, family_id=family_id)
-                except InvalidCandidate as exc:
+                except InvalidPolicy as exc:
                     logger.warning("%s: flagged discriminator vote: %s", label, exc)
                     return None
 
@@ -376,7 +377,7 @@ class LineageSearch:
                 count=self.config.families,
                 retries=self.config.discovery_attempts - 1,
             )
-        except InvalidCandidate as exc:
+        except InvalidPolicy as exc:
             self.study.reason = "generation_exhausted"
             self.study.error = str(exc)
             return
@@ -400,7 +401,7 @@ class LineageSearch:
                 approaches = await self._plan_approaches(
                     family, self.found, self._evidence(family, None), self.config.initial_per_family
                 )
-            except InvalidCandidate as exc:
+            except InvalidPolicy as exc:
                 family.status = "generation_exhausted"
                 logger.warning("%s: initial decomposition exhausted: %s", family.name, exc)
             else:
@@ -434,19 +435,19 @@ class LineageSearch:
             return self.rng.choice(ranked)
         return self.rng.choices(ranked, weights=range(len(ranked), 0, -1))[0]
 
-    def _accept_program(self, row, program, parent):
+    def _accept_policy(self, row, policy, parent):
         row.policy_id = None
         self._policies.pop(row.id, None)
-        row.name, row.description = program.name, program.description
-        row.implementation = program.implementation
-        check_program(row.implementation)
+        row.name, row.description = policy.name, policy.description
+        row.implementation = policy._implementation
+        evolution_regions(row.implementation)
+        validate_policy(policy)
         if parent is not None:
             check_rewrite(parent.implementation, row.implementation)
         key = ast.dump(ast.parse(row.implementation), include_attributes=False)
         if key in self._sources:
             raise InvalidCandidate("Duplicate program AST across lineages")
         self._sources.add(key)
-        policy = Policy.from_text(row.implementation, name=row.name, description=row.description)
         self._policies[row.id] = policy
         row.policy_id, row.status, row.error = policy.id, "generated", None
         row.score, row.seed_scores, row.feedback = None, {}, ""
@@ -481,7 +482,7 @@ class LineageSearch:
                 row.error,
             )
             try:
-                program = await self._call(
+                policy = await self._call(
                     self.healer.repair,
                     data,
                     diagnostic,
@@ -490,9 +491,9 @@ class LineageSearch:
                     trial_id=row.id,
                     repair=row.repairs,
                 )
-                self._accept_program(row, program, parent)
+                self._accept_policy(row, policy, parent)
                 return
-            except InvalidCandidate as exc:
+            except InvalidPolicy as exc:
                 row.status, row.error = "rejected", str(exc)
 
     async def _generate(self, rows, data, parent):
@@ -511,11 +512,11 @@ class LineageSearch:
                         approach = row.model_dump(
                             include={"hypothesis", "mechanism", "change", "test"}
                         )
-                        program = await self._call(
+                        policy = await self._call(
                             self.implement, data, approach, family_id=row.family_id, trial_id=row.id
                         )
-                        self._accept_program(row, program, parent)
-                    except InvalidCandidate as exc:
+                        self._accept_policy(row, policy, parent)
+                    except InvalidPolicy as exc:
                         row.status, row.error = "rejected", str(exc)
                 if row.error is not None:
                     await self._repair(row, data, parent)
@@ -690,7 +691,7 @@ class LineageSearch:
                 if initial_approaches is not None
                 else await self._plan_approaches(family, operation, data, count)
             )
-        except InvalidCandidate as exc:
+        except InvalidPolicy as exc:
             approaches = []
             for row in rows:
                 row.status = "rejected"

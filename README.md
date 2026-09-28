@@ -10,6 +10,7 @@ This is an experimental release; APIs may change.
 - `Policy`: the solution type: load with `from_text` / `from_file`, save with
   `to_text` / `to_file`, and execute through `reset`, `act`, and `close`.
 - `generate`: returns a named `Policy` subclass from the LLM.
+- `rsikit.policy.validate_policy`: explicitly checks generated source without executing it.
 - `Evaluator`: rolls out existing environment and policy instances.
 - `Episode`: records observations, actions, rewards, flags, infos, and artifacts.
 - `Optimizer`: the `propose(n)` / `update(policy_episode_pairs)` protocol, implemented by all three AlphaEvolve variants.
@@ -35,6 +36,7 @@ from slick.providers import OpenRouterAPI
 
 import rsikit.generation as generation
 from rsikit import Executor, Run, generate
+from rsikit.policy import validate_policy
 from research.rollouts import Rollouts
 from research.rewards import mean_rewards
 
@@ -48,6 +50,7 @@ policy = await generate(
     "velocity. Action 0 pushes left and 1 pushes right. Maximize surviving steps.",
     provider=provider,
 )
+validate_policy(policy)
 executor = Executor(concurrency=4)
 with gym.make("CartPole-v1", max_episode_steps=500) as environment:
     async with executor, Run.create(name="cartpole-comparison") as run:
@@ -348,5 +351,6 @@ Host and sandbox Python minor versions must match. The Dockerfile defaults to Py
 
 Docker checks skip explicitly when Docker or the worker image is unavailable.
 Research algorithms, examples, and tests are included in the source distribution
-and excluded from the library wheel. The core supplies policy generation, shared
-edit validation, execution, environments, run storage, and progress display.
+and excluded from the library wheel. The core supplies policy generation, explicit
+source validation, execution, environments, run storage, and progress display.
+Each optimizer owns its mutation contracts and source-editing rules.

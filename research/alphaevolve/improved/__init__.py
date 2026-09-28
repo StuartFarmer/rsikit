@@ -1,7 +1,6 @@
 """The improved local AlphaEvolve variant."""
 
-from rsikit.generation.edits import InvalidCandidate
-
+from ..generation import InvalidCandidate
 from ..original import Config
 from .agent import AlphaEvolve
 

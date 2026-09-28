@@ -19,17 +19,17 @@ from slick.providers import Provider, ProviderError
 
 from rsikit.episode import Episode
 from rsikit.generation import WORKER_LIBRARIES
-from rsikit.generation.edits import (
+from rsikit.optimization import Optimizer
+from rsikit.policy import InvalidPolicy, Policy, validate_policy
+
+from ..generation import (
     InvalidCandidate,
     Mutation,
-    Program,
+    _PolicyResponse,
     apply_edits,
-    check_program,
     check_rewrite,
+    evolution_regions,
 )
-from rsikit.optimization import Optimizer
-from rsikit.policy import Policy
-
 from .healing import SelfHealer
 
 logger = logging.getLogger(__name__)
@@ -110,16 +110,16 @@ class AlphaEvolve(Optimizer):
     def best(self) -> type[Policy] | None:
         return None if self._best is None else self._best.policy
 
-    async def initialize(self, proposal: int, *, provider, record=None) -> Program:
+    async def initialize(self, proposal: int, *, provider, record=None) -> type[Policy]:
         """Create an initial named policy without a hand-written seed program."""
-        schema = Program.model_json_schema()
+        schema = _PolicyResponse.model_json_schema()
         context = render(
             "original/prompts/initialize.j2", instance=self, schema=schema, proposal=proposal
         )
         raw, _ = await provider.acall(context)
         if record is not None:
             record["raw"] = raw
-        return parse(raw, Program)
+        return parse(raw, _PolicyResponse).to_policy()
 
     async def mutate(
         self,
@@ -130,7 +130,7 @@ class AlphaEvolve(Optimizer):
         *,
         provider,
         record=None,
-    ) -> Mutation:
+    ) -> type[Policy]:
         schema = Mutation.model_json_schema()
         context = render(
             "original/prompts/mutate.j2",
@@ -144,7 +144,12 @@ class AlphaEvolve(Optimizer):
         raw, _ = await provider.acall(context)
         if record is not None:
             record["raw"] = raw
-        return parse(raw, Mutation)
+        mutation = parse(raw, Mutation)
+        return Policy.from_text(
+            apply_edits(parent.policy._implementation, mutation.edits),
+            name=mutation.name,
+            description=mutation.description,
+        )
 
     async def rewrite(
         self,
@@ -155,8 +160,8 @@ class AlphaEvolve(Optimizer):
         *,
         provider,
         record=None,
-    ) -> Program:
-        schema = Program.model_json_schema()
+    ) -> type[Policy]:
+        schema = _PolicyResponse.model_json_schema()
         context = render(
             "original/prompts/rewrite.j2",
             instance=self,
@@ -169,7 +174,7 @@ class AlphaEvolve(Optimizer):
         raw, _ = await provider.acall(context)
         if record is not None:
             record["raw"] = raw
-        return parse(raw, Program)
+        return parse(raw, _PolicyResponse).to_policy()
 
     async def _repair_valid(self, record, reference, failed, diagnostic) -> type[Policy]:
         # Adapt main's check/repair/recheck loop; count all repairs for this proposal.
@@ -197,18 +202,17 @@ class AlphaEvolve(Optimizer):
                     ),
                     self.config.generation_timeout,
                 )
-                content = proposal.implementation
+                content = proposal._implementation
                 call["implementation"] = content
                 if content == failed:
                     raise InvalidCandidate("Repair returned the unchanged implementation")
                 if reference:
                     check_rewrite(reference, content)
-                check_program(content)
+                evolution_regions(content)
+                validate_policy(proposal)
                 call["valid"] = True
-                return Policy.from_text(
-                    content, name=proposal.name, description=proposal.description
-                )
-            except (InvalidCandidate, ValidationError) as exc:
+                return proposal
+            except (InvalidPolicy, ValidationError) as exc:
                 if isinstance(exc, ValidationError) and "raw" not in call:
                     raise  # Provider-side failures do not establish invalid model output.
                 failed = call.get("implementation", call.get("raw", failed))
@@ -231,7 +235,7 @@ class AlphaEvolve(Optimizer):
             replacement = await self._repair_valid(
                 record, reference, policy._implementation, diagnostic
             )
-        except InvalidCandidate as exc:
+        except InvalidPolicy as exc:
             for row in self._pending.pop(policy.id):
                 row.update(status="discarded", error=str(exc))
             logger.warning("Discarded %s: %s", policy.name, exc)
@@ -392,20 +396,14 @@ class AlphaEvolve(Optimizer):
                     operation(*arguments, provider=provider, record=record),
                     self.config.generation_timeout,
                 )
-                if parent is None:
-                    content = proposal.implementation
-                elif self.config.mode == "diff":
-                    content = apply_edits(reference, proposal.edits)
-                else:
-                    content = proposal.implementation
-                    record["content"] = content
-                    check_rewrite(reference, content)
+                content = proposal._implementation
                 record["content"] = content
-                check_program(content)
-                policy = Policy.from_text(
-                    content, name=proposal.name, description=proposal.description
-                )
-            except (InvalidCandidate, ValidationError) as exc:
+                if parent is not None:
+                    check_rewrite(reference, content)
+                evolution_regions(content)
+                validate_policy(proposal)
+                policy = proposal
+            except (InvalidPolicy, ValidationError) as exc:
                 if isinstance(exc, ValidationError) and "raw" not in record:
                     raise
                 if self.config.max_repairs == 0:
@@ -426,7 +424,7 @@ class AlphaEvolve(Optimizer):
                 extra={"event": "policy_generated", "policy_id": policy.id},
             )
             return record
-        except InvalidCandidate as exc:
+        except InvalidPolicy as exc:
             record.update(status="discarded", error=f"{type(exc).__name__}: {exc}")
             logger.warning(
                 "Discarded proposal %s: %s",

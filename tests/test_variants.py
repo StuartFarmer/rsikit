@@ -17,12 +17,12 @@ import examples.alphaevolve as example
 from examples.alphaevolve import run_search
 from research import alphaevolve
 from research.alphaevolve import improved, original, paper
+from research.alphaevolve.generation import Mutation, _PolicyResponse
 from research.alphaevolve.history import Evaluation, Generation
 from research.alphaevolve.original.agent import Guidance
 from research.rewards import mean_rewards
 from rsikit import Executor
 from rsikit.evaluation import PolicyError
-from rsikit.generation.edits import Mutation, Program
 from rsikit.policy import Policy
 from tests.helpers import recorded_run
 from tests.providers import ScriptedProvider
@@ -673,7 +673,7 @@ class VariantTests(unittest.IsolatedAsyncioTestCase):
                 parent = agent.islands[-1]
                 texts = {}
                 variant_name = variant.__name__.rsplit(".", 1)[-1]
-                for operation, output in (("mutate", Mutation), ("rewrite", Program)):
+                for operation, output in (("mutate", Mutation), ("rewrite", _PolicyResponse)):
                     texts[operation] = render(
                         f"{variant_name}/prompts/{operation}.j2",
                         instance=agent,
@@ -698,7 +698,7 @@ class VariantTests(unittest.IsolatedAsyncioTestCase):
                 texts["repair"] = render(
                     "original/prompts/repair.j2",
                     instance=agent.healer,
-                    schema=Program.model_json_schema(),
+                    schema=_PolicyResponse.model_json_schema(),
                     reference="",
                     failed="broken",
                     diagnostic="syntax",

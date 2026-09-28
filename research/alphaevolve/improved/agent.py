@@ -2,8 +2,9 @@
 
 from slick import parse, render
 
-from rsikit.generation.edits import Mutation, Program
+from rsikit.policy import Policy
 
+from ..generation import Mutation, _PolicyResponse, apply_edits
 from ..original.agent import AlphaEvolve as OriginalAlphaEvolve
 from ..original.agent import Guidance, _Candidate
 
@@ -36,7 +37,7 @@ class AlphaEvolve(OriginalAlphaEvolve):
         *,
         provider,
         record=None,
-    ) -> Mutation:
+    ) -> type[Policy]:
         schema = Mutation.model_json_schema()
         context = render(
             "improved/prompts/mutate.j2",
@@ -50,7 +51,12 @@ class AlphaEvolve(OriginalAlphaEvolve):
         raw, _ = await provider.acall(context)
         if record is not None:
             record["raw"] = raw
-        return parse(raw, Mutation)
+        mutation = parse(raw, Mutation)
+        return Policy.from_text(
+            apply_edits(parent.policy._implementation, mutation.edits),
+            name=mutation.name,
+            description=mutation.description,
+        )
 
     async def rewrite(
         self,
@@ -61,8 +67,8 @@ class AlphaEvolve(OriginalAlphaEvolve):
         *,
         provider,
         record=None,
-    ) -> Program:
-        schema = Program.model_json_schema()
+    ) -> type[Policy]:
+        schema = _PolicyResponse.model_json_schema()
         context = render(
             "improved/prompts/rewrite.j2",
             instance=self,
@@ -75,7 +81,7 @@ class AlphaEvolve(OriginalAlphaEvolve):
         raw, _ = await provider.acall(context)
         if record is not None:
             record["raw"] = raw
-        return parse(raw, Program)
+        return parse(raw, _PolicyResponse).to_policy()
 
     async def evolve_prompt(
         self, parent: _Candidate, ideas: list[dict], failures: list[dict], *, provider, record=None

@@ -9,9 +9,9 @@ from statistics import fmean, pstdev
 from slick import parse, render
 
 from rsikit.episode import Episode
-from rsikit.generation.edits import Mutation, Program, check_program
-from rsikit.policy import Policy
+from rsikit.policy import Policy, validate_policy
 
+from ..generation import Mutation, _PolicyResponse, apply_edits, evolution_regions
 from ..improved.agent import AlphaEvolve as Baseline
 from ..original.agent import Config as BaselineConfig
 from ..original.agent import Guidance, PromptIdea
@@ -118,7 +118,8 @@ class AlphaEvolve(Baseline):
 
     def register_initial(self, policy, result: EvaluationResult, *, island=None):
         """Seed the archive with a caller-evaluated program (all islands by default)."""
-        check_program(policy._implementation)
+        evolution_regions(policy._implementation)
+        validate_policy(policy)
         if not result.accepted:
             raise ValueError("Initial program must pass evaluation")
         candidate = self._candidate(policy, result)
@@ -231,7 +232,7 @@ class AlphaEvolve(Baseline):
 
     async def mutate(
         self, parent, inspirations, guidance, failures, *, provider, record=None
-    ) -> Mutation:
+    ) -> type[Policy]:
         schema = Mutation.model_json_schema()
         context = render(
             "paper/prompts/mutate.j2",
@@ -246,12 +247,17 @@ class AlphaEvolve(Baseline):
         raw, _ = await provider.acall(context)
         if record is not None:
             record["raw"] = raw
-        return parse(raw, Mutation)
+        mutation = parse(raw, Mutation)
+        return Policy.from_text(
+            apply_edits(parent.policy._implementation, mutation.edits),
+            name=mutation.name,
+            description=mutation.description,
+        )
 
     async def rewrite(
         self, parent, inspirations, guidance, failures, *, provider, record=None
-    ) -> Program:
-        schema = Program.model_json_schema()
+    ) -> type[Policy]:
+        schema = _PolicyResponse.model_json_schema()
         context = render(
             "paper/prompts/rewrite.j2",
             instance=self,
@@ -265,7 +271,7 @@ class AlphaEvolve(Baseline):
         raw, _ = await provider.acall(context)
         if record is not None:
             record["raw"] = raw
-        return parse(raw, Program)
+        return parse(raw, _PolicyResponse).to_policy()
 
     async def evolve_prompt(self, parent, ideas, failures, *, provider, record=None) -> str:
         schema = Guidance.model_json_schema()

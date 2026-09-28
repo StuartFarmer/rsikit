@@ -19,15 +19,15 @@ from slick.providers import Provider
 from research.rewards import Measurement
 from rsikit import Policy
 from rsikit.generation import WORKER_LIBRARIES
-from rsikit.generation.edits import (
+from rsikit.policy import InvalidPolicy, validate_policy
+
+from .generation import (
     InvalidCandidate,
     Mutation,
-    Program,
+    _PolicyResponse,
     apply_edits,
-    check_program,
     check_rewrite,
 )
-
 from .healing import SelfHealer
 from .records import Generation, Organism
 
@@ -147,7 +147,7 @@ class EliteSearch:
                     if revision.get("policy_id") is not None
                 )
                 for implementation in implementations:
-                    check_program(implementation)
+                    validate_policy(Policy.from_text(implementation))
                     self._sources.add(ast.dump(ast.parse(implementation), include_attributes=False))
             if generation.status == "completed":
                 ranked = self._rank(rows)
@@ -168,8 +168,8 @@ class EliteSearch:
 
     async def invent(
         self, proposal: int, elites: list[Organism], *, provider, record=None
-    ) -> Program:
-        schema = Program.model_json_schema()
+    ) -> type[Policy]:
+        schema = _PolicyResponse.model_json_schema()
         context = render(
             "new.j2",
             instance=self,
@@ -181,9 +181,9 @@ class EliteSearch:
         raw, _ = await provider.acall(context)
         if record is not None:
             record["raw"] = raw
-        return parse(raw, Program)
+        return parse(raw, _PolicyResponse).to_policy()
 
-    async def edit(self, parent: Organism, *, provider, record=None) -> Mutation:
+    async def edit(self, parent: Organism, *, provider, record=None) -> type[Policy]:
         schema = Mutation.model_json_schema()
         context = render(
             "edit.j2",
@@ -195,10 +195,17 @@ class EliteSearch:
         raw, _ = await provider.acall(context)
         if record is not None:
             record["raw"] = raw
-        return parse(raw, Mutation)
+        mutation = parse(raw, Mutation)
+        if record is not None:
+            record.update(name=mutation.name, description=mutation.description)
+        return Policy.from_text(
+            apply_edits(parent.implementation, mutation.edits),
+            name=mutation.name,
+            description=mutation.description,
+        )
 
-    async def remix(self, parents: list[Organism], *, provider, record=None) -> Program:
-        schema = Program.model_json_schema()
+    async def remix(self, parents: list[Organism], *, provider, record=None) -> type[Policy]:
+        schema = _PolicyResponse.model_json_schema()
         context = render(
             "remix.j2",
             instance=self,
@@ -209,7 +216,7 @@ class EliteSearch:
         raw, _ = await provider.acall(context)
         if record is not None:
             record["raw"] = raw
-        return parse(raw, Program)
+        return parse(raw, _PolicyResponse).to_policy()
 
     async def _call(self, row, operation, *args):
         call = dict(operation=operation.__name__)
@@ -229,6 +236,10 @@ class EliteSearch:
         except BaseException as exc:
             call["error"] = f"{type(exc).__name__}: {exc}"
             raise
+        finally:
+            if "name" in call:
+                # Keep parsed identity even when applying the mutation fails.
+                row.name, row.description = call["name"], call["description"]
 
     def _population(self, generation):
         n = self.config.population_size
@@ -300,21 +311,15 @@ class EliteSearch:
             try:
                 proposal = await self._call(row, operation, *args)
                 row.name, row.description = proposal.name, proposal.description
-                row.implementation = (
-                    apply_edits(reference, proposal.edits)
-                    if operation == self.edit
-                    else proposal.implementation
-                )
-                check_program(row.implementation)
+                row.implementation = proposal._implementation
+                validate_policy(proposal)
                 if reference:
                     check_rewrite(reference, row.implementation)
                 key = ast.dump(ast.parse(row.implementation), include_attributes=False)
                 if key in self._sources:
                     raise InvalidCandidate("Duplicate program; make a substantive change")
                 self._sources.add(key)
-                policy = Policy.from_text(
-                    row.implementation, name=row.name, description=row.description
-                )
+                policy = proposal
                 self._policies[row.id] = policy
                 row.policy_id, row.status, row.error = policy.id, "generated", None
                 logger.info(
@@ -326,7 +331,7 @@ class EliteSearch:
                 )
                 self._checkpoint()
                 return row
-            except InvalidCandidate as exc:
+            except InvalidPolicy as exc:
                 row.status, row.error = "rejected", str(exc)
                 repairing = True
             except BaseException as exc:

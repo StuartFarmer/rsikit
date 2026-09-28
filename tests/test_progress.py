@@ -15,10 +15,10 @@ from slick import prompts
 
 import examples.alphaevolve as example
 from research import alphaevolve
+from research.alphaevolve.generation import _PolicyResponse
 from research.alphaevolve.improved import AlphaEvolve, Config
 from rsikit import Executor
 from rsikit.evaluation import PolicyError
-from rsikit.generation.edits import Program
 from rsikit.progress import ProgressHandler
 from tests.helpers import recorded_run
 from tests.providers import ScriptedProvider
@@ -55,12 +55,12 @@ class ProgressTests(unittest.IsolatedAsyncioTestCase):
         console = Console(file=output, width=160, force_terminal=False)
         provider = ScriptedProvider(
             [
-                Program(
+                _PolicyResponse(
                     name="First [bold]",
                     description="Push left as a baseline.",
                     implementation=RESPONSE["implementation"],
                 ),
-                Program(
+                _PolicyResponse(
                     name="Second",
                     description="Try a different strategy.",
                     implementation=RESPONSE["implementation"] + "\n# second\n",

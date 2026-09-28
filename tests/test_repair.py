@@ -17,11 +17,11 @@ from sqlmodel import select
 from examples.alphaevolve import run_search
 from research import alphaevolve
 from research.alphaevolve import improved, original, paper
+from research.alphaevolve.generation import _PolicyResponse
 from research.alphaevolve.history import Evaluation, Generation
 from research.alphaevolve.improved import AlphaEvolve, Config
 from rsikit import Executor
 from rsikit.evaluation import InfrastructureError, PolicyError
-from rsikit.generation.edits import Program
 from tests.helpers import recorded_run
 from tests.providers import ScriptedProvider
 from tests.test_alphaevolve import SOURCE, program
@@ -256,7 +256,9 @@ class RepairTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual([row.islands[0]["score"] for row in generations[1:]], [7.0, 8.0])
 
     async def test_repairs_syntax_and_schema_with_exact_budget(self):
-        broken = Program(name="Broken", description="A baseline.", implementation=SOURCE + "}\n")
+        broken = _PolicyResponse(
+            name="Broken", description="A baseline.", implementation=SOURCE + "}\n"
+        )
         provider = ScriptedProvider([broken, "not json", program(0), program(1)])
         agent = AlphaEvolve("task", provider)
         policies = await agent.generate(n=2, concurrency=1)
@@ -298,7 +300,9 @@ class RepairTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(agent.repair_calls, 2)
 
     async def test_exhaustion_and_infrastructure_never_create_pending_policy(self):
-        broken = Program(name="Broken", description="Broken Python.", implementation=SOURCE + "}")
+        broken = _PolicyResponse(
+            name="Broken", description="Broken Python.", implementation=SOURCE + "}"
+        )
         agent = AlphaEvolve(
             "task", ScriptedProvider([broken, broken]), config=Config(max_repairs=1)
         )
@@ -374,7 +378,9 @@ class RepairTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(agent._pending, {})
 
     async def test_syntax_and_runtime_share_budget_and_infrastructure_takes_priority(self):
-        broken = Program(name="Broken", description="Broken Python.", implementation=SOURCE + "}")
+        broken = _PolicyResponse(
+            name="Broken", description="Broken Python.", implementation=SOURCE + "}"
+        )
         provider = ScriptedProvider([broken, program(9)])
         agent = AlphaEvolve("task", provider, config=Config(max_repairs=1))
         policy = (await agent.generate())[0]

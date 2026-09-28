@@ -167,11 +167,12 @@ class Paper1Tests(unittest.IsolatedAsyncioTestCase):
                 for name in (
                     "uv.lock",
                     "rsikit/sandbox/Dockerfile",
-                    "rsikit/generation/edits.py",
+                    "rsikit/policy.py",
                     "rsikit/envs/tasks.py",
                     "rsikit/progress.py",
                     "research/__init__.py",
                     "research/elitesearch/agent.py",
+                    "research/elitesearch/generation.py",
                     "research/elitesearch/prompts/new.j2",
                 ):
                     self.assertEqual(archive.read(name), (runner.ROOT / name).read_bytes())

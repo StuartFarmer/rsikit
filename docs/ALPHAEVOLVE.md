@@ -452,6 +452,9 @@ adapting FunSearch's reset policy (see [NOTICE](../research/alphaevolve/NOTICE) 
 until every island has a founder; subsequent reseeding can share champions.
 
 Exact mutations must match uniquely and stay inside optional EVOLVE-BLOCK regions.
+These rules and the mutation response schema belong to AlphaEvolve's own
+`generation.py`. Generation and repair operations return policy definitions;
+the optimizer explicitly calls `validate_policy` before accepting them.
 Rewrites preserve the immutable skeleton. Syntax and the top-level `Solution` class
 are checked before a policy is returned; execution remains in the sandbox.
 Weighted provider ensembles and prompt variants remain available. Optional generated

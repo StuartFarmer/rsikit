@@ -20,9 +20,9 @@ import examples.shinkaevolve as example
 from examples.shinkaevolve import run_search
 from research import shinkaevolve
 from research.shinkaevolve import Config, Evaluation, Generation, ShinkaEvolve
+from research.shinkaevolve.generation import Edit, Mutation
 from rsikit import Executor
 from rsikit.evaluation import PolicyError
-from rsikit.generation.edits import Edit, Mutation
 from tests.helpers import recorded_run
 from tests.providers import ScriptedProvider
 from tests.test_alphaevolve import SOURCE, program

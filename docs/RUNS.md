@@ -79,8 +79,11 @@ with Run.open(run.path) as restored:
     print(restored.scores(policy))
 ```
 
-`Policy.from_text`/`from_file` validate source without executing it. `to_text` and
-`to_file` preserve its name, description, source and ID. Run exports definitions to
+`Policy.from_text`/`from_file` load source without validating or executing it.
+Optimizers explicitly call `rsikit.policy.validate_policy(policy)` after
+generation; this checks syntax and the construction interface without execution.
+`to_text` and `to_file` preserve its name, description, source and ID, including
+invalid proposals retained for diagnosis. Run exports definitions to
 `exports/` by default; `export=False` disables that. Missing exports are recreated
 on open. `policies()` reloads saved definitions.
 

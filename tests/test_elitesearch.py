@@ -140,6 +140,81 @@ class EliteSearchTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(agent.organisms[0].revisions), 2)
         self.assertIn("invalid action", provider.calls[-1])
 
+    async def test_edits_can_change_source_outside_marker_comments(self):
+        initial = json.loads(program(0))
+        initial["implementation"] = (
+            "# outside\n# EVOLVE-BLOCK-START\n" + initial["implementation"] + "# EVOLVE-BLOCK-END\n"
+        )
+        provider = ScriptedProvider(
+            [
+                json.dumps(initial),
+                json.dumps(
+                    dict(
+                        name="Changed",
+                        description="Edit outside comments.",
+                        edits=[
+                            dict(search="# outside", replacement="OFFSET = 1"),
+                            dict(search="return 0", replacement="return OFFSET"),
+                        ],
+                    )
+                ),
+            ]
+        )
+        evaluated = []
+
+        async def evaluate(policies):
+            evaluated.extend(policies)
+            return {p.id: Measurement({0: len(evaluated)}) for p in policies}
+
+        agent = EliteSearch(
+            "Score",
+            provider,
+            evaluate,
+            config=Config(
+                population_size=1,
+                generations=2,
+                new_fraction=0,
+                remix_fraction=0,
+                max_repairs=0,
+            ),
+        )
+        await agent.run()
+        self.assertEqual(len(evaluated), 2)
+        self.assertIn("OFFSET = 1", evaluated[-1]._implementation)
+        self.assertEqual(agent.elites[0].name, "Changed")
+
+    async def test_failed_edit_retains_organism_metadata(self):
+        response = dict(
+            name="Failed edit",
+            description="A proposed change.",
+            edits=[dict(search="missing source", replacement="replacement")],
+        )
+        provider = ScriptedProvider([program(0), json.dumps(response)])
+
+        async def evaluate(policies):
+            return {p.id: Measurement({0: 1}) for p in policies}
+
+        agent = EliteSearch(
+            "Score",
+            provider,
+            evaluate,
+            config=Config(
+                population_size=1,
+                generations=2,
+                new_fraction=0,
+                remix_fraction=0,
+                max_repairs=0,
+            ),
+        )
+        await agent.run()
+        failed = agent.organisms[-1]
+        self.assertEqual(
+            (failed.name, failed.description), (response["name"], response["description"])
+        )
+        self.assertEqual(failed.status, "discarded")
+        self.assertIsNone(failed.policy_id)
+        self.assertEqual(json.loads(failed.calls[-1]["raw"]), response)
+
     async def test_generation_overlaps_evaluation_and_cancels_on_failure(self):
         provider = ScriptedProvider([program(0), program(1)])
         evaluating, generating, cancelled = asyncio.Event(), asyncio.Event(), asyncio.Event()

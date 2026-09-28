@@ -34,7 +34,7 @@ from research.rollouts import Rollouts
 from rsikit import Executor, Run
 from rsikit.envs.tasks import TASKS, make_environment
 from rsikit.evaluation import PolicyError
-from rsikit.policy import Policy
+from rsikit.policy import Policy, validate_policy
 from rsikit.progress import ProgressHandler, show_scores
 
 FEATURE_BOUNDS = {
@@ -357,6 +357,7 @@ async def run_paper_search(
             logger.info("Optimizer: %s", type(generator).__module__)
             if initial_policy is not None:
                 policy = Policy.from_file(initial_policy)
+                validate_policy(policy)
                 result = (await evaluate([policy]))[policy.id]
                 if not result.accepted:
                     raise ValueError("Initial policy failed screening; it was not registered")
