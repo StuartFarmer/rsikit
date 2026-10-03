@@ -30,7 +30,13 @@ fi
 for key in OPENROUTER_API_KEY OPENAI_API_KEY ANTHROPIC_API_KEY; do
     if [[ ${!key+x} ]]; then args+=(--env "$key"); fi
 done
-docker build -t rsikit:local "$root" >&2
+build_args=(build)
+if [[ $1 == examples.ocean_search || $1 == examples.benchmark_ocean || $1 == research.cli || $1 == unittest ]]; then
+    # Upstream's Linux build downloads x86-64 raylib/Box2D archives.
+    build_args+=(--build-arg OCEAN=1 --platform linux/amd64)
+    args+=(--platform linux/amd64)
+fi
+docker "${build_args[@]}" -t rsikit:local "$root" >&2
 image_id=$(docker image inspect rsikit:local --format '{{.Id}}')
 args+=(--env "RSIKIT_IMAGE_ID=$image_id")
 if revision=$(git -C "$root" rev-parse HEAD 2>/dev/null); then

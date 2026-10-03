@@ -34,6 +34,10 @@ class PackageBoundariesTests(unittest.TestCase):
                         if top == "research":
                             forbidden |= package == "rsikit" or not (
                                 name in {"research", "research.rewards", "research.rollouts"}
+                                or (
+                                    package == "research/elitesearch"
+                                    and name.startswith("research.providers")
+                                )
                                 or name.startswith(("research.rewards.", "research.rollouts."))
                                 or name == package.replace("/", ".")
                                 or name.startswith(package.replace("/", ".") + ".")

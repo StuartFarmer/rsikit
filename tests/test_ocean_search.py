@@ -102,7 +102,7 @@ class OceanSearchTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(manifest["max_tokens"], 4 * (65536 + 16384))
             self.assertEqual(panels[:4], [(7, 9)] * 4)
             self.assertEqual(summary["validation"][summary["winner"]]["scores"]["1000"], 1)
-            self.assertIn("2 seeded Ocean games", raw.calls[0])
+            self.assertIn("2 upstream Ocean batch seeds", raw.calls[0])
 
     async def test_installed_provider_records_wire_usage_and_honors_output_limit(self):
         from slick.providers import OpenRouterAPI

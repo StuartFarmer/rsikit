@@ -7,12 +7,15 @@
 !ruff.toml
 !scripts/
 !scripts/run
+!scripts/install_ocean.py
 !rsikit/
 !rsikit/**
 !research/
 !research/**
 !examples/
 !examples/**
+!experiments/
+!experiments/**
 !data/
 !data/**
 !tests/

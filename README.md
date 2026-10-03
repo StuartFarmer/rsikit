@@ -1,5 +1,14 @@
 # RSIKit
 
+Run searches or evaluate policy files with the [unified CLI](docs/CLI.md):
+
+```bash
+rsikit run --config experiments/ocean-2048.yaml
+# Inspect without running:
+rsikit run --config experiments/ocean-2048.yaml --print-config
+```
+
+
 Evolve and evaluate class-based policies in
 [Gymnasium](https://gymnasium.farama.org/) environments.
 
@@ -350,3 +359,21 @@ source validation, execution, environments, run storage, and progress display.
 Each optimizer owns its mutation contracts and source-editing rules.
 
 Standard optimization loops automatically display a shared Rich dashboard inside Docker: combined proposal/evaluation progress, optimizer-specific leaderboard columns, active work and recent errors. Full logs remain in the run directory. See [automatic terminal progress](docs/RUNS.md#automatic-terminal-progress).
+
+### Ocean policy search
+
+Ocean evaluation uses PufferLib's existing Python environments and native batch
+bindings, pinned to its Python-facing 3.0 source. The CLI supports 2048 and Breakout:
+
+```bash
+./scripts/run examples.benchmark_ocean correctness \
+  --env g2048 --seeds 2 --batch-size 4 --max-steps 32 \
+  --output runs/ocean-upstream-check
+```
+
+Each seed identifies a whole batch rollout. Docker builds the upstream bindings
+automatically; Ocean and full-test images use `linux/amd64` because upstream's
+Linux native archives are x86-64. Local development uses `uv sync --extra ocean
+--extra dev` followed by `.venv/bin/python scripts/install_ocean.py`.
+See [the Ocean protocol and search commands](docs/OCEAN_BENCHMARK.md) for scoring,
+installation, workload accounting, and the change from the historical benchmark.

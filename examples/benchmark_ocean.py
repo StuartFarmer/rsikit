@@ -28,9 +28,7 @@ import math
 import os
 import platform
 import resource
-import shlex
 import statistics
-import subprocess
 import sys
 import time
 from collections import Counter
@@ -113,10 +111,19 @@ async def correctness(args, policies):
     from research.ocean.evaluator import rollout
 
     comparisons = []
-    async with evaluator(args, args.output / "reference", "reference", 1, 1) as reference:
+    async with evaluator(
+        args, args.output / "reference", "reference", 1, args.batch_size
+    ) as reference:
         for policy in policies:
             base = await rollout(
-                policy._implementation, range(args.seeds), 1, args.max_steps, trace=True
+                policy._implementation,
+                range(args.seeds),
+                args.batch_size,
+                args.max_steps,
+                trace=True,
+                env_name=args.env,
+                score_key=args.score_key,
+                env_kwargs=args.env_kwargs,
             )
             expected = sorted(base["results"], key=lambda row: row["seed"])
             save(args.output / f"trace-{policy.id}.json", expected)
@@ -133,12 +140,19 @@ async def correctness(args, policies):
                     ],
                 )
             )
-            for width, reverse in ((1, False), (8, False), (32, False), (32, True)):
+            for width, reverse in ((args.batch_size, False), (args.batch_size, True)):
                 seeds = list(range(args.seeds))
                 if reverse:
                     seeds.reverse()
                 actual = await rollout(
-                    policy._implementation, seeds, width, args.max_steps, trace=True
+                    policy._implementation,
+                    seeds,
+                    width,
+                    args.max_steps,
+                    trace=True,
+                    env_name=args.env,
+                    score_key=args.score_key,
+                    env_kwargs=args.env_kwargs,
                 )
                 comparisons.append(
                     dict(
@@ -167,6 +181,9 @@ def evaluator(args, output, mode, workers, batch):
         max_steps=args.max_steps,
         timeout=args.timeout,
         diagnostics=args.diagnostics,
+        env_name=args.env,
+        score_key=args.score_key,
+        env_kwargs=args.env_kwargs,
     )
 
 
@@ -360,19 +377,31 @@ def parser():
     )
     result.add_argument("kind", choices=("correctness", "capacity", "replay"))
     result.add_argument("--output", type=Path, required=True)
+    result.add_argument("--env", choices=("g2048", "breakout"), default="g2048")
+    result.add_argument(
+        "--score-key", choices=("return", "merge_score", "score", "episode_return", "perf")
+    )
+    result.add_argument("--env-kwargs", type=json.loads, default={})
     result.add_argument("--mode", choices=("reference", "summary", "batch"), default="batch")
     result.add_argument("--workers", type=int, choices=(1, 2, 4), default=1)
     result.add_argument("--batch-size", type=int, default=32)
-    result.add_argument("--seeds", type=int, default=32, help="Seeds 0 through N-1")
+    result.add_argument(
+        "--seeds", type=int, default=32, help="Independent batch seeds 0 through N-1"
+    )
     result.add_argument("--max-steps", type=int, default=2000)
-    result.add_argument("--timeout", type=float, default=60)
+    result.add_argument(
+        "--timeout",
+        type=float,
+        default=60,
+        help="Panel timeout allowance in seconds per batch seed",
+    )
     result.add_argument("--duration", type=float, help="Default: capacity 30s, replay 300s")
     result.add_argument("--panels", type=int, default=100)
     result.add_argument("--repeats", type=int, default=3)
     result.add_argument(
         "--matrix",
         action="store_true",
-        help="Capacity: all 1/2/4 workers, modes and batch widths 1/8/32",
+        help="Capacity: all 1/2/4 workers and modes at the same batch width",
     )
     result.add_argument("--policy", action="append", type=Path, default=[])
     result.add_argument("--trace", type=Path)
@@ -394,6 +423,9 @@ def parser():
 async def main(argv=None):
     command = parser()
     args = command.parse_args(argv)
+    args.score_key = args.score_key or ("merge_score" if args.env == "g2048" else "return")
+    if not isinstance(args.env_kwargs, dict):
+        command.error("--env-kwargs must be a JSON object")
     args.duration = (
         args.duration if args.duration is not None else (300 if args.kind == "replay" else 30)
     )
@@ -426,11 +458,13 @@ async def main(argv=None):
     import numpy as np
 
     from research.ocean.baselines import policies as baselines
-    from research.ocean.native import FLAGS, SOURCE, UPSTREAM, build
+    from research.ocean.environment import metadata as upstream_metadata
 
-    policies = [Policy.from_file(path) for path in args.policy] if args.policy else baselines()
+    policies = (
+        [Policy.from_file(path) for path in args.policy] if args.policy else baselines(args.env)
+    )
     build_start = time.monotonic()
-    library = build()
+    upstream = upstream_metadata(args.env)
     build_seconds = time.monotonic() - build_start
     arrivals, metadata = [], {}
     if args.trace:
@@ -445,13 +479,20 @@ async def main(argv=None):
     unique_policies = list({p.id: p for p in policies}.values())
     counts = Counter(p.id for p in policies)
     workload = dict(
-        seeds=list(range(args.seeds)), max_steps=args.max_steps, policy_ids=sorted(counts)
+        seeds=list(range(args.seeds)),
+        max_steps=args.max_steps,
+        policy_ids=sorted(counts),
+        batch_size=args.batch_size,
+        protocol=upstream["protocol"],
+        environment=args.env,
+        score_key=args.score_key,
+        env_kwargs=args.env_kwargs,
     )
     mix = {key: value / len(policies) for key, value in sorted(counts.items())}
     hardware = dict(
         platform=platform.platform(),
         machine=platform.machine(),
-        native_sha256=hashlib.sha256(library.read_bytes()).hexdigest(),
+        native_sha256=upstream["native_sha256"],
         python=sys.version,
         numpy=np.__version__,
         host=platform.node(),
@@ -471,19 +512,8 @@ async def main(argv=None):
         cpu_affinity=sorted(os.sched_getaffinity(0)) if hasattr(os, "sched_getaffinity") else None,
         memory_budget_bytes=8 * 1024**3,
         resource_budget_enforced=False,
-        native_library=str(library),
-        upstream=UPSTREAM,
-        compiler_flags=FLAGS,
-        compiler_version=subprocess.check_output(
-            [*shlex.split(os.environ.get("CC", "cc")), "--version"], text=True
-        ).strip(),
-        native_source_sha256={
-            path.name: hashlib.sha256(path.read_bytes()).hexdigest()
-            for path in sorted(SOURCE.iterdir())
-            if path.suffix in (".c", ".h")
-        },
-        native_sha256=hashlib.sha256(library.read_bytes()).hexdigest(),
-        build_seconds=build_seconds,
+        **upstream,
+        import_seconds=build_seconds,
         cache_enabled=False,
         cooperative_execution=True,
         arguments={
@@ -517,7 +547,7 @@ async def main(argv=None):
                 (mode, worker, width)
                 for mode in ("reference", "summary", "batch")
                 for worker in (1, 2, 4)
-                for width in ((1, 8, 32) if mode == "batch" else (1,))
+                for width in (args.batch_size,)
             ]
         runs = []
         for repeat in range(args.repeats):

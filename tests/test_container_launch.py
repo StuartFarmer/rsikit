@@ -65,6 +65,29 @@ sys.exit(int(os.environ.get("BUILD_EXIT", "0")) if sys.argv[1] == "build" else
             self.assertNotIn("-t", run)
             self.assertIn("--read-only", run)
             self.assertIn("RSIKIT_IMAGE_ID=sha256:test", run)
+            ocean = subprocess.run(
+                [str(ROOT / "scripts/run"), "examples.benchmark_ocean", "--help"],
+                cwd=root,
+                env=env,
+                capture_output=True,
+                text=True,
+            )
+            self.assertEqual(ocean.returncode, 17, ocean.stderr)
+            ocean_calls = [json.loads(line) for line in (root / "calls").read_text().splitlines()]
+            self.assertIn("OCEAN=1", ocean_calls[-3])
+            self.assertIn("linux/amd64", ocean_calls[-3])
+            self.assertIn("linux/amd64", ocean_calls[-1])
+            cli = subprocess.run(
+                [str(ROOT / "scripts/run"), "research.cli", "run", "--help"],
+                cwd=root,
+                env=env,
+                capture_output=True,
+                text=True,
+            )
+            self.assertEqual(cli.returncode, 17, cli.stderr)
+            cli_calls = [json.loads(line) for line in (root / "calls").read_text().splitlines()]
+            self.assertIn("OCEAN=1", cli_calls[-3])
+            self.assertIn("linux/amd64", cli_calls[-1])
             master, slave = pty.openpty()
             try:
                 terminal = subprocess.run(

@@ -11,7 +11,7 @@ from examples.benchmark_ocean import load_trace, summarize
 
 
 class BenchmarkTests(unittest.TestCase):
-    def test_batch_dependent_policy_fails_correctness_command(self):
+    def test_nondeterministic_policy_fails_correctness_command(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             policy = root / "dependent.py"
@@ -19,7 +19,7 @@ class BenchmarkTests(unittest.TestCase):
 from rsikit import Policy
 class Solution(Policy):
     async def act(self, observation):
-        return np.full(len(observation), 0 if len(observation) == 1 else 1)
+        return np.random.default_rng().integers(0, 4, len(observation))
 """)
             completed = subprocess.run(
                 [

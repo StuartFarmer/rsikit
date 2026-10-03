@@ -1,0 +1,504 @@
+"""Shared runner integration with real evaluators and scripted model calls."""
+
+import asyncio
+import json
+import tempfile
+import unittest
+from pathlib import Path
+from unittest.mock import patch
+
+import yaml
+
+from research.cli import load_component, parse_config
+from research.experiment import EvaluationConfig
+from rsikit import Policy, Run
+from tests.providers import ScriptedProvider
+from tests.test_elitesearch import program
+
+
+class ExperimentTests(unittest.IsolatedAsyncioTestCase):
+    async def test_gym_sessions_match_direct_episode_and_cache(self):
+        from rsikit.envs.tasks import make_environment
+        from rsikit.evaluation import _run_episode
+        from rsikit.policy import load_policy
+
+        for name in ("CartPole-v1", "Blackjack"):
+            with self.subTest(env=name), tempfile.TemporaryDirectory() as directory:
+                definition = load_component(name, kind="environment", base_dir=Path.cwd())
+                options = definition.Options(
+                    **({"shoes_per_episode": 1} if name == "Blackjack" else {})
+                )
+                evaluation = EvaluationConfig(
+                    seeds=[7], workers=1, max_steps=5 if name == "CartPole-v1" else None
+                )
+                policy = Policy.from_text(json.loads(program(0))["implementation"])
+                direct = await _run_episode(
+                    lambda: make_environment(
+                        name, max_steps=evaluation.max_steps, shoes_per_episode=1
+                    ),
+                    lambda obs, act, instructions: load_policy(
+                        policy._implementation, obs, act, instructions
+                    ),
+                    env_seed=7,
+                    policy_seed=7,
+                )
+                with Run.create(name="session", path=Path(directory) / "run") as run:
+                    async with definition.open_evaluator(
+                        options=options, evaluation=evaluation, run=run
+                    ) as evaluate:
+                        result = await evaluate([policy], [7])
+                        self.assertEqual(result[policy.id].scores, {7: direct.total_reward})
+                        self.assertEqual(await evaluate([policy], [7]), result)
+                        self.assertIsNotNone(run.load_episode(policy, 7))
+
+    async def test_ocean_session_matches_upstream_rollout(self):
+        from research.ocean.baselines import policies
+        from research.ocean.evaluator import rollout
+
+        for name in ("g2048", "breakout"):
+            with self.subTest(env=name), tempfile.TemporaryDirectory() as directory:
+                definition = load_component(
+                    "ocean:" + name, kind="environment", base_dir=Path.cwd()
+                )
+                evaluation = EvaluationConfig(
+                    seeds=[7], workers=1, batch_size=2, max_steps=4, score_key="return"
+                )
+                policy = policies(name)[0]
+                direct = await rollout(
+                    policy._implementation,
+                    [7],
+                    batch_size=2,
+                    max_steps=4,
+                    env_name=name,
+                    score_key="return",
+                )
+                with Run.create(name="session", path=Path(directory) / "run") as run:
+                    async with definition.open_evaluator(
+                        options=definition.Options(), evaluation=evaluation, run=run
+                    ) as evaluate:
+                        result = await evaluate([policy], [7])
+                    self.assertEqual(result[policy.id].scores[7], direct["results"][0]["score"])
+                    events = [
+                        json.loads(s)
+                        for s in (run.path / "panels/evaluations.jsonl").read_text().splitlines()
+                    ]
+                    self.assertEqual(events[0]["steps"], 8)
+
+    async def test_scripted_search_real_backends_and_evaluate_only(self):
+        from research.experiment import evaluate_policies, run_experiment
+
+        for name in ("CartPole-v1", "ocean:g2048", "ocean:breakout"):
+            with self.subTest(env=name), tempfile.TemporaryDirectory() as directory:
+                args = [
+                    "run",
+                    "--env",
+                    name,
+                    "--optimizer",
+                    "elite",
+                    "--model",
+                    "scripted",
+                    "--output",
+                    str(Path(directory) / "search"),
+                    "--population",
+                    "2",
+                    "--generations",
+                    "1",
+                    "--elites",
+                    "1",
+                    "--max-repairs",
+                    "0",
+                    "--seeds",
+                    "7",
+                    "--test-seeds",
+                    "9",
+                    "--max-steps",
+                    "4",
+                    "--workers",
+                    "1",
+                    "--spend-cap",
+                    "100",
+                    "--input-price",
+                    "1",
+                    "--output-price",
+                    "1",
+                ]
+                if name.startswith("ocean:"):
+                    args += ["--batch-size", "2"]
+                responses = [program(i) for i in range(2)]
+                if name.startswith("ocean:"):
+                    responses = [
+                        json.dumps(
+                            {
+                                **json.loads(p),
+                                "implementation": json.loads(p)["implementation"].replace(
+                                    f"return {i}", f"return [{i}] * len(observation)"
+                                ),
+                            }
+                        )
+                        for i, p in enumerate(responses)
+                    ]
+                raw = ScriptedProvider(responses)
+                config = parse_config(args)
+                with (
+                    patch.dict("os.environ", {"OPENROUTER_API_KEY": "scripted"}),
+                    patch("research.providers.UsageOpenRouter", return_value=raw),
+                ):
+                    summary = await run_experiment(config)
+                self.assertEqual(summary["status"], "completed", summary)
+                self.assertEqual(summary["generation"]["calls"], 2)
+                self.assertEqual(summary["phases"]["search"]["requested_candidates"], 2)
+                self.assertIsNone(summary["generation"]["output_tokens"])
+                winner = Path(config["output"]) / "winner.py"
+                self.assertTrue(winner.is_file())
+                saved = yaml.safe_load((winner.parent / "config.yaml").read_text())
+                self.assertEqual(saved, config)
+                evaluate_args = [
+                    "evaluate",
+                    "--env",
+                    name,
+                    "--policy",
+                    str(winner),
+                    "--output",
+                    str(Path(directory) / "evaluation"),
+                    "--seeds",
+                    "9",
+                    "--max-steps",
+                    "4",
+                    "--workers",
+                    "1",
+                ]
+                if name.startswith("ocean:"):
+                    evaluate_args += ["--batch-size", "2"]
+                with patch(
+                    "research.providers.UsageOpenRouter",
+                    side_effect=AssertionError("No model needed"),
+                ):
+                    result = await evaluate_policies(parse_config(evaluate_args))
+                self.assertEqual(result["measurements"][summary["winner"]], summary["test"])
+
+    async def test_custom_files_selection_and_budget_exhaustion(self):
+        from research.experiment import run_experiment
+
+        environment_source = """from contextlib import asynccontextmanager
++from research.experiment import EnvironmentDefinition, Options
++from research.rewards import Measurement
++@asynccontextmanager
++async def open_evaluator(*, options, evaluation, run):
++    async def evaluate(policies, seeds):
++        with (run.path / "panels.txt").open("a") as f:
++            f.write(str(list(seeds)) + "\\n")
++        if 200 in seeds:
++            assert (run.path / "winner.py").exists()
++        return {p.id: Measurement({s: (10 if p.name == "Policy 1" and s == 100 else 1) for s in seeds}) for p in policies}
++    yield evaluate
++environment = EnvironmentDefinition(Options, lambda p: None, lambda o, e: "Test scoring", open_evaluator)
++""".replace("\n+", "\n")
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            env = root / "environment.py"
+            env.write_text(environment_source)
+            config = parse_config(
+                [
+                    "run",
+                    "--env",
+                    str(env),
+                    "--optimizer",
+                    "elite",
+                    "--model",
+                    "scripted",
+                    "--output",
+                    str(root / "run"),
+                    "--population",
+                    "3",
+                    "--generations",
+                    "1",
+                    "--elites",
+                    "2",
+                    "--max-repairs",
+                    "0",
+                    "--max-calls",
+                    "2",
+                    "--spend-cap",
+                    "100",
+                    "--input-price",
+                    "1",
+                    "--output-price",
+                    "1",
+                    "--seeds",
+                    "7",
+                    "--validation-seeds",
+                    "100",
+                    "--test-seeds",
+                    "200",
+                    "--finalists",
+                    "2",
+                ]
+            )
+            with (
+                patch.dict("os.environ", {"OPENROUTER_API_KEY": "scripted"}),
+                patch(
+                    "research.providers.UsageOpenRouter",
+                    return_value=ScriptedProvider([program(0), program(1)]),
+                ),
+            ):
+                summary = await run_experiment(config)
+            self.assertEqual(summary["status"], "budget_exhausted", summary)
+            self.assertEqual(Policy.from_file(root / "run/winner.py").name, "Policy 1")
+            self.assertEqual(
+                (root / "run/panels.txt").read_text().splitlines(), ["[7]", "[7]", "[100]", "[200]"]
+            )
+
+    async def test_selection_failure_ties_and_empty_panels(self):
+        from research.experiment import select_winner
+        from research.rewards import Measurement
+
+        policies = [
+            Policy.from_text(json.loads(program(i))["implementation"], name=f"Policy {i}")
+            for i in range(2)
+        ]
+        with (
+            tempfile.TemporaryDirectory() as directory,
+            Run.create(name="selection", path=Path(directory) / "run") as run,
+        ):
+            panels = []
+
+            async def evaluate(ps, seeds, phase):
+                panels.append((phase, [p.id for p in ps]))
+                if phase == "test":
+                    self.assertTrue((run.path / "winner.py").exists())
+                    return {p.id: Measurement(failure="test failure") for p in ps}
+                return {p.id: Measurement({s: 1 for s in seeds}) for p in ps}
+
+            options = dict(finalists=2, validation_seeds=[100], test_seeds=[200])
+            result = await select_winner(policies, evaluate, run, options)
+            self.assertEqual(result["winner"], policies[0].id)
+            self.assertEqual(result["status"], "evaluation_failed")
+            self.assertEqual(panels[-1], ("test", [policies[0].id]))
+            panels.clear()
+            result = await select_winner([], evaluate, run, options)
+            self.assertEqual(result["status"], "no_valid_candidate")
+            self.assertEqual(panels, [])
+            result = await select_winner(
+                policies, evaluate, run, {**options, "validation_seeds": [], "test_seeds": []}
+            )
+            self.assertEqual(result["winner"], policies[0].id)
+            self.assertEqual(result["test"], "not evaluated")
+
+    async def test_cancellation_and_infrastructure_leave_summary(self):
+        from research.experiment import run_experiment
+
+        for cancel in (False, True):
+            with self.subTest(cancel=cancel), tempfile.TemporaryDirectory() as directory:
+                config = parse_config(
+                    ["run"],
+                    config=dict(
+                        env="CartPole-v1",
+                        optimizer="elite",
+                        model="scripted",
+                        output=str(Path(directory) / "run"),
+                        optimizer_options=dict(
+                            population=1, elites=1, generations=1, max_repairs=0
+                        ),
+                        budget=dict(spend_cap=10, input_price=1, output_price=1),
+                    ),
+                )
+                entered, closed = asyncio.Event(), asyncio.Event()
+
+                class FailedProvider:
+                    async def acall(self, *args, **kwargs):
+                        entered.set()
+                        try:
+                            if cancel:
+                                await asyncio.Event().wait()
+                            raise RuntimeError("provider offline")
+                        finally:
+                            closed.set()
+
+                with (
+                    patch.dict("os.environ", {"OPENROUTER_API_KEY": "scripted"}),
+                    patch("research.providers.UsageOpenRouter", return_value=FailedProvider()),
+                ):
+                    task = asyncio.create_task(run_experiment(config))
+                    await asyncio.wait_for(entered.wait(), 5)
+                    if cancel:
+                        task.cancel()
+                    with self.assertRaises(asyncio.CancelledError if cancel else RuntimeError):
+                        await task
+                self.assertTrue(closed.is_set())
+                summary = json.loads((Path(config["output"]) / "summary.json").read_text())
+                self.assertEqual(summary["status"], "cancelled" if cancel else "failed")
+                self.assertNotIn("test", summary)
+
+    async def test_ocean_infrastructure_is_not_a_policy_failure(self):
+        from research.ocean.baselines import policies
+        from research.ocean.evaluator import PanelEvaluator
+        from rsikit.evaluation import InfrastructureError
+
+        with tempfile.TemporaryDirectory() as directory:
+            async with PanelEvaluator(directory, max_steps=2) as evaluator:
+                with patch.object(
+                    evaluator, "_panel", side_effect=InfrastructureError("worker missing")
+                ):
+                    with self.assertRaises(InfrastructureError):
+                        await evaluator.evaluate([policies()[0]], [0])
+
+    async def test_custom_optimizer_file_and_cached_execution_counts(self):
+        from research.experiment import run_experiment
+
+        source = """from pydantic import BaseModel, ConfigDict
+from rsikit import Policy
+class Options(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+    repeats: int = 2
+ def_placeholder
+""".replace(
+            " def_placeholder",
+            """def add_arguments(parser):
+    parser.add_argument("--repeats", type=int)
+async def optimize(*, task, provider, evaluate, run, options, seed):
+    p = Policy.from_text("from rsikit import Policy\\nclass Solution(Policy):\\n    async def act(self, observation): return 0\\n")
+    for _ in range(options["repeats"]):
+        await evaluate([p])
+    return [p]
+""",
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            optimizer = root / "optimizer.py"
+            optimizer.write_text(source)
+            config = parse_config(
+                ["run"],
+                config=dict(
+                    env="CartPole-v1",
+                    optimizer=str(optimizer),
+                    model="scripted",
+                    output=str(root / "run"),
+                    evaluation=dict(seeds=[7], max_steps=2, workers=1),
+                    budget=dict(spend_cap=10, input_price=1, output_price=1, max_calls=1),
+                ),
+            )
+            with (
+                patch.dict("os.environ", {"OPENROUTER_API_KEY": "scripted"}),
+                patch("research.providers.UsageOpenRouter", return_value=ScriptedProvider([])),
+            ):
+                summary = await run_experiment(config)
+            self.assertEqual(summary["status"], "completed")
+            tally = summary["phases"]["search"]
+            self.assertEqual(tally["requested_candidates"], 2)
+            self.assertEqual(tally["evaluation_submissions"], 1)
+            self.assertEqual(tally["seed_runs"], 1)
+            self.assertEqual(summary["generation"]["calls"], 0)
+
+    async def test_video_queue_keeps_blackjack_metadata(self):
+        from research.experiment import run_experiment
+
+        completed = []
+
+        async def videos(queue, path, top, workers):
+            while (number := await queue.get()) is not None:
+                completed.append(number)
+            metadata = json.loads((path / "experiment.json").read_text())
+            self.assertEqual(metadata["shoes_per_seed"], 1)
+            self.assertEqual((top, workers), (1, 1))
+
+        with tempfile.TemporaryDirectory() as directory:
+            config = parse_config(
+                ["run"],
+                config=dict(
+                    env="Blackjack",
+                    optimizer="elite",
+                    model="scripted",
+                    output=str(Path(directory) / "run"),
+                    environment=dict(shoes_per_episode=1),
+                    optimizer_options=dict(population=1, elites=1, generations=1, max_repairs=0),
+                    evaluation=dict(seeds=[7], workers=1),
+                    videos=dict(top=1),
+                    budget=dict(spend_cap=10, input_price=1, output_price=1),
+                ),
+            )
+            with (
+                patch.dict("os.environ", {"OPENROUTER_API_KEY": "scripted"}),
+                patch(
+                    "research.providers.UsageOpenRouter",
+                    return_value=ScriptedProvider([program(0)]),
+                ),
+                patch("research.elitesearch.videos.generation_videos", side_effect=videos),
+            ):
+                summary = await run_experiment(config)
+            self.assertEqual(summary["status"], "completed")
+            self.assertEqual(completed, [1])
+
+    async def test_real_blackjack_generation_video_and_replay_accounting(self):
+        from research.elitesearch.videos import export
+        from research.experiment import run_experiment
+
+        with tempfile.TemporaryDirectory() as directory:
+            config = parse_config(
+                ["run"],
+                config=dict(
+                    env="Blackjack",
+                    optimizer="elite",
+                    model="scripted",
+                    output=str(Path(directory) / "run"),
+                    environment=dict(shoes_per_episode=1),
+                    optimizer_options=dict(population=1, elites=1, generations=1, max_repairs=0),
+                    evaluation=dict(seeds=[7], workers=1),
+                    videos=dict(top=1),
+                    budget=dict(spend_cap=10, input_price=1, output_price=1),
+                ),
+            )
+            with (
+                patch.dict("os.environ", {"OPENROUTER_API_KEY": "scripted"}),
+                patch(
+                    "research.providers.UsageOpenRouter",
+                    return_value=ScriptedProvider([program(0)]),
+                ),
+            ):
+                summary = await run_experiment(config)
+            root = Path(config["output"])
+            self.assertTrue((root / "videos/index.html").is_file())
+            self.assertEqual(summary["phases"]["rendering"]["seed_runs"], 1)
+            before = (root / "videos/executions.jsonl").read_text()
+            await export(root, root / "videos", top=1, workers=1)
+            self.assertEqual((root / "videos/executions.jsonl").read_text(), before)
+
+    async def test_ocean_cancelled_execution_is_counted(self):
+        from research.experiment import evaluate_policies
+        from research.ocean.baselines import policies
+        from research.ocean.evaluator import PanelEvaluator
+
+        entered = asyncio.Event()
+
+        async def panel(*args):
+            entered.set()
+            await asyncio.Event().wait()
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            policy = root / "policy.py"
+            policies()[0].to_file(policy)
+            config = parse_config(
+                [
+                    "evaluate",
+                    "--env",
+                    "ocean:g2048",
+                    "--policy",
+                    str(policy),
+                    "--output",
+                    str(root / "run"),
+                    "--seeds",
+                    "7",
+                    "--max-steps",
+                    "2",
+                ]
+            )
+            with patch.object(PanelEvaluator, "_panel", side_effect=panel):
+                task = asyncio.create_task(evaluate_policies(config))
+                await asyncio.wait_for(entered.wait(), 5)
+                task.cancel()
+                with self.assertRaises(asyncio.CancelledError):
+                    await task
+            summary = json.loads((root / "run/summary.json").read_text())
+            self.assertEqual(summary["status"], "cancelled")
+            self.assertEqual(summary["phases"]["evaluation"]["evaluation_submissions"], 1)
+            self.assertIsNone(summary["phases"]["evaluation"]["transitions"])

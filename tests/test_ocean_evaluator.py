@@ -10,21 +10,23 @@ from rsikit import Policy
 
 
 class OceanEvaluatorTests(unittest.IsolatedAsyncioTestCase):
-    async def test_batch_order_and_reference_preserve_actions_and_scores(self):
+    async def test_batch_seed_order_and_reference_preserve_actions_and_scores(self):
         from research.ocean.baselines import policies
         from research.ocean.evaluator import PanelEvaluator, rollout
 
         policy = policies()[1]
         seeds = [19, 0, 11]
-        scalar = await rollout(policy._implementation, seeds, 1, 40, trace=True)
+        scalar = await rollout(policy._implementation, seeds, 3, 40, trace=True)
         batch = await rollout(policy._implementation, seeds, 3, 40, trace=True)
-        reverse = await rollout(policy._implementation, seeds[::-1], 2, 40, trace=True)
+        reverse = await rollout(policy._implementation, seeds[::-1], 3, 40, trace=True)
         self.assertEqual(scalar["results"], batch["results"])
         self.assertEqual(scalar["results"], reverse["results"][::-1])
         self.assertEqual(scalar["steps"], sum(r["steps"] for r in scalar["results"]))
-        self.assertTrue(all(len(r["actions"]) == r["steps"] for r in scalar["results"]))
+        self.assertTrue(all(len(r["actions"]) == r["vector_steps"] for r in scalar["results"]))
         with tempfile.TemporaryDirectory() as directory:
-            async with PanelEvaluator(directory, mode="reference", max_steps=40) as evaluator:
+            async with PanelEvaluator(
+                directory, mode="reference", batch_size=3, max_steps=40
+            ) as evaluator:
                 reference = await evaluator.submit(policy, seeds)
             self.assertEqual(reference["status"], "ok", reference["error"])
             for expected, actual in zip(scalar["results"], reference["results"]):
@@ -48,7 +50,7 @@ class Solution(Policy):
         while True: pass
 """)
         with tempfile.TemporaryDirectory() as directory:
-            async with PanelEvaluator(directory, max_steps=3, timeout=2) as evaluator:
+            async with PanelEvaluator(directory, max_steps=3, timeout=5) as evaluator:
                 bad = await evaluator.submit(invalid, [0, 1])
                 self.assertEqual(bad["status"], "failed")
                 self.assertEqual(bad["results"], [])

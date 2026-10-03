@@ -39,6 +39,10 @@ def value(boards, gains):
 
 class Solution(Policy):
     async def act(self, observation):
+        # Upstream 3.0: empty flags, then 16 one-hot tile features per cell.
+        occupied = observation[:, 16:32] == 0
+        tiles = observation[:, 32:288].reshape(-1, 16, 16)
+        observation = np.where(occupied, tiles.argmax(axis=2) + 1, 0)
         scores = []
         for direction in range(4):
             board, gains = slide(observation, direction)
@@ -55,8 +59,21 @@ class Solution(Policy):
 """
 
 
-def policies():
+def policies(env_name="g2048"):
     """Return frozen source variants, from legal priority to bounded two-ply search."""
+    if env_name != "g2048":
+        return [
+            Policy.from_text(
+                """import numpy as np
+from rsikit import Policy
+class Solution(Policy):
+    async def act(self, observation):
+        return np.zeros(len(observation), dtype=np.int64)
+""",
+                name="noop",
+                description="Upstream discrete-action fallback",
+            )
+        ]
     variants = [
         ("legal-priority", (0, 0, 0, 0), False, (4, 1, 3, 2)),
         ("merge-greedy", (1, 0, 0, 0), False, (0, 0, 0, 0)),

@@ -17,89 +17,120 @@ from tempfile import TemporaryDirectory
 from time import perf_counter
 from uuid import uuid4
 
-import cloudpickle
-import gymnasium as gym
 import numpy as np
 
 from research.rewards import Measurement
-from rsikit import Executor
-from rsikit.evaluation import PolicyError, PolicyTimeout
+from rsikit.evaluation import InfrastructureError, PolicyError, PolicyTimeout
 from rsikit.policy import load_policy, validate_policy
 
-from .native import Batch, OceanEnv, build
+from .environment import factory, metadata
 
 MAX_RESULT = 64 * 1024 * 1024
 
 
 def _inputs(seeds, batch_size, max_steps):
+    if any(type(x) is not int or not 1 <= x <= 0x7FFFFFFF for x in (batch_size, max_steps)):
+        raise ValueError("Batch size and max_steps must be positive int32 integers")
     seeds = tuple(seeds)
-    if not seeds or any(type(s) is not int or not 0 <= s < 2**32 for s in seeds):
-        raise ValueError("Seeds must be nonempty unsigned 32-bit integers")
+    largest_seed = (0x7FFFFFFF - batch_size + 1) // batch_size
+    if not seeds or any(type(s) is not int or not 0 <= s <= largest_seed for s in seeds):
+        raise ValueError(
+            "Seeds must be nonempty nonnegative integers with (seed + 1) * batch_size <= 2**31"
+        )
     if len(set(seeds)) != len(seeds):
         raise ValueError("Seeds must be unique within a panel")
-    if any(type(x) is not int or x < 1 for x in (batch_size, max_steps)):
-        raise ValueError("Batch size and max_steps must be positive integers")
+
     return seeds
 
 
-async def rollout(source, seeds, batch_size=32, max_steps=2000, trace=False, diagnostics=False):
-    """Run one source over a seed panel directly; the caller supplies isolation."""
+async def rollout(
+    source,
+    seeds,
+    batch_size=32,
+    max_steps=2000,
+    trace=False,
+    diagnostics=False,
+    *,
+    env_name="g2048",
+    score_key="merge_score",
+    env_kwargs=None,
+):
+    """Each seed is a fresh upstream batch run for a fixed number of vector steps.
+
+    Native autoresets and logging stay upstream. A logged score is the mean over
+    completed episodes (zero if none completed); `return` includes all rewards,
+    including unfinished episodes, averaged over the batch lanes.
+    """
     seeds = _inputs(seeds, batch_size, max_steps)
+    constructor = factory(env_name)
+    kwargs = dict(env_kwargs or {})
+    if set(kwargs) & {"num_envs", "seed", "log_interval", "buf"}:
+        raise ValueError("num_envs, seed, log_interval and buf are controlled by the evaluator")
     results = []
     timing = dict(reset=0.0, policy=0.0, environment=0.0, validation=0.0)
-    for offset in range(0, len(seeds), batch_size):
+    for seed in seeds:
         start = perf_counter() if diagnostics else 0
-        env = Batch(seeds[offset : offset + batch_size], max_steps=max_steps)
+        env = constructor(num_envs=batch_size, seed=seed, log_interval=max_steps, **kwargs)
         policy = None
-        actions_by_slot = [[] for _ in seeds[offset : offset + batch_size]] if trace else None
         try:
-            size = len(env.active)
+            observation, _ = env.reset(seed=seed)
+            if env.num_agents != batch_size:
+                raise ValueError("This evaluator requires one agent per environment")
             policy = load_policy(
                 source,
-                gym.spaces.Box(0, 255, (size, 16), dtype=np.float32),
-                gym.spaces.MultiDiscrete([4] * size),
-                "Stateless independent rows of 2048 tile exponents; return one action per row.",
+                env.observation_space,
+                env.action_space,
+                "Independent rows of upstream Ocean observations; one action per row.",
             )
-            await policy.reset(seed=0)
+            await policy.reset(seed=seed)
             if diagnostics:
                 timing["reset"] += perf_counter() - start
-            while len(env.active):
-                slots = env.active.copy()
-                if len(slots) != size:
-                    size = len(slots)
-                    policy.observation_space = gym.spaces.Box(0, 255, (size, 16), dtype=np.float32)
-                    policy.action_space = gym.spaces.MultiDiscrete([4] * size)
-                observation = env.observations[slots].copy()
+            actions = [] if trace else None
+            returns = np.zeros(batch_size, dtype=np.float64)
+            infos = []
+            for _ in range(max_steps):
                 start = perf_counter() if diagnostics else 0
-                action = await policy.act(observation)
+                action = np.asarray(await policy.act(observation.copy()))
                 if diagnostics:
                     timing["policy"] += perf_counter() - start
                 start = perf_counter() if diagnostics else 0
-                action = np.asarray(action)
-                if (
-                    action.shape != (size,)
-                    or action.dtype.kind not in "iuf"
-                    or not np.all(np.isfinite(action))
-                    or not np.all((action >= 0) & (action < 4) & (action == np.floor(action)))
-                ):
+                if not np.isfinite(action).all() or not env.action_space.contains(action):
                     raise PolicyError(
-                        "Expected finite integer actions of shape (active_rows,) in [0, 3]"
+                        f"Expected actions in {env.action_space}; got shape {action.shape}"
                     )
-                action = np.ascontiguousarray(action, dtype=np.int64)
                 if diagnostics:
                     timing["validation"] += perf_counter() - start
                 if trace:
-                    for slot, value in zip(slots, action):
-                        actions_by_slot[slot].append(int(value))
+                    actions.append(action.tolist())
                 start = perf_counter() if diagnostics else 0
-                env.step(action)
+                observation, reward, _, _, infos = env.step(action)
+                returns += reward
                 if diagnostics:
                     timing["environment"] += perf_counter() - start
-            rows = [dict(row) for row in env.results]
+            metrics = dict(infos[0]) if infos else {}
+            count = int(metrics.get("n", 0))
+            if score_key != "return" and count and score_key not in metrics:
+                raise ValueError(
+                    f"Unknown score key {score_key!r}; upstream logged {sorted(metrics)}"
+                )
+            score = (
+                float(returns.mean()) if score_key == "return" else float(metrics.get(score_key, 0))
+            )
+            row = dict(
+                seed=seed,
+                batch_size=batch_size,
+                vector_steps=max_steps,
+                steps=max_steps * batch_size,
+                score=score,
+                score_key=score_key,
+                episodes=count,
+                metrics=metrics,
+                ending="horizon",
+            )
+            row["return"] = float(returns.mean())
             if trace:
-                for row, actions in zip(rows, actions_by_slot):
-                    row["actions"] = actions
-            results.extend(rows)
+                row["actions"] = actions
+            results.append(row)
         finally:
             try:
                 if policy is not None:
@@ -113,7 +144,7 @@ async def rollout(source, seeds, batch_size=32, max_steps=2000, trace=False, dia
     )
 
 
-def _child(channel, directory, source, seeds, batch_size, max_steps, diagnostics):
+def _child(channel, directory, source, seeds, batch_size, max_steps, diagnostics, options):
     os.setsid()
     os.chdir(directory)
     with channel, open("policy.log", "w") as log:
@@ -121,7 +152,7 @@ def _child(channel, directory, source, seeds, batch_size, max_steps, diagnostics
         os.dup2(log.fileno(), 2)
         try:
             result = asyncio.run(
-                rollout(source, seeds, batch_size, max_steps, diagnostics=diagnostics)
+                rollout(source, seeds, batch_size, max_steps, diagnostics=diagnostics, **options)
             )
             result["worker_peak_rss_bytes"] = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss * (
                 1 if sys.platform == "darwin" else 1024
@@ -147,6 +178,9 @@ class PanelEvaluator:
         max_steps=2000,
         timeout=60,
         diagnostics=False,
+        env_name="g2048",
+        score_key="merge_score",
+        env_kwargs=None,
     ):
         if mode not in ("reference", "summary", "batch"):
             raise ValueError("Mode must be reference, summary or batch")
@@ -171,8 +205,9 @@ class PanelEvaluator:
         method = "forkserver" if sys.platform == "linux" else "spawn"
         self._context = mp.get_context(method)
         if method == "forkserver":
-            mp.set_forkserver_preload(["research.ocean.evaluator"])
-        self.library = build()
+            mp.set_forkserver_preload(["pufferlib.ocean", "research.ocean.evaluator"])
+        self.options = dict(env_name=env_name, score_key=score_key, env_kwargs=env_kwargs)
+        self.upstream = metadata(env_name)
 
     async def __aenter__(self):
         return self
@@ -194,9 +229,10 @@ class PanelEvaluator:
                     directory,
                     source,
                     seeds,
-                    1 if self.mode == "summary" else self.batch_size,
+                    self.batch_size,
                     self.max_steps,
                     self.diagnostics,
+                    self.options,
                 ),
             )
             reading = None
@@ -204,10 +240,13 @@ class PanelEvaluator:
                 process.start()
                 writer.close()
                 reading = asyncio.create_task(asyncio.to_thread(reader.recv_bytes, MAX_RESULT))
-                done, _ = await asyncio.wait([reading], timeout=self.timeout)
+                done, _ = await asyncio.wait([reading], timeout=self.timeout * len(seeds))
                 if not done:
-                    raise PolicyTimeout(f"Candidate panel exceeded {self.timeout:g}s")
-                result = json.loads(reading.result())
+                    raise PolicyTimeout(f"Candidate panel exceeded {self.timeout * len(seeds):g}s")
+                try:
+                    result = json.loads(reading.result())
+                except (EOFError, OSError, ValueError) as exc:
+                    raise InfrastructureError("Ocean worker exited without a valid result") from exc
                 if "error" in result:
                     raise PolicyError(result["error"])
                 return result
@@ -230,28 +269,12 @@ class PanelEvaluator:
                 reader.close()
 
     async def _reference(self, source, seeds):
-        # One episode child at a time per admitted panel: no nested worker pools.
+        # Same upstream workload, but a fresh process for each batch seed.
         rows = []
-        async with Executor(episode_timeout=self.timeout) as executor:
-            for seed in seeds:
-                episode = await executor._evaluate(
-                    source,
-                    cloudpickle.dumps(OceanEnv(max_steps=self.max_steps)),
-                    seed,
-                    policy_seed=0,
-                )
-                info = episode.infos[-1]
-                rows.append(
-                    {
-                        "seed": seed,
-                        "score": info["score"],
-                        "max_tile": info["max_tile"],
-                        "return": info["return"],
-                        "steps": len(episode),
-                        "ending": info["ending"],
-                    }
-                )
-        return dict(results=rows, steps=sum(row["steps"] for row in rows), timings={})
+        for seed in seeds:
+            result = await self._panel(source, [seed])
+            rows.extend(result["results"])
+        return dict(results=rows, steps=sum(row["steps"] for row in rows))
 
     async def submit(self, policy, seeds=range(32), job_id=None):
         if self._closed:
@@ -280,6 +303,9 @@ class PanelEvaluator:
             batch_size=self.batch_size,
             workers=self.workers,
             diagnostics=self.diagnostics,
+            protocol=self.upstream["protocol"],
+            environment=self.options["env_name"],
+            score_key=self.options["score_key"],
             seeds=list(seeds),
             max_steps=self.max_steps,
             submitted=perf_counter(),
@@ -306,7 +332,7 @@ class PanelEvaluator:
                     policy.to_file(source_path)
                 operation = self._reference if self.mode == "reference" else self._panel
                 result = await asyncio.wait_for(
-                    operation(policy._implementation, seeds), self.timeout
+                    operation(policy._implementation, seeds), self.timeout * len(seeds)
                 )
                 rows = result["results"]
                 if [row["seed"] for row in rows] != list(seeds) or any(
@@ -315,7 +341,10 @@ class PanelEvaluator:
                     raise PolicyError("Incomplete or nonfinite candidate panel")
                 event.update(result, status="ok")
             except asyncio.TimeoutError:
-                event["error"] = f"Candidate panel exceeded {self.timeout:g}s"
+                event["error"] = f"Candidate panel exceeded {self.timeout * len(seeds):g}s"
+            except (InfrastructureError, OSError) as exc:
+                event["error"] = f"{type(exc).__name__}: {exc}"
+                raise InfrastructureError(str(exc)) from exc
             except Exception as exc:
                 event["error"] = f"{type(exc).__name__}: {exc}"
             return event

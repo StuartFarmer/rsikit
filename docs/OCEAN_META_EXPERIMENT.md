@@ -1,5 +1,7 @@
 # Ocean meta-experiment: search for better policy searchers
 
+> Implementation update (2026-10-03): evaluation now uses upstream Ocean bindings with batch reset seeds and a fixed horizon. See [the current protocol](OCEAN_BENCHMARK.md). Earlier episode counts, native-version details, and timing projections below are historical.
+
 Status: proposed experiment, 2026-10-02. The [2048 evaluator and search example](OCEAN_BENCHMARK.md)
 exist. The multi-environment benchmark, protected scoring boundary and outer
 controller search described here are new work. No meta-experiment has run yet.
