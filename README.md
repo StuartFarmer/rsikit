@@ -341,7 +341,8 @@ for the API, selection rules, stagnation settings, and stored history.
 ```
 
 The application image defaults to Python 3.14; host Python need not match it.
-Poker keeps its [separate launcher and player isolation](examples/elitelist_papers/poker/README.md).
+The EliteTable manuscripts, experiments, results, and poker work now live in the
+standalone sibling repository [`elitelist_papers`](../elitelist_papers/README.md).
 
 Research algorithms, examples, and tests are included in the source distribution
 and excluded from the library wheel. The core supplies policy generation, explicit

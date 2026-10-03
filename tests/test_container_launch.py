@@ -1,14 +1,11 @@
 """The host launcher preserves arguments and delegates lifecycle to Docker."""
 
-import io
 import json
 import os
 import pty
-import shlex
 import subprocess
 import tempfile
 import unittest
-from contextlib import redirect_stdout
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -94,33 +91,6 @@ sys.exit(int(os.environ.get("BUILD_EXIT", "0")) if sys.argv[1] == "build" else
                 19,
             )
 
-    def test_notebook_commands_use_launcher_and_mounted_paths(self):
-        notebook = json.loads((ROOT / "examples/elitelist_papers/paper1.ipynb").read_text())
-        scope = dict(
-            Path=Path,
-            ROOT=ROOT,
-            WORK=ROOT / "examples/elitelist_papers",
-            RUNS=ROOT / "runs",
-            LAUNCHER=ROOT / "scripts/run",
-            shlex=shlex,
-        )
-        for i, cell in enumerate(notebook["cells"]):
-            if cell["cell_type"] == "code":
-                compile("".join(cell["source"]), f"cell {i}", "exec")
-        with redirect_stdout(io.StringIO()):
-            exec("".join(notebook["cells"][4]["source"]), scope)
-            self.assertEqual(len(scope["commands"]), 60)
-            for name, command in scope["commands"]:
-                self.assertEqual(
-                    command[:2], [str(ROOT / "scripts/run"), "examples.elitelist_papers.run"]
-                )
-                self.assertEqual(command[command.index("--output") + 1], f"runs/{name}")
-            resume = "".join(notebook["cells"][6]["source"]).replace(
-                "RESUME_RUN = None", "RESUME_RUN = RUNS / 'saved run'"
-            )
-            exec(resume, scope)
-            self.assertEqual(scope["command"][-2:], ["--resume", "runs/saved run"])
-
     def test_missing_docker(self):
         env = {**os.environ, "PATH": "/usr/bin:/bin"}
         result = subprocess.run(
@@ -129,11 +99,10 @@ sys.exit(int(os.environ.get("BUILD_EXIT", "0")) if sys.argv[1] == "build" else
         self.assertEqual(result.returncode, 127)
         self.assertIn("Docker is required", result.stderr)
 
-    def test_usage_and_poker_are_rejected_before_build(self):
-        for arguments in ([], ["examples.elitelist_papers.poker"]):
-            result = subprocess.run([str(ROOT / "scripts/run"), *arguments], capture_output=True)
-            self.assertNotEqual(result.returncode, 0)
-            self.assertTrue(result.stderr)
+    def test_usage_is_rejected_before_build(self):
+        result = subprocess.run([str(ROOT / "scripts/run")], capture_output=True)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertTrue(result.stderr)
 
 
 if __name__ == "__main__":

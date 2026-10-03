@@ -1,5 +1,6 @@
 """Saved-value compatibility and full application episode checks."""
 
+import json
 import tempfile
 import unittest
 from pathlib import Path
@@ -9,7 +10,6 @@ import gymnasium as gym
 import numpy as np
 from gymnasium import spaces
 
-from examples.elitelist_papers.poker.codec import dumps, loads
 from research.rewards import mean_rewards
 from rsikit import run_program
 from rsikit.episode import decode, encode
@@ -70,7 +70,7 @@ class CounterPolicy(Policy):
 class CodecSmoke(unittest.TestCase):
     def test_round_trip_and_rejected_allocations(self):
         value = {"a": (np.array([[1, 2]], dtype=np.int16), [True, None, "π", float("inf")]), 3: 4}
-        restored = decode(loads(dumps(encode(value))))
+        restored = decode(json.loads(json.dumps(encode(value), allow_nan=False)))
         np.testing.assert_array_equal(restored["a"][0], value["a"][0])
         self.assertEqual(restored["a"][0].dtype, np.int16)
         self.assertIsInstance(restored["a"], tuple)

@@ -2,8 +2,7 @@
 
 ```sh
 export OPENROUTER_API_KEY='your-key'
-./scripts/run examples.elitelist_papers.run --env CartPole-v1 --output runs/search
-./scripts/run examples.elitelist_papers.run --resume runs/search
+./scripts/run examples.elitesearch --env CartPole-v1 --output runs/search
 ```
 
 The host launcher builds `rsikit:local` using Docker's layer cache and runs the
@@ -61,7 +60,7 @@ artifact; failures include at most 4 KiB of its tail. Rich stays in the main pro
 The old `rsikit.sandbox` package and `DockerSandbox` are removed. Use
 `Executor(episode_timeout=...)` or `run_program(episode_timeout=...)`.
 Poker retains its separate Docker service and private player processes; use its
-[own launcher](../examples/elitelist_papers/poker/README.md).
+[own launcher in the paper repository](../../elitelist_papers/poker/README.md).
 
 Measure evaluation within the application:
 
