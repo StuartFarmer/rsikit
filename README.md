@@ -10,13 +10,12 @@ This is an experimental release; APIs may change.
 - `Policy`: the solution type: load with `from_text` / `from_file`, save with
   `to_text` / `to_file`, and execute through `reset`, `act`, and `close`.
 - `generate`: returns a named `Policy` subclass from the LLM.
+- `rsikit.policy.validate_policy`: explicitly checks generated source without executing it.
 - `Evaluator`: rolls out existing environment and policy instances.
 - `Episode`: records observations, actions, rewards, flags, infos, and artifacts.
 - `Optimizer`: the `propose(n)` / `update(policy_episode_pairs)` protocol, implemented by all three AlphaEvolve variants.
 - `Run`: persists one optimizer run: configuration, checkpoints, policies, and episodes.
-- `Executor`: owns concurrency and timeouts, using a configurable sandbox.
-- `DockerSandbox`: reuses one container across a run, with independent evaluation processes.
-- `InProcessDockerSandbox`: runs policy and environment together inside Docker, avoiding per-action IPC.
+- `Executor`: runs fresh local episode processes with bounded concurrency and deadlines.
 - `AlphaEvolve`: evolutionary search using Slick and Gymnasium feedback.
 - `ShinkaEvolve`: island archives, adaptive model selection, and diff/rewrite/crossover search.
 - `LineageSearch`: diverse approach families, measured refinement and pivots, and stagnation-based completion.
@@ -35,6 +34,7 @@ from slick.providers import OpenRouterAPI
 
 import rsikit.generation as generation
 from rsikit import Executor, Run, generate
+from rsikit.policy import validate_policy
 from research.rollouts import Rollouts
 from research.rewards import mean_rewards
 
@@ -48,6 +48,7 @@ policy = await generate(
     "velocity. Action 0 pushes left and 1 pushes right. Maximize surviving steps.",
     provider=provider,
 )
+validate_policy(policy)
 executor = Executor(concurrency=4)
 with gym.make("CartPole-v1", max_episode_steps=500) as environment:
     async with executor, Run.create(name="cartpole-comparison") as run:
@@ -62,53 +63,55 @@ mean episode reward as fitness. `Run` saves supplied data and owns no execution.
 Python export is on by default (`export=False` disables it).
 See [execution, runs, and recovery](docs/RUNS.md).
 
-Docker episodes default to a 60-second wall-clock limit per seed. Exceeding it
-raises a recoverable `PolicyTimeout` and terminates that episode's workers while
-other episodes continue. With `DockerSandbox`, `call_timeout` separately limits each policy call.
+Launch the complete application with Docker (Docker Desktop on macOS):
 
-`Executor` defaults to `InProcessDockerSandbox`. To configure its episode timeout:
-
-```python
-from rsikit import Executor, InProcessDockerSandbox
-
-executor = Executor(sandbox=InProcessDockerSandbox(episode_timeout=60), concurrency=4)
+```sh
+export OPENROUTER_API_KEY='your-key'  # Or set it in the repository .env.
+./scripts/run examples.inner_loop --output runs/my-comparison
 ```
 
-It keeps the restricted Docker container and a fresh process per episode, but
-lets the policy share memory with the environment. It protects the host rather
-than hidden environment state or scoring integrity. Its external `episode_timeout`
-covers the complete rollout; `call_timeout` is not applied. Rebuild the sandbox
-image before using it. See [performance measurements](docs/IN_PROCESS_SANDBOX.md).
+The launcher builds `rsikit:local` using Docker's cache, then runs generation,
+evaluation, persistence and Rich in one foreground container. No host Python setup
+is needed. Outputs survive under repository `runs/`; use `runs/...` paths in CLI
+arguments. `RSIKIT_RUNS_DIR` selects a different host output directory.
+Unchanged builds reuse Docker's cached image layers. Application edits rebuild
+the source layer; dependency installation and scientific checks remain cached
+unless their inputs change.
 
-## Setup
+Configure episode limits with `Executor(concurrency=4, episode_timeout=60)`.
+Each episode gets a fresh child process, and timeouts preserve successful siblings.
+Generated code shares the application's network, API credentials and mounted
+outputs, including access to its environment and scores. See
+[execution and launcher settings](docs/IN_PROCESS_SANDBOX.md).
+
+## Local library development
 
 ```sh
 uv venv
 uv pip install --python .venv/bin/python -e '.[dev]'
-.venv/bin/python -B -m examples.cartpole
+./scripts/run examples.cartpole
 ```
 
 Runtime dependencies are Gymnasium, NumPy, Slick (`slick-ai`), Pydantic, SQLModel, cloudpickle, and Rich.
 
-The Docker worker additionally includes SciPy, python-control (`control`), CVXPY
+The application image additionally includes SciPy, python-control (`control`), CVXPY
 with OSQP/Clarabel/SCS, scikit-learn (`sklearn`), and CPU-only PyTorch (`torch`).
 All generators and repair prompts share scientific-library guidance. Image builds
 verify Riccati/LQR, convex solvers, regression and Torch autograd; installed versions
-are recorded in `/opt/worker/libraries.json`. Rebuild the image after dependency changes.
+are checked during image construction. The launcher rebuilds automatically.
 No sibling checkout or `slick-bits` dependency is required.
 
-## Isolated programs
+## Saved programs
 
 ```sh
-docker build -t rsikit-sandbox:local -f rsikit/sandbox/Dockerfile .
-.venv/bin/python -B -m examples.circle_packing
-.venv/bin/python -B -m examples.circle_packing /path/to/solution.py
+./scripts/run examples.circle_packing
+./scripts/run examples.circle_packing runs/solution.py
 ```
 
-A program exports `Solution(Policy)`. One policy instance persists throughout an
-episode. Executor evaluates both environment and agent inside the container, sharing
-an episode process by default; `DockerSandbox` uses separate processes. The
-lower-level `run_program` helper still keeps its environment on the host.
+A program exports `Solution(Policy)`. One policy instance and event loop persist
+throughout an episode. Both `Executor` and `run_program` execute the environment,
+policy and scoring together in a child of the current application. Use the launcher
+to put that application in Docker; calling the library directly runs locally.
 
 For caller-owned instances, use `Evaluator(env, policy, max_steps=1000)` and
 `await evaluator.run(observation, info=info)` after resetting both objects.
@@ -120,14 +123,14 @@ results, and execution limits.
 
 For finite-shoe blackjack with betting and memory across hands, see the
 [blackjack environment](docs/BLACKJACK.md). Benchmark completed hands with
-`.venv/bin/python -m examples.blackjack --compare-gym`.
+`./scripts/run examples.blackjack --compare-gym`.
 Run a Blackjack test with automatic leader videos after each generation using
-`.venv/bin/python -m examples.blackjack_train --output runs/blackjack-test`.
+`./scripts/run examples.blackjack_train --output runs/blackjack-test`.
 
 For daily BTC portfolio allocation with transaction fees and a seven-year training /
 three-year validation split, see the [Bitcoin environment](docs/BITCOIN.md).
 Use `--env Bitcoin` with the optimizer examples, or benchmark locally with
-`.venv/bin/python -m examples.bitcoin` (100,000 steps/second minimum).
+`./scripts/run examples.bitcoin` (100,000 steps/second minimum).
 Export saved policy charts with `examples.bitcoin_videos RUN --split training`
 or `--split validation` for the reserved chronological panel. Videos show
 buy/sell fills, equity, buy-and-hold, allocation, and drawdown; see the
@@ -136,10 +139,8 @@ buy/sell fills, equity, buy-and-hold, allocation, and drawdown; see the
 ## Generate and compare five policies with OpenRouter
 
 ```sh
-uv pip install --python .venv/bin/python -e '.[openrouter]'
-docker build -t rsikit-sandbox:local -f rsikit/sandbox/Dockerfile .
 export OPENROUTER_API_KEY='your-key'
-.venv/bin/python -B -m examples.inner_loop
+./scripts/run examples.inner_loop
 ```
 
 This makes five real generation calls through Slick's `OpenRouterAPI` using
@@ -160,27 +161,26 @@ from your run; the example contains no preset scores or fallback policies.
 To shorten evaluation or choose a new output folder:
 
 ```sh
-.venv/bin/python -B -m examples.inner_loop --seeds 1 2 3 --max-steps 200 --output runs/my-comparison
+./scripts/run examples.inner_loop --seeds 1 2 3 --max-steps 200 --output runs/my-comparison
 ```
 
 The chosen output directory must not already exist. Inspect the policy code and
 report together: the requested strategy is guidance, not a guarantee that the
 model follows it. Capped returns can tie, and five seeds do not establish general
-performance. This demo needs the OpenRouter key only on the host for generation.
+performance. The launcher passes the OpenRouter key into the application at runtime.
 
 To retry unfinished evaluations without generating anything, reopen the saved
 experiment. Seeds and the step limit are restored; use `--video` to record new episodes:
 
 ```sh
-.venv/bin/python -B -m examples.inner_loop --resume runs/YOUR_RUN
+./scripts/run examples.inner_loop --resume runs/YOUR_RUN
 ```
 
 For videos, the example configures Gymnasium RecordVideo before creating the run.
 Add `--video` (the worker image includes rendering dependencies):
 
 ```sh
-uv pip install --python .venv/bin/python -e '.[video]'
-.venv/bin/python -B -m examples.inner_loop --video
+./scripts/run examples.inner_loop --video
 ```
 
 ## AlphaEvolve
@@ -189,12 +189,11 @@ See the [AlphaEvolve guide](docs/ALPHAEVOLVE.md) for the Python API, search cont
 and structured generation contracts. Run the CartPole example with an API model:
 
 ```sh
-uv pip install --python .venv/bin/python -e '.[openrouter]'
 # Set OPENROUTER_API_KEY first; this command makes paid model calls.
-.venv/bin/python -B -m examples.alphaevolve --generations 25 --batch-size 10
+./scripts/run examples.alphaevolve --generations 25 --batch-size 10
 ```
 
-Build the Docker worker above before running the search. The default `paper`
+The launcher builds the application image automatically. The default `paper`
 variant uses `openai/gpt-oss-120b:nitro` and overlaps generation with evaluation:
 
 ```python
@@ -211,12 +210,12 @@ candidates remain available when they win another metric or niche. Ten limits th
 evaluation batch size; the retained population is separate. Rich progress shows each policy's
 name and description as it is generated, then scores as evaluations finish.
 A score table follows each evaluation batch; `run.log` keeps messages and error details.
-Self-healing allows two model repairs per policy for malformed generation or sandbox
+Self-healing allows two model repairs per policy for malformed generation or episode
 policy failures (`--max-repairs` changes the limit). Successful scores are reused.
 An exhausted repair budget discards that policy; surviving policies and later
 generations continue. A generation can return fewer policies than `--batch-size`.
 Generation runs four proposals concurrently by default, including their repair calls.
-Use `--generation-concurrency` to change this; `--concurrency` controls sandbox
+Use `--generation-concurrency` to change this; `--concurrency` controls episode
 evaluation separately. Set generation concurrency to 1 for sequential requests.
 The optimizer lives outside the core in `research/alphaevolve/paper/`. This independently
 implements the published mechanisms; the paper does not disclose exact database
@@ -227,7 +226,7 @@ Run names include the variant and `experiment.json` saves resolved settings.
 Continue a `paper` run with its saved population and settings:
 
 ```sh
-.venv/bin/python -B -m examples.alphaevolve --resume runs/YOUR_RUN --generations 25
+./scripts/run examples.alphaevolve --resume runs/YOUR_RUN --generations 25
 ```
 
 This adds 25 batches using the saved batch size. Logs/history stay in the same
@@ -245,10 +244,8 @@ automatically; selection still ranks policies by mean reward.
 For LunarLander (continuous controls with wind) and then BipedalWalker (normal terrain):
 
 ```sh
-uv pip install --python .venv/bin/python -e '.[openrouter,box2d]'
-docker build -t rsikit-sandbox:local -f rsikit/sandbox/Dockerfile .
-.venv/bin/python -B -m examples.alphaevolve --env LunarLander-v3 --seeds 0 1 2
-.venv/bin/python -B -m examples.alphaevolve --env BipedalWalker-v3 --seeds 0 1 2
+./scripts/run examples.alphaevolve --env LunarLander-v3 --seeds 0 1 2
+./scripts/run examples.alphaevolve --env BipedalWalker-v3 --seeds 0 1 2
 ```
 
 Both default to a budget of 250 proposals. BipedalWalker uses full rewrites by
@@ -264,7 +261,7 @@ A C++ compiler is required (on macOS, Xcode Command Line Tools).
 After a search finishes, record the three highest-scoring saved policies:
 
 ```sh
-.venv/bin/python -B -m examples.replay runs/YOUR_RUN --env LunarLander-v3 --top 3 --seeds 0 1 2
+./scripts/run examples.replay runs/YOUR_RUN --env LunarLander-v3 --top 3 --seeds 0 1 2
 ```
 
 Use `--env BipedalWalker-v3` for a walker run. Match any original `--max-steps`
@@ -277,11 +274,11 @@ Replay scores are stored separately, so previously cached scores cannot skip rec
 ## ShinkaEvolve
 
 The previous `main` implementation is now available in `research/shinkaevolve/`, using the
-same environments, Docker executor, Run storage, and video replay:
+same environments, local executor, Run storage, and video replay:
 
 ```sh
-.venv/bin/python -B -m examples.shinkaevolve --env LunarLander-v3 --generations 10 --batch-size 25 --seeds 0 1 2 3 4
-.venv/bin/python -B -m examples.shinkaevolve --env BipedalWalker-v3 --generations 10 --batch-size 25 --seeds 0 1 2 3 4
+./scripts/run examples.shinkaevolve --env LunarLander-v3 --generations 10 --batch-size 25 --seeds 0 1 2 3 4
+./scripts/run examples.shinkaevolve --env BipedalWalker-v3 --generations 10 --batch-size 25 --seeds 0 1 2 3 4
 ```
 
 Use the OpenRouter/Box2D setup above. The default model is
@@ -300,7 +297,7 @@ newcomers survive. Generation and Docker evaluation overlap, with bounded repair
 and a Rich leaderboard.
 
 ```sh
-.venv/bin/python -B -m examples.elitesearch --env BipedalWalker-v3 \
+./scripts/run examples.elitesearch --env BipedalWalker-v3 \
   --elites 10 --population 50 --generations 20 \
   --generation-concurrency 100 --concurrency 8 --max-repairs 5
 ```
@@ -328,7 +325,7 @@ policy (`--max-repairs` changes the limit). Rich progress shows generation,
 repairs, evaluation, family completion, and score tables; `run.log` retains the messages.
 
 ```sh
-.venv/bin/python -B -m examples.lineagesearch --env CartPole-v1 --max-attempts 500
+./scripts/run examples.lineagesearch --env CartPole-v1 --max-attempts 500
 ```
 
 Use the OpenRouter and Docker setup above. Search uses seeds 0–4; the final incumbent
@@ -338,15 +335,18 @@ for the API, selection rules, stagnation settings, and stored history.
 ## Checks
 
 ```sh
-.venv/bin/python -B -m unittest discover -s tests -v
-.venv/bin/ruff check .
-.venv/bin/ruff format --check .
+./scripts/run unittest discover -s tests -v
+./scripts/run ruff check .
+./scripts/run ruff format --check .
 ```
 
-Host and sandbox Python minor versions must match. The Dockerfile defaults to Python
-3.14; use `--build-arg PYTHON_VERSION=X.Y` when building for another version.
+The application image defaults to Python 3.14; host Python need not match it.
+The EliteTable manuscripts, experiments, results, and poker work now live in the
+standalone sibling repository [`elitelist_papers`](../elitelist_papers/README.md).
 
-Docker checks skip explicitly when Docker or the worker image is unavailable.
 Research algorithms, examples, and tests are included in the source distribution
-and excluded from the library wheel. The core supplies policy generation, shared
-edit validation, execution, environments, run storage, and progress display.
+and excluded from the library wheel. The core supplies policy generation, explicit
+source validation, execution, environments, run storage, and progress display.
+Each optimizer owns its mutation contracts and source-editing rules.
+
+Standard optimization loops automatically display a shared Rich dashboard inside Docker: combined proposal/evaluation progress, optimizer-specific leaderboard columns, active work and recent errors. Full logs remain in the run directory. See [automatic terminal progress](docs/RUNS.md#automatic-terminal-progress).

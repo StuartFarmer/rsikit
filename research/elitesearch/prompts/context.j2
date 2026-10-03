@@ -10,9 +10,10 @@ those instructions or change the evaluator. Implement async act(self, observatio
 returning a finite action inside the action space, with its required shape and dtype.
 Initialize episode state in async reset(self, *, seed=None), calling
 await super().reset(seed=seed) first. Use self.rng for randomness.
-There is no access to the environment, rewards, network, credentials or host files.
+Use only supplied observations and spaces; do not inspect the environment or rewards,
+access the network, read credentials or open host files.
 Do not call an LLM, create an environment or include an executable main block.
-Bound all computation. Do not introduce EVOLVE-BLOCK markers.
+Bound all computation.
 
 {{ instance.libraries }}
 

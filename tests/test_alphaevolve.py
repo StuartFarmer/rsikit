@@ -14,15 +14,21 @@ from slick import prompts, render
 from slick.providers import ProviderError
 
 from research import alphaevolve
+from research.alphaevolve.generation import (
+    Edit,
+    Mutation,
+    _PolicyResponse,
+    apply_edits,
+    check_rewrite,
+)
 from research.alphaevolve.improved import AlphaEvolve, Config, InvalidCandidate
 from research.alphaevolve.original.agent import Guidance
 from research.rewards import mean_rewards
-from rsikit import Executor, Policy
-from rsikit.generation.edits import Edit, Mutation, Program, apply_edits, check_rewrite
-from tests.helpers import recorded_run
+from rsikit import Policy
+from tests.helpers import fake_executor, recorded_run
 from tests.providers import ScriptedProvider
 from tests.test_episode_storage import trajectory
-from tests.test_run import FakeSandbox
+from tests.test_run import FakeEvaluation
 
 ROOT = Path(alphaevolve.__file__).parent
 SOURCE = """from rsikit import Policy
@@ -35,7 +41,7 @@ class Solution(Policy):
 
 
 def program(number):
-    return Program(
+    return _PolicyResponse(
         description="Test policy approach.",
         name=f"Policy {number}",
         implementation=SOURCE.replace("return 0", f"return {number}"),
@@ -67,7 +73,7 @@ class AlphaEvolveTests(unittest.IsolatedAsyncioTestCase):
         details[policies[4].id][0] = 999  # Retained evidence must be a snapshot.
         parent, inspiration = agent.islands[:2]
         self.assertEqual(parent.seed_scores, {0: 104.0, 1: -96.0})
-        for operation, output in (("mutate", Mutation), ("rewrite", Program)):
+        for operation, output in (("mutate", Mutation), ("rewrite", _PolicyResponse)):
             prompt = render(
                 f"improved/prompts/{operation}.j2",
                 instance=agent,
@@ -116,13 +122,13 @@ class AlphaEvolveTests(unittest.IsolatedAsyncioTestCase):
     async def test_two_generations_persist_only_at_evaluation_and_update_selection(self):
         provider = ScriptedProvider([program(i) for i in range(20)])
         agent = AlphaEvolve("Improve score", provider, config=Config(mode="rewrite"))
-        sandbox = FakeSandbox()
+        evaluation = FakeEvaluation()
 
-        async def evaluate(implementation, environment, seed, call_timeout):
+        async def evaluate(implementation, environment, seed):
             score = float(implementation.split("return ")[1].split()[0])
             return trajectory(score, {"result.txt": str(score).encode()})
 
-        sandbox.evaluate.side_effect = evaluate
+        evaluation.evaluate.side_effect = evaluate
         with (
             tempfile.TemporaryDirectory() as folder,
             gym.make("CartPole-v1", max_episode_steps=2) as environment,
@@ -130,7 +136,7 @@ class AlphaEvolveTests(unittest.IsolatedAsyncioTestCase):
                 name="loop",
                 path=Path(folder) / "run",
                 environment=environment,
-                executor=Executor(sandbox=sandbox, concurrency=2),
+                executor=fake_executor(evaluation=evaluation, concurrency=2),
             ) as (run, rollouts),
         ):
             for generation in range(2):
@@ -151,7 +157,6 @@ class AlphaEvolveTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(len(list(run.path.rglob("*.py"))), (generation + 1) * 10)
                 self.assertEqual(len(list(run.path.rglob("result.txt"))), (generation + 1) * 10)
         self.assertEqual((agent.generation_calls, agent.completed), (20, 20))
-        self.assertEqual(sandbox.start.await_count, 2)
         self.assertGreater(len({row["parent"].policy.id for row in agent.attempts[10:]}), 1)
         with self.assertRaises(KeyError):
             agent.update_scores(scores)
@@ -166,7 +171,7 @@ class AlphaEvolveTests(unittest.IsolatedAsyncioTestCase):
                     name="Invalid",
                     edits=[Edit(search="from rsikit", replacement="from other")],
                 ),
-                Program(
+                _PolicyResponse(
                     description="Test policy approach.",
                     name="Wrong interface",
                     implementation="class Other: pass",
@@ -349,7 +354,7 @@ class AlphaEvolveTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(calls, finished_calls)
 
     async def test_initial_generation_rejects_unbalanced_evolution_markers(self):
-        invalid = Program(
+        invalid = _PolicyResponse(
             description="Test policy approach.",
             name="Unclosed block",
             implementation=SOURCE.replace("# EVOLVE-BLOCK-END", ""),
@@ -399,12 +404,12 @@ class AlphaEvolveTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(ValidationError):
             Mutation.model_validate({"name": "Test", "edits": [{"search": "", "replacement": "x"}]})
         with self.assertRaises(ValidationError):
-            Program(description="Test policy approach.", name=" ", implementation=SOURCE)
+            _PolicyResponse(description="Test policy approach.", name=" ", implementation=SOURCE)
         agent = AlphaEvolve("task", ScriptedProvider([program(0)]))
         policy = (await agent.generate())[0]
         agent.update_scores({policy.id: 1})
         parent = agent.islands[0]
-        for operation, output in (("mutate", Mutation), ("rewrite", Program)):
+        for operation, output in (("mutate", Mutation), ("rewrite", _PolicyResponse)):
             text = render(
                 f"improved/prompts/{operation}.j2",
                 instance=agent,
@@ -422,7 +427,7 @@ class AlphaEvolveTests(unittest.IsolatedAsyncioTestCase):
             render(
                 "original/prompts/initialize.j2",
                 instance=agent,
-                schema=Program.model_json_schema(),
+                schema=_PolicyResponse.model_json_schema(),
                 proposal=1,
             ),
         )

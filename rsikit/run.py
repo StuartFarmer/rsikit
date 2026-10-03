@@ -11,9 +11,9 @@ from uuid import uuid4
 from sqlalchemy import JSON, Column, inspect
 from sqlmodel import Field, Session, SQLModel, create_engine, select
 
-from .episode import Episode
+from .episode import Episode, decode_episode, encode_episode
 from .policy import Policy
-from .sandbox.codec import decode_episode, encode_episode
+from .progress import bind_run
 
 
 def _slug(name: str) -> str:
@@ -45,6 +45,7 @@ class Run:
         name: str,
         path: str | Path | None = None,
         export: bool = True,
+        console=None,
     ) -> "Run":
         settings = _Settings(name=name, export=export)
         stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
@@ -54,21 +55,25 @@ class Run:
             else Path("runs") / f"{_slug(name)}-{stamp}-{uuid4().hex[:8]}"
         )
         directory.mkdir(parents=True, exist_ok=False)
-        return cls(directory, settings)
+        return cls(directory, settings, console=console)
 
     @classmethod
-    def open(cls, path: str | Path) -> "Run":
+    def open(cls, path: str | Path, *, console=None) -> "Run":
         directory = Path(path)
         if not (directory / "run.sqlite").is_file():
             raise FileNotFoundError(directory / "run.sqlite")
-        return cls(directory)
+        return cls(directory, console=console)
 
     def __init__(
         self,
         path: Path,
         settings: _Settings | None = None,
+        *,
+        console=None,
     ):
         self.path = path.resolve()
+        self._console = console
+        self._progress_scope = None
         self._lock = (self.path / ".lock").open("a")
         self._engine = None
         try:
@@ -101,21 +106,34 @@ class Run:
         return self._settings.name
 
     def __enter__(self) -> "Run":
+        if self._lock.closed:
+            raise RuntimeError("Run is closed")
+        if self._progress_scope is None:
+            self._progress_scope = bind_run(self.path, self._console)
+            self._progress_scope.__enter__()
         return self
 
     def __exit__(self, *exc):
-        self.close()
+        try:
+            if self._progress_scope is not None:
+                scope, self._progress_scope = self._progress_scope, None
+                scope.__exit__(*exc)
+        finally:
+            self.close()
 
     async def __aenter__(self) -> "Run":
-        return self
+        return self.__enter__()
 
     async def __aexit__(self, *exc):
-        self.close()
+        self.__exit__(*exc)
 
     async def aclose(self) -> None:
         self.close()
 
     def close(self) -> None:
+        if self._progress_scope is not None:
+            scope, self._progress_scope = self._progress_scope, None
+            scope.__exit__(None, None, None)
         if self._engine is not None:
             self._engine.dispose()
         self._lock.close()

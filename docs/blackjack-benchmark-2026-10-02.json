@@ -1,0 +1,44 @@
+{
+  "python": "3.14.2",
+  "platform": "macOS-26.4-arm64-arm-64bit-Mach-O",
+  "gymnasium": "1.3.0",
+  "decks": 6,
+  "hands_per_repeat": 100000,
+  "results": [
+    {
+      "environment": "finite_shoe",
+      "median_hands_per_second": 116713.25556531764,
+      "samples": [
+        {
+          "hands_per_second": 117036.64392413995,
+          "seconds": 0.854433249682188,
+          "steps": 240242,
+          "resets": 96,
+          "profit": -4079.0
+        },
+        {
+          "hands_per_second": 116713.25556531764,
+          "seconds": 0.856800707988441,
+          "steps": 239530,
+          "resets": 96,
+          "profit": -4366.0
+        },
+        {
+          "hands_per_second": 116604.20007671665,
+          "seconds": 0.8576020412147045,
+          "steps": 239883,
+          "resets": 96,
+          "profit": -4678.5
+        }
+      ]
+    }
+  ],
+  "date": "2026-10-02",
+  "command": ".venv/bin/python -m examples.blackjack --hands 100000 --repeats 3",
+  "scope": "One local process, six decks, default 24 shoes per episode, simple always-bet baseline. Completed initial-wager rounds, not split hands. Includes decisions, observation creation, settlement and subsequent shuffles/resets; excludes initial construction/reset, imports, async evaluator validation/copying, process startup, storage, rendering and LLM generation.",
+  "source_sha256": {
+    "examples/blackjack.py": "9ad53335fcee9fe5e13828c3f06c3bccf3ee4aa10c923c95c844e8e2e96458a4",
+    "rsikit/envs/blackjack.py": "597988497c7caed6957d03ea9a9f6ffc6afb88784205186e78f83df6e7b8e980"
+  },
+  "median_decisions_per_second": 279713.6532700302
+}

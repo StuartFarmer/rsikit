@@ -9,7 +9,8 @@ It does not use LineageSearch's families, decomposition, culling or stagnation r
   ideas, 20 focused edits of one elite, and 20 remixes of up to three distinct elites.
 - Each generation uses a frozen snapshot of the prior leaderboard. Remixes receive
   all selected parents' source code, descriptions and measured scores; edits use
-  exact search/replacement operations. With only one elite, remix slots become edits;
+  exact search/replacement operations across the whole organism. Evolution-marker
+  comments have no special meaning. With only one elite, remix slots become edits;
   with no elites, every slot invents a new idea.
 - After evaluation and repair, rank the old elites and scored newcomers together
   by mean reward and keep the top 10. Equal scores favor current-generation edits, then remixes, then existing elites,
@@ -30,11 +31,11 @@ parent IDs and measured results remain in the run database.
 
 ## Run
 
-Use the existing OpenRouter setup and scientific Docker worker from the README.
+Use the existing OpenRouter setup and scientific application image from the README.
 This command makes paid model calls; no additional Docker rebuild is required:
 
 ```sh
-.venv/bin/python -B -m examples.elitesearch \
+./scripts/run examples.elitesearch \
   --env BipedalWalker-v3 \
   --elites 10 --population 50 --generations 20 \
   --new-fraction 0.2 --remix-fraction 0.4 --remix-parents 3 \

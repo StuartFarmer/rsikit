@@ -119,28 +119,21 @@ episode = await run_program(Path("solution.py"), "CartPole-v1", max_steps=100)
 print(episode.total_reward, episode.actions)
 ```
 
-`run_program` creates, resets, and closes its instances and returns an `Episode`.
-The source must export `Solution(Policy)`. It reads source as data and executes
-it in Docker; never import generated source on the host. Its environment remains
-on the host. One remote policy instance and asyncio event loop persist throughout
-the episode. For execution with both instances in Docker, use `Executor`; see
-[InProcessDockerSandbox](IN_PROCESS_SANDBOX.md).
+`run_program` creates an environment template, then runs reset, policy execution,
+steps and scoring in a fresh local child. The source must export `Solution(Policy)`.
+`env_seed`, `policy_seed`, `instructions`, and `max_steps` apply inside that child.
+The episode deadline defaults to 60 seconds and includes policy loading, reset,
+actions, cleanup and result preparation. Direct `Evaluator` calls have no deadline.
 
-Build the worker with:
+Run application modules through `scripts/run MODULE [ARGS...]` to isolate the whole
+application in Docker. Calling this Python API directly uses local processes.
+Generated code shares application credentials, network, outputs and scoring state.
+See [application execution](IN_PROCESS_SANDBOX.md).
 
-```sh
-docker build -t rsikit-sandbox:local -f rsikit/sandbox/Dockerfile .
-```
-
-The worker runs non-root, without network or host mounts, with a read-only
-filesystem and resource limits. `call_timeout` defaults to 10 seconds per policy
-call in `run_program`. This is research isolation, not a hostile multi-tenant
-service. Direct trusted policies have no hard execution deadline.
-
-The isolated policy protocol supports Box, Discrete, Dict, Tuple, and Text spaces
-with bounded numeric array and JSON payloads. Unsupported spaces fail before
-source execution; direct evaluation can use other Gymnasium spaces. This policy
-channel has no pickle transport or fallback to local execution.
+Caller-provided environment templates use cloudpickle to reach the child; its
+imports must be installed in the application image. Complete `Episode` objects
+return over a multiprocessing connection, with a 64 MiB result ceiling. Saved
+JSON serialization lives with `Episode` and retains the existing representation.
 
 ## Failures
 
@@ -151,8 +144,8 @@ and trusted-policy exceptions retain their types. Cancellation propagates.
 Failed execution returns no normal `Episode`.
 
 The caller must clean up after `Evaluator.run()`, including on failure. The
-sandbox helpers perform their own cleanup and log secondary cleanup
-failures without replacing the original exception. Sandbox failures raise
+execution helpers perform their own cleanup and log secondary cleanup
+failures without replacing the original exception. Child execution failures raise
 `PolicyError`, `PolicyTimeout`, or `InfrastructureError` from `rsikit.evaluation`.
 
 Termination does not imply success: rewards and task-specific info define that.

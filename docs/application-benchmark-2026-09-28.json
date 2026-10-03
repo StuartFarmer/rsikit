@@ -1,0 +1,697 @@
+{
+  "date": "2026-09-28",
+  "baseline": {
+    "backend": "DockerSandbox",
+    "host": "macOS-26.4-arm64-arm-64bit-Mach-O",
+    "python": "3.14.2",
+    "date": "2026-09-28T12:23:32.093521+00:00",
+    "source_sha256": {
+      "/Users/stuart/Developer/AI/rsikit/examples/benchmark_evaluator.py": "52f432848c46556d1493511b71b9621edef3374300c8709a0a730990f78919b2",
+      "rsikit/execution.py": "759d239060d3a9d15599aae24c199d65cb8da87bdf118460856f88d6e6f62ab5",
+      "rsikit/run.py": "06bac69324dba701ffd9f9fcc882209ff920190951829c02a354d2402ad74f0e",
+      "rsikit/sandbox/__init__.py": "ca447c241cf51d0ec4e2dca9497f2398d714a1245d2c28f674e3bd5631512a9e",
+      "rsikit/sandbox/check_libraries.py": "acdb17e1a59355ba03b8b5f03e98f9021672e07b434658b7e86c493704443764",
+      "rsikit/sandbox/codec.py": "21ddfe1b1da3623f09f36ed0fe7349897ced7678ec91e99796a9b614e26253ce",
+      "rsikit/sandbox/docker.py": "8919b7bfc1d18da7b73d907e6449c4deb758dacdc313323b2486c6464a8a8070",
+      "rsikit/sandbox/evaluate.py": "840407e584271a1df073dd0d7164bbfd1b2fcff631083288290156eeb9b11d11",
+      "rsikit/sandbox/service.py": "43c8b684992a18e1d89abb503285b8188d2f0adccd09a3a78bb048dd50b9f578",
+      "rsikit/sandbox/worker.py": "846c0235c0285b2e8e88c644a0966af63f45fc5ba8f37504c32efd9f456fd0c1"
+    },
+    "image": "sha256:32a371eb34f3a58bbe5919786066071bc816a22eb03da9696d413bf01958a6f4",
+    "scope": "Warm sandbox; instrumented env.step and policy.act wall time. Residual includes IPC, validation, startup of children, reset/close and artifacts, not just transport.",
+    "workloads": {
+      "packing": {
+        "medians": {
+          "seconds": 0.012511291075497866,
+          "environment_seconds": 1.5875004464760423e-05,
+          "policy_seconds": 2.6669877115637064e-06,
+          "steps": 1,
+          "score": 0.5,
+          "other_seconds": 0.012492749083321542
+        },
+        "samples": [
+          {
+            "seconds": 0.012596374843269587,
+            "environment_seconds": 1.5875004464760423e-05,
+            "policy_seconds": 2.6669877115637064e-06,
+            "steps": 1,
+            "score": 0.5
+          },
+          {
+            "seconds": 0.01185904210433364,
+            "environment_seconds": 1.420799526385963e-05,
+            "policy_seconds": 2.4579931050539017e-06,
+            "steps": 1,
+            "score": 0.5
+          },
+          {
+            "seconds": 0.012511291075497866,
+            "environment_seconds": 2.070798655040562e-05,
+            "policy_seconds": 3.416993422433734e-06,
+            "steps": 1,
+            "score": 0.5
+          }
+        ]
+      },
+      "cartpole": {
+        "medians": {
+          "seconds": 0.01980837481096387,
+          "environment_seconds": 0.0020776531018782407,
+          "policy_seconds": 0.0002706204541027546,
+          "steps": 500,
+          "score": 500.0,
+          "other_seconds": 0.017460101254982874
+        },
+        "samples": [
+          {
+            "seconds": 0.019197792280465364,
+            "environment_seconds": 0.0020776531018782407,
+            "policy_seconds": 0.0002706204541027546,
+            "steps": 500,
+            "score": 500.0
+          },
+          {
+            "seconds": 0.01980837481096387,
+            "environment_seconds": 0.0021444160665851086,
+            "policy_seconds": 0.0003077526926063001,
+            "steps": 500,
+            "score": 500.0
+          },
+          {
+            "seconds": 0.019860750064253807,
+            "environment_seconds": 0.0020537847885861993,
+            "policy_seconds": 0.0002613712567836046,
+            "steps": 500,
+            "score": 500.0
+          }
+        ]
+      },
+      "blackjack": {
+        "medians": {
+          "seconds": 0.07699825009331107,
+          "environment_seconds": 0.008560241491068155,
+          "policy_seconds": 0.000853543751873076,
+          "steps": 2485,
+          "score": -45.5,
+          "other_seconds": 0.06758446485036984
+        },
+        "samples": [
+          {
+            "seconds": 0.07972441567108035,
+            "environment_seconds": 0.008560241491068155,
+            "policy_seconds": 0.0008738100004848093,
+            "steps": 2485,
+            "score": -45.5
+          },
+          {
+            "seconds": 0.07464129198342562,
+            "environment_seconds": 0.008812086976831779,
+            "policy_seconds": 0.000853543751873076,
+            "steps": 2485,
+            "score": -45.5
+          },
+          {
+            "seconds": 0.07699825009331107,
+            "environment_seconds": 0.008519466820871457,
+            "policy_seconds": 0.0008296786982100457,
+            "steps": 2485,
+            "score": -45.5
+          }
+        ]
+      },
+      "bitcoin": {
+        "medians": {
+          "seconds": 0.1228678748011589,
+          "environment_seconds": 0.004387831315398216,
+          "policy_seconds": 0.0021181627234909683,
+          "steps": 2556,
+          "score": 96885.6687425382,
+          "other_seconds": 0.11636188076226972
+        },
+        "samples": [
+          {
+            "seconds": 0.11936966702342033,
+            "environment_seconds": 0.0042690814880188555,
+            "policy_seconds": 0.0019680199620779604,
+            "steps": 2556,
+            "score": 96885.6687425382
+          },
+          {
+            "seconds": 0.1228678748011589,
+            "environment_seconds": 0.006510448234621435,
+            "policy_seconds": 0.0021181627234909683,
+            "steps": 2556,
+            "score": 96885.6687425382
+          },
+          {
+            "seconds": 0.12715166620910168,
+            "environment_seconds": 0.004387831315398216,
+            "policy_seconds": 0.002168209961382672,
+            "steps": 2556,
+            "score": 96885.6687425382
+          }
+        ]
+      }
+    },
+    "synthetic_scheduling": {
+      "batch_barrier": {
+        "samples": [
+          {
+            "seconds": 0.38217491609975696,
+            "candidates_per_second": 31.39923499549538,
+            "mean_queue_seconds": 0.1483108679531142,
+            "worker_utilization": 0.7008542839805453,
+            "peak_workers": 4,
+            "arrival_rate": 182.1092795362069
+          },
+          {
+            "seconds": 0.3883972088806331,
+            "candidates_per_second": 30.896205548397706,
+            "mean_queue_seconds": 0.1523127585533075,
+            "worker_utilization": 0.6934871645580345,
+            "peak_workers": 4,
+            "arrival_rate": 179.90023667123486
+          },
+          {
+            "seconds": 0.37746741715818644,
+            "candidates_per_second": 31.79082340495398,
+            "mean_queue_seconds": 0.14650505202977607,
+            "worker_utilization": 0.710550513112608,
+            "peak_workers": 4,
+            "arrival_rate": 180.66006403946147
+          }
+        ],
+        "medians": {
+          "seconds": 0.38217491609975696,
+          "candidates_per_second": 31.39923499549538,
+          "mean_queue_seconds": 0.1483108679531142,
+          "worker_utilization": 0.7008542839805453,
+          "peak_workers": 4,
+          "arrival_rate": 180.66006403946147
+        }
+      },
+      "continuous": {
+        "samples": [
+          {
+            "seconds": 0.2982512917369604,
+            "candidates_per_second": 40.234528172918274,
+            "mean_queue_seconds": 0.07864311292845134,
+            "worker_utilization": 0.8952866358184405,
+            "peak_workers": 4,
+            "arrival_rate": 184.09939249816287
+          },
+          {
+            "seconds": 0.2976449588313699,
+            "candidates_per_second": 40.31648997891671,
+            "mean_queue_seconds": 0.0784885225390705,
+            "worker_utilization": 0.8999766444967254,
+            "peak_workers": 4,
+            "arrival_rate": 181.67266737459752
+          },
+          {
+            "seconds": 0.2943997918628156,
+            "candidates_per_second": 40.760898382671954,
+            "mean_queue_seconds": 0.07835776535406087,
+            "worker_utilization": 0.908835068553702,
+            "peak_workers": 4,
+            "arrival_rate": 181.4325727638867
+          }
+        ],
+        "medians": {
+          "seconds": 0.2976449588313699,
+          "candidates_per_second": 40.31648997891671,
+          "mean_queue_seconds": 0.0784885225390705,
+          "worker_utilization": 0.8999766444967254,
+          "peak_workers": 4,
+          "arrival_rate": 181.67266737459752
+        }
+      }
+    }
+  },
+  "application": {
+    "backend": "local episode processes",
+    "host": "Linux-6.10.14-linuxkit-aarch64-with-glibc2.41",
+    "python": "3.14.7",
+    "date": "2026-09-28T12:40:38.131620+00:00",
+    "source_sha256": {
+      "/app/examples/benchmark_evaluator.py": "609f57b43d105ae980855fa1fd531be62638b1c6dfad0354a6be2804c29c8d8d",
+      "rsikit/execution.py": "d45047954cdb8a920d26f9dc8ce8df88fed2972c704c2672f6d1131cb7a40e06",
+      "rsikit/run.py": "f59c87d7af7527f8a36530c53332e31446a3929597f40f493768777a68241cc3",
+      "Dockerfile": "62ad5b418ac322c022156d9d92fd02b9033d428df237d7c0f842e6741896dc86"
+    },
+    "image": "sha256:82e9b724c4b2b0e43434ebe1f487f93f3efd67dc477f7c9dfd023044818e5758",
+    "scope": "First episode includes clean forkserver startup; subsequent episodes use fresh children. Residual includes startup, reset/close, validation and artifacts.",
+    "workloads": {
+      "packing": {
+        "first_seconds": 0.5510389999835752,
+        "medians": {
+          "seconds": 0.03831116700894199,
+          "startup_seconds": 0.03592062499956228,
+          "environment_seconds": 1.2042000889778137e-05,
+          "policy_seconds": 1.0499992640689015e-05,
+          "steps": 1,
+          "score": 0.5,
+          "other_seconds": 0.038288625015411526
+        },
+        "samples": [
+          {
+            "seconds": 0.03857341699767858,
+            "startup_seconds": 0.036119416996371,
+            "environment_seconds": 1.3124983524903655e-05,
+            "policy_seconds": 1.0749994544312358e-05,
+            "steps": 1,
+            "score": 0.5
+          },
+          {
+            "seconds": 0.03760662500280887,
+            "startup_seconds": 0.03549295800621621,
+            "environment_seconds": 1.4457997167482972e-05,
+            "policy_seconds": 9.292009053751826e-06,
+            "steps": 1,
+            "score": 0.5
+          },
+          {
+            "seconds": 0.03831116700894199,
+            "startup_seconds": 0.03592062499956228,
+            "environment_seconds": 1.2042000889778137e-05,
+            "policy_seconds": 1.0499992640689015e-05,
+            "steps": 1,
+            "score": 0.5
+          },
+          {
+            "seconds": 0.03777412499766797,
+            "startup_seconds": 0.03537295901332982,
+            "environment_seconds": 1.3125012628734112e-05,
+            "policy_seconds": 1.0832998668774962e-05,
+            "steps": 1,
+            "score": 0.5
+          },
+          {
+            "seconds": 0.03863762499531731,
+            "startup_seconds": 0.03660166700137779,
+            "environment_seconds": 1.0624993592500687e-05,
+            "policy_seconds": 9.457988198846579e-06,
+            "steps": 1,
+            "score": 0.5
+          },
+          {
+            "seconds": 0.03850466600852087,
+            "startup_seconds": 0.03634362498996779,
+            "environment_seconds": 1.1458992958068848e-05,
+            "policy_seconds": 1.0167015716433525e-05,
+            "steps": 1,
+            "score": 0.5
+          },
+          {
+            "seconds": 0.037834374990779907,
+            "startup_seconds": 0.03548474999843165,
+            "environment_seconds": 1.1916010407730937e-05,
+            "policy_seconds": 1.3209006283432245e-05,
+            "steps": 1,
+            "score": 0.5
+          }
+        ]
+      },
+      "cartpole": {
+        "first_seconds": 0.04971545800799504,
+        "medians": {
+          "seconds": 0.048940249980660155,
+          "startup_seconds": 0.03759237501071766,
+          "environment_seconds": 0.002147590188542381,
+          "policy_seconds": 0.0005730400152970105,
+          "steps": 500,
+          "score": 500.0,
+          "other_seconds": 0.046219619776820764
+        },
+        "samples": [
+          {
+            "seconds": 0.049439251015428454,
+            "startup_seconds": 0.03894020899315365,
+            "environment_seconds": 0.002098708937410265,
+            "policy_seconds": 0.0004840819165110588,
+            "steps": 500,
+            "score": 500.0
+          },
+          {
+            "seconds": 0.047581166989402846,
+            "startup_seconds": 0.03692983399378136,
+            "environment_seconds": 0.0020921530667692423,
+            "policy_seconds": 0.0005730400152970105,
+            "steps": 500,
+            "score": 500.0
+          },
+          {
+            "seconds": 0.05044979101512581,
+            "startup_seconds": 0.03916783301974647,
+            "environment_seconds": 0.0021860011911485344,
+            "policy_seconds": 0.0005839672812726349,
+            "steps": 500,
+            "score": 500.0
+          },
+          {
+            "seconds": 0.048940249980660155,
+            "startup_seconds": 0.03744120799819939,
+            "environment_seconds": 0.002164051868021488,
+            "policy_seconds": 0.0005960847192909569,
+            "steps": 500,
+            "score": 500.0
+          },
+          {
+            "seconds": 0.04786529199918732,
+            "startup_seconds": 0.03754024999216199,
+            "environment_seconds": 0.0021080848819110543,
+            "policy_seconds": 0.0005320757336448878,
+            "steps": 500,
+            "score": 500.0
+          },
+          {
+            "seconds": 0.049671457993099466,
+            "startup_seconds": 0.038212207990000024,
+            "environment_seconds": 0.002163330966141075,
+            "policy_seconds": 0.0006080427556298673,
+            "steps": 500,
+            "score": 500.0
+          },
+          {
+            "seconds": 0.04833749998942949,
+            "startup_seconds": 0.03759237501071766,
+            "environment_seconds": 0.002147590188542381,
+            "policy_seconds": 0.0005349081184249371,
+            "steps": 500,
+            "score": 500.0
+          }
+        ]
+      },
+      "blackjack": {
+        "first_seconds": 0.07892537498264574,
+        "medians": {
+          "seconds": 0.07995449998998083,
+          "startup_seconds": 0.0376624170166906,
+          "environment_seconds": 0.008986018772702664,
+          "policy_seconds": 0.0010001291520893574,
+          "steps": 2485,
+          "score": -45.5,
+          "other_seconds": 0.06996835206518881
+        },
+        "samples": [
+          {
+            "seconds": 0.07995449998998083,
+            "startup_seconds": 0.0376624170166906,
+            "environment_seconds": 0.008986018772702664,
+            "policy_seconds": 0.0009834805387072265,
+            "steps": 2485,
+            "score": -45.5
+          },
+          {
+            "seconds": 0.08078887502779253,
+            "startup_seconds": 0.03819775002193637,
+            "environment_seconds": 0.008907184965210035,
+            "policy_seconds": 0.000965258979704231,
+            "steps": 2485,
+            "score": -45.5
+          },
+          {
+            "seconds": 0.07955745799699798,
+            "startup_seconds": 0.03733579200343229,
+            "environment_seconds": 0.009133825136814266,
+            "policy_seconds": 0.0010308691416867077,
+            "steps": 2485,
+            "score": -45.5
+          },
+          {
+            "seconds": 0.07898712600581348,
+            "startup_seconds": 0.03709445902495645,
+            "environment_seconds": 0.008941162581322715,
+            "policy_seconds": 0.0010244491859339178,
+            "steps": 2485,
+            "score": -45.5
+          },
+          {
+            "seconds": 0.0834781669836957,
+            "startup_seconds": 0.04013308399589732,
+            "environment_seconds": 0.009451147692743689,
+            "policy_seconds": 0.0010841760376933962,
+            "steps": 2485,
+            "score": -45.5
+          },
+          {
+            "seconds": 0.08106154200504534,
+            "startup_seconds": 0.03791024998645298,
+            "environment_seconds": 0.009148143843049183,
+            "policy_seconds": 0.000999028648948297,
+            "steps": 2485,
+            "score": -45.5
+          },
+          {
+            "seconds": 0.07731937497737817,
+            "startup_seconds": 0.036069875000976026,
+            "environment_seconds": 0.008971725212177262,
+            "policy_seconds": 0.0010001291520893574,
+            "steps": 2485,
+            "score": -45.5
+          }
+        ]
+      },
+      "bitcoin": {
+        "first_seconds": 0.1023002500005532,
+        "medians": {
+          "seconds": 0.1016045410069637,
+          "startup_seconds": 0.03552354098064825,
+          "environment_seconds": 0.004620265564881265,
+          "policy_seconds": 0.001743305620038882,
+          "steps": 2556,
+          "score": 96885.6687425382,
+          "other_seconds": 0.09524096982204355
+        },
+        "samples": [
+          {
+            "seconds": 0.0974994589923881,
+            "startup_seconds": 0.03461437500664033,
+            "environment_seconds": 0.004620265564881265,
+            "policy_seconds": 0.0017155723180621862,
+            "steps": 2556,
+            "score": 96885.6687425382
+          },
+          {
+            "seconds": 0.09872183299739845,
+            "startup_seconds": 0.03552354098064825,
+            "environment_seconds": 0.004581767920171842,
+            "policy_seconds": 0.001741670595947653,
+            "steps": 2556,
+            "score": 96885.6687425382
+          },
+          {
+            "seconds": 0.11608074998366646,
+            "startup_seconds": 0.03460291598457843,
+            "environment_seconds": 0.004576052830088884,
+            "policy_seconds": 0.001743305620038882,
+            "steps": 2556,
+            "score": 96885.6687425382
+          },
+          {
+            "seconds": 0.10301441699266434,
+            "startup_seconds": 0.03737237601308152,
+            "environment_seconds": 0.004806078184628859,
+            "policy_seconds": 0.0019138255738653243,
+            "steps": 2556,
+            "score": 96885.6687425382
+          },
+          {
+            "seconds": 0.10200141699169762,
+            "startup_seconds": 0.0365053339919541,
+            "environment_seconds": 0.004740260075777769,
+            "policy_seconds": 0.0018022942240349948,
+            "steps": 2556,
+            "score": 96885.6687425382
+          },
+          {
+            "seconds": 0.09718120802426711,
+            "startup_seconds": 0.03467904101125896,
+            "environment_seconds": 0.004616600024746731,
+            "policy_seconds": 0.001716372004011646,
+            "steps": 2556,
+            "score": 96885.6687425382
+          },
+          {
+            "seconds": 0.1016045410069637,
+            "startup_seconds": 0.03746083300211467,
+            "environment_seconds": 0.004655890545109287,
+            "policy_seconds": 0.001758093072567135,
+            "steps": 2556,
+            "score": 96885.6687425382
+          }
+        ]
+      }
+    },
+    "synthetic_scheduling": {
+      "batch_barrier": {
+        "samples": [
+          {
+            "seconds": 0.3848689170263242,
+            "candidates_per_second": 31.179446999039484,
+            "mean_queue_seconds": 0.14250078987727952,
+            "worker_utilization": 0.7189041865505291,
+            "peak_workers": 4,
+            "arrival_rate": 157.45345207220356
+          },
+          {
+            "seconds": 0.39467370801139623,
+            "candidates_per_second": 30.404862944793624,
+            "mean_queue_seconds": 0.1469730277931376,
+            "worker_utilization": 0.7017362130528942,
+            "peak_workers": 4,
+            "arrival_rate": 152.53881725270875
+          },
+          {
+            "seconds": 0.3901066670077853,
+            "candidates_per_second": 30.760817527275222,
+            "mean_queue_seconds": 0.14724492887035012,
+            "worker_utilization": 0.7079173874240892,
+            "peak_workers": 4,
+            "arrival_rate": 154.79013984461454
+          },
+          {
+            "seconds": 0.390085833001649,
+            "candidates_per_second": 30.762460424829815,
+            "mean_queue_seconds": 0.15004761283368376,
+            "worker_utilization": 0.7102781338338885,
+            "peak_workers": 4,
+            "arrival_rate": 162.68589560184515
+          },
+          {
+            "seconds": 0.3818735839740839,
+            "candidates_per_second": 31.424011776667925,
+            "mean_queue_seconds": 0.14065212512772027,
+            "worker_utilization": 0.7168356112468603,
+            "peak_workers": 4,
+            "arrival_rate": 150.68527621246642
+          },
+          {
+            "seconds": 0.3849811250111088,
+            "candidates_per_second": 31.170359325158433,
+            "mean_queue_seconds": 0.14154978807831262,
+            "worker_utilization": 0.7135666677252311,
+            "peak_workers": 4,
+            "arrival_rate": 144.66229156201933
+          },
+          {
+            "seconds": 0.3916831669921521,
+            "candidates_per_second": 30.637007181471333,
+            "mean_queue_seconds": 0.14692682296057077,
+            "worker_utilization": 0.7032281655673309,
+            "peak_workers": 4,
+            "arrival_rate": 152.6561298924824
+          }
+        ],
+        "medians": {
+          "seconds": 0.390085833001649,
+          "candidates_per_second": 30.762460424829815,
+          "mean_queue_seconds": 0.14692682296057077,
+          "worker_utilization": 0.7102781338338885,
+          "peak_workers": 4,
+          "arrival_rate": 152.6561298924824
+        }
+      },
+      "continuous": {
+        "samples": [
+          {
+            "seconds": 0.3048924159957096,
+            "candidates_per_second": 39.35814526842433,
+            "mean_queue_seconds": 0.07727488204182009,
+            "worker_utilization": 0.9012433757876692,
+            "peak_workers": 4,
+            "arrival_rate": 154.73343646242287
+          },
+          {
+            "seconds": 0.306256999989273,
+            "candidates_per_second": 39.18277786440902,
+            "mean_queue_seconds": 0.07656561812230696,
+            "worker_utilization": 0.8949076740465598,
+            "peak_workers": 4,
+            "arrival_rate": 156.3792972110432
+          },
+          {
+            "seconds": 0.30433354200795293,
+            "candidates_per_second": 39.43042203243707,
+            "mean_queue_seconds": 0.07552862492229906,
+            "worker_utilization": 0.8953615544048604,
+            "peak_workers": 4,
+            "arrival_rate": 157.1004961698825
+          },
+          {
+            "seconds": 0.3093864590045996,
+            "candidates_per_second": 38.78644216882678,
+            "mean_queue_seconds": 0.07436456087937889,
+            "worker_utilization": 0.879819770975705,
+            "peak_workers": 4,
+            "arrival_rate": 146.51909071879678
+          },
+          {
+            "seconds": 0.30316037498414516,
+            "candidates_per_second": 39.58300949003504,
+            "mean_queue_seconds": 0.07725174645869022,
+            "worker_utilization": 0.9000796691460908,
+            "peak_workers": 4,
+            "arrival_rate": 161.82241456734516
+          },
+          {
+            "seconds": 0.3062651249929331,
+            "candidates_per_second": 39.1817383721927,
+            "mean_queue_seconds": 0.07807988383380386,
+            "worker_utilization": 0.8919640801280231,
+            "peak_workers": 4,
+            "arrival_rate": 161.50898487977702
+          },
+          {
+            "seconds": 0.3063318339991383,
+            "candidates_per_second": 39.17320587723754,
+            "mean_queue_seconds": 0.07833495666272938,
+            "worker_utilization": 0.8926797631533,
+            "peak_workers": 4,
+            "arrival_rate": 159.85003160162253
+          }
+        ],
+        "medians": {
+          "seconds": 0.306256999989273,
+          "candidates_per_second": 39.18277786440902,
+          "mean_queue_seconds": 0.07725174645869022,
+          "worker_utilization": 0.8949076740465598,
+          "peak_workers": 4,
+          "arrival_rate": 157.1004961698825
+        }
+      }
+    }
+  },
+  "method": "Same fixed sources and seed 1, before: 3 measured episodes, after: 7. Discard first episode for warm medians. Different controller locations (macOS host versus Linux application container); descriptive local measurements, not a throughput guarantee.",
+  "verification": {
+    "standard_tests": 210,
+    "paper_runner_tests": 12,
+    "poker_tests": 30,
+    "image_contains_secrets_or_prior_outputs": false,
+    "scripted_create_and_resume": true,
+    "foreground_interrupt_removed_container": true
+  },
+  "notes": [
+    "Generated code shares application credentials, network, outputs and scores, as approved.",
+    "Ordinary descendants are reaped per episode; deliberately detached descendants are only guaranteed removed at container exit.",
+    "Full Ruff retains five pre-existing import-order findings; changed Python files pass.",
+    "Deferred minor: poker oversized-frame text says 64 MiB while its actual private limit is 8 MiB."
+  ],
+  "launcher": {
+    "source_rebuild_seconds": 34.54774604225531,
+    "cached_build_seconds": [
+      2.1160125830210745,
+      2.113673791754991,
+      1.9462972907349467
+    ],
+    "container_start_and_import_seconds": [
+      1.0159311667084694,
+      0.8648594580590725,
+      0.7985220840200782
+    ],
+    "cached_launcher_fixed_policy_seconds": 3.5161264170892537,
+    "pty_launcher_sigint_exit": 130,
+    "ctrl_c_sent": true,
+    "notes": "Source rebuild reused existing base/scientific dependency layers; not a clean download benchmark. A later metadata session expired; pulling the Python base restored verification. Timings exclude that failed session."
+  }
+}

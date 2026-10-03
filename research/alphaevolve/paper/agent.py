@@ -9,9 +9,9 @@ from statistics import fmean, pstdev
 from slick import parse, render
 
 from rsikit.episode import Episode
-from rsikit.generation.edits import Mutation, Program, check_program
-from rsikit.policy import Policy
+from rsikit.policy import Policy, validate_policy
 
+from ..generation import Mutation, _PolicyResponse, apply_edits, evolution_regions
 from ..improved.agent import AlphaEvolve as Baseline
 from ..original.agent import Config as BaselineConfig
 from ..original.agent import Guidance, PromptIdea
@@ -78,7 +78,9 @@ class AlphaEvolve(Baseline):
             self.prompt_ideas = [PromptIdea(**idea) for idea in state["prompt_ideas"]]
             version, internal, gaussian = state["rng"]
             self.rng.setstate((version, tuple(internal), gaussian))
+        self._completed_offset = self.completed
         self._sync()
+        self._log_leaderboard()
         self.checkpoint()
 
     def _sync(self):
@@ -118,13 +120,15 @@ class AlphaEvolve(Baseline):
 
     def register_initial(self, policy, result: EvaluationResult, *, island=None):
         """Seed the archive with a caller-evaluated program (all islands by default)."""
-        check_program(policy._implementation)
+        evolution_regions(policy._implementation)
+        validate_policy(policy)
         if not result.accepted:
             raise ValueError("Initial program must pass evaluation")
         candidate = self._candidate(policy, result)
         for target in range(self.config.islands) if island is None else (island,):
             self.database.register(candidate, target)
         self._sync()
+        self._log_leaderboard()
         self.checkpoint()
 
     def _candidate(self, policy, result):
@@ -141,6 +145,7 @@ class AlphaEvolve(Baseline):
         """Keep rejected evaluations in history but out of the breeding population."""
         for record in self._pending.pop(policy.id, []):
             record.update(status="discarded", error=reason)
+            self._log_candidate(record)
 
     def update_results(self, results):
         # Validate the batch before consuming pending proposals.
@@ -177,6 +182,7 @@ class AlphaEvolve(Baseline):
                     scale = max(1.0, abs(parent.score))
                     idea.reward += max(0.0, canonical.score / scale - parent.score / scale)
                 record.update(status="evaluated", score=candidate.score)
+                self._log_candidate(record)
                 self.completed += 1
                 interval = self.config.migration_interval
                 if interval and self.completed % interval == 0:
@@ -188,6 +194,7 @@ class AlphaEvolve(Baseline):
                     )
             self._pending.pop(policy_id)
         self._sync()
+        self._log_leaderboard()
         self.checkpoint()
 
     def update(self, results: Iterable[tuple[type[Policy], Episode]]) -> None:
@@ -231,7 +238,7 @@ class AlphaEvolve(Baseline):
 
     async def mutate(
         self, parent, inspirations, guidance, failures, *, provider, record=None
-    ) -> Mutation:
+    ) -> type[Policy]:
         schema = Mutation.model_json_schema()
         context = render(
             "paper/prompts/mutate.j2",
@@ -246,12 +253,17 @@ class AlphaEvolve(Baseline):
         raw, _ = await provider.acall(context)
         if record is not None:
             record["raw"] = raw
-        return parse(raw, Mutation)
+        mutation = parse(raw, Mutation)
+        return Policy.from_text(
+            apply_edits(parent.policy._implementation, mutation.edits),
+            name=mutation.name,
+            description=mutation.description,
+        )
 
     async def rewrite(
         self, parent, inspirations, guidance, failures, *, provider, record=None
-    ) -> Program:
-        schema = Program.model_json_schema()
+    ) -> type[Policy]:
+        schema = _PolicyResponse.model_json_schema()
         context = render(
             "paper/prompts/rewrite.j2",
             instance=self,
@@ -265,7 +277,7 @@ class AlphaEvolve(Baseline):
         raw, _ = await provider.acall(context)
         if record is not None:
             record["raw"] = raw
-        return parse(raw, Program)
+        return parse(raw, _PolicyResponse).to_policy()
 
     async def evolve_prompt(self, parent, ideas, failures, *, provider, record=None) -> str:
         schema = Guidance.model_json_schema()

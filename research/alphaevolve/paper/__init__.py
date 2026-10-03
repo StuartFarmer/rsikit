@@ -1,7 +1,6 @@
 """Independent implementation of the published AlphaEvolve mechanisms."""
 
-from rsikit.generation.edits import InvalidCandidate
-
+from ..generation import InvalidCandidate
 from .agent import AlphaEvolve, Config
 from .database import Candidate, Database
 from .evaluation import EvaluationResult, EvaluationStage, evaluate_cascade

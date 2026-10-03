@@ -4,7 +4,9 @@ from slick import parse, render
 from slick.providers import Provider
 
 from rsikit.generation import WORKER_LIBRARIES
-from rsikit.generation.edits import Program
+from rsikit.policy import Policy
+
+from ..generation import _PolicyResponse
 
 
 class SelfHealer:
@@ -15,9 +17,9 @@ class SelfHealer:
 
     async def repair(
         self, reference: str, failed: str, diagnostic: str, *, provider=None, record=None
-    ) -> Program:
-        """Repair a full policy from validation or sandbox diagnostics."""
-        schema = Program.model_json_schema()
+    ) -> type[Policy]:
+        """Repair a full policy from validation or execution diagnostics."""
+        schema = _PolicyResponse.model_json_schema()
         context = render(
             "original/prompts/repair.j2",
             instance=self,
@@ -29,4 +31,4 @@ class SelfHealer:
         raw, _ = await (self.provider if provider is None else provider).acall(context)
         if record is not None:
             record["raw"] = raw
-        return parse(raw, Program)
+        return parse(raw, _PolicyResponse).to_policy()

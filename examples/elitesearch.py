@@ -11,17 +11,6 @@ import sys
 from contextlib import AsyncExitStack, suppress
 from pathlib import Path
 
-from rich.console import Console
-from rich.progress import (
-    BarColumn,
-    MofNCompleteColumn,
-    Progress,
-    SpinnerColumn,
-    TextColumn,
-    TimeElapsedColumn,
-)
-from rich.table import Table
-from rich.text import Text
 from slick import prompts
 from slick.providers import OpenRouterAPI
 
@@ -31,8 +20,6 @@ from research.rewards import measure_rewards as measure
 from research.rollouts import Rollouts
 from rsikit import Executor, Run
 from rsikit.envs.tasks import TASKS, make_environment
-from rsikit.progress import ProgressHandler
-from rsikit.sandbox.docker import DockerSandbox
 
 
 async def generation_videos(queue, path, top, workers):
@@ -73,16 +60,8 @@ async def generation_videos(queue, path, top, workers):
         )
 
 
-async def run_search(
-    agent, run, rollouts, *, seeds, heldout_seeds, console=None, video_top=0, video_workers=2
-):
-    console = console or Console()
-    loggers = [
-        logging.getLogger("research.elitesearch"),
-        logging.getLogger("rsikit"),
-        logging.getLogger("research.rewards"),
-    ]
-    settings = [(item.level, item.propagate) for item in loggers]
+async def run_search(agent, run, rollouts, *, seeds, heldout_seeds, video_top=0, video_workers=2):
+    logger = logging.getLogger("research.elitesearch")
     previous = agent.on_checkpoint
     reported = 0
     video_queue = asyncio.Queue()
@@ -91,119 +70,63 @@ async def run_search(
         if video_top
         else None
     )
-    with Progress(
-        SpinnerColumn(),
-        TextColumn("{task.description}"),
-        BarColumn(),
-        MofNCompleteColumn(),
-        TimeElapsedColumn(),
-        console=console,
-    ) as progress:
-        generations = progress.add_task("Generations", total=agent.config.generations)
-        population = progress.add_task(
-            "Population evaluated/discarded", total=agent.config.population_size
-        )
-        elites = progress.add_task("Elite slots filled", total=agent.config.elite_size)
-        display = ProgressHandler(progress, overlap=True)
-        log = logging.FileHandler(run.path / "run.log", encoding="utf-8")
-        log.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(name)s: %(message)s"))
-        for item in loggers:
-            item.addHandler(display)
-            item.addHandler(log)
-            item.setLevel(logging.INFO)
-            item.propagate = False
 
-        def checkpoint(current):
-            nonlocal reported
-            if video_task is not None and video_task.done():
-                video_task.result()
-            run.save(*current.records())
-            if previous is not None:
-                previous(current)
-            if current.generations:
-                generation = current.generations[-1]
-                progress.update(
-                    population,
-                    description=f"Generation {generation.number} population evaluated/discarded",
-                    completed=sum(
-                        row.generation == generation.number
-                        and row.status in ("evaluated", "discarded")
-                        for row in current.organisms
-                    ),
+    def checkpoint(current):
+        nonlocal reported
+        if video_task is not None and video_task.done():
+            video_task.result()
+        run.save(*current.records())
+        if previous is not None:
+            previous(current)
+        if current.generations:
+            generation = current.generations[-1]
+            completed = sum((g.status == "completed" for g in current.generations))
+            if completed > reported:
+                reported = completed
+                (run.path / "leaderboard.json").write_text(
+                    json.dumps(
+                        [
+                            row.model_dump(exclude={"implementation", "calls", "revisions"})
+                            for row in current.elites
+                        ],
+                        indent=2,
+                    )
+                    + "\n"
                 )
-                completed = sum(g.status == "completed" for g in current.generations)
-                progress.update(generations, completed=completed)
-                progress.update(elites, completed=len(current.elites))
-                if completed > reported:
-                    table = Table(
-                        "Rank",
-                        "Elite",
-                        "Score",
-                        "Origin",
-                        "Parents",
-                        title=f"Elite leaderboard — generation {generation.number}",
-                    )
-                    for rank, row in enumerate(current.elites, 1):
-                        table.add_row(
-                            str(rank),
-                            Text(row.name),
-                            f"{row.score:.6g}",
-                            row.kind,
-                            ", ".join(map(str, row.parent_ids)) or "—",
-                        )
-                    console.print(table)
-                    reported = completed
-                    (run.path / "leaderboard.json").write_text(
-                        json.dumps(
-                            [
-                                row.model_dump(exclude={"implementation", "calls", "revisions"})
-                                for row in current.elites
-                            ],
-                            indent=2,
-                        )
-                        + "\n"
-                    )
-                    if video_task is not None:
-                        video_queue.put_nowait(generation.number)
-                        loggers[0].info("Queued leader videos for generation %s", generation.number)
+                if video_task is not None:
+                    video_queue.put_nowait(generation.number)
+                    logger.info("Queued leader videos for generation %s", generation.number)
 
-        agent.on_checkpoint = checkpoint
-        summary = {}
-        try:
-            loggers[0].info("Run: %s", run.path)
-            await agent.run()
-            if agent.best is not None:
-                agent.best.to_file(run.path / "best.py")
-                loggers[0].info("Evaluating best elite on held-out seeds")
-                result = (await measure(rollouts, [agent.best], heldout_seeds))[agent.best.id]
-                summary["heldout"] = dict(scores=result.scores, failure=result.failure)
-            if video_task is not None:
-                video_queue.put_nowait(None)
-                loggers[0].info("Waiting for queued generation videos to finish")
-                await video_task
-                summary["videos"] = str(run.path / "videos/index.html")
-        finally:
-            if video_task is not None:
-                if not video_task.done():
-                    video_task.cancel()
-                await asyncio.gather(video_task, return_exceptions=True)
-            summary.update(
-                reason=agent.reason,
-                generations=sum(g.status == "completed" for g in agent.generations),
-                organisms=len(agent.organisms),
-                elite_ids=[row.id for row in agent.elites],
-                best_id=None if agent.best is None else agent.best.id,
-            )
-            (run.path / "summary.json").write_text(json.dumps(summary, indent=2) + "\n")
-            agent.on_checkpoint = previous
-            for item, (level, propagate) in zip(loggers, settings):
-                item.removeHandler(display)
-                item.removeHandler(log)
-                item.setLevel(level)
-                item.propagate = propagate
-            display.close()
-            log.close()
-        return summary
+    agent.on_checkpoint = checkpoint
+    summary = {}
+    try:
+        logger.info("Run: %s", run.path)
+        await agent.run()
+        if agent.best is not None:
+            agent.best.to_file(run.path / "best.py")
+            logger.info("Evaluating best elite on held-out seeds")
+            result = (await measure(rollouts, [agent.best], heldout_seeds))[agent.best.id]
+            summary["heldout"] = dict(scores=result.scores, failure=result.failure)
+        if video_task is not None:
+            video_queue.put_nowait(None)
+            logger.info("Waiting for queued generation videos to finish")
+            await video_task
+            summary["videos"] = str(run.path / "videos/index.html")
+    finally:
+        if video_task is not None:
+            if not video_task.done():
+                video_task.cancel()
+            await asyncio.gather(video_task, return_exceptions=True)
+        summary.update(
+            reason=agent.reason,
+            generations=sum((g.status == "completed" for g in agent.generations)),
+            organisms=len(agent.organisms),
+            elite_ids=[row.id for row in agent.elites],
+            best_id=None if agent.best is None else agent.best.id,
+        )
+        (run.path / "summary.json").write_text(json.dumps(summary, indent=2) + "\n")
+        agent.on_checkpoint = previous
+    return summary
 
 
 async def main(argv=None):
@@ -229,7 +152,7 @@ async def main(argv=None):
         default=120.0,
         help="Seconds per model call, including policy generation and repairs",
     )
-    parser.add_argument("--concurrency", type=int, default=8, help="Docker episode workers")
+    parser.add_argument("--concurrency", type=int, default=8, help="Concurrent episode processes")
     parser.add_argument(
         "--episode-timeout", type=float, default=60.0, help="Wall-clock seconds per seed"
     )
@@ -295,7 +218,7 @@ async def main(argv=None):
         executor = await stack.enter_async_context(
             Executor(
                 concurrency=args.concurrency,
-                sandbox=DockerSandbox(episode_timeout=args.episode_timeout),
+                episode_timeout=args.episode_timeout,
             )
         )
         run = await stack.enter_async_context(

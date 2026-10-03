@@ -15,22 +15,23 @@ from decimal import Decimal
 from typing import Literal
 
 from pydantic import BaseModel, Field, StrictBool, ValidationError
+from rich.table import Column
 from slick import parse, render
 from slick.providers import Provider, ProviderError
 from sqlmodel import SQLModel
 
 from rsikit import Policy
 from rsikit.generation import WORKER_LIBRARIES
-from rsikit.generation.edits import (
+from rsikit.policy import InvalidPolicy, validate_policy
+
+from .generation import (
     InvalidCandidate,
     Mutation,
-    Program,
+    _PolicyResponse,
     apply_edits,
-    check_program,
     check_rewrite,
     evolution_regions,
 )
-
 from .healing import SelfHealer
 from .records import Evaluation, Generation
 
@@ -127,41 +128,112 @@ class ShinkaEvolve:
             self.novelty_calls
         ) = 0
 
+    leaderboard_columns = {
+        "island": Column("Island"),
+        "model": Column("Model"),
+        "patch": Column("Patch"),
+        "parents": Column("Parents"),
+    }
+
+    def _log_candidate(self, row, *, status=None):
+        policy = self._policies.get(row.policy_id)
+        state = status or {"repaired": "generated", "failed": "repairing", "error": "failed"}.get(
+            row.status, row.status
+        )
+        logger.info(
+            "%s: %s — %s",
+            policy.name if policy else f"Attempt {row.attempt}",
+            state,
+            policy.description if policy else "",
+            extra={
+                "progress": dict(
+                    kind="candidate",
+                    batch_id=str(row.generation),
+                    attempt_id=str(row.attempt),
+                    revision=row.revision,
+                    status=state,
+                    proposal_done=policy is not None,
+                    policy_id=row.policy_id or "—",
+                    name=policy.name if policy else "",
+                    description=policy.description if policy else "",
+                    score=row.score,
+                    error=row.error,
+                )
+            },
+        )
+
+    def evaluation_started(self, policies):
+        for policy in policies:
+            for row in self._pending.get(policy.id, ()):
+                self._log_candidate(row, status="evaluating")
+
+    def _log_leaderboard(self):
+        rows = []
+        for candidate in sorted(self._archive.values(), key=lambda item: -item.score):
+            row = next(
+                item for item in reversed(self.evaluations) if item.policy_id == candidate.policy.id
+            )
+            rows.append(
+                dict(
+                    id=candidate.policy.id,
+                    name=candidate.policy.name,
+                    description=candidate.policy.description,
+                    score=candidate.score,
+                    generation=row.generation,
+                    extras=dict(
+                        island=row.island,
+                        model=row.model,
+                        patch=row.patch,
+                        parents=", ".join(p[:6] for p in row.parents) or "—",
+                    ),
+                )
+            )
+        logger.info(
+            "ShinkaEvolve leaderboard: %s entries",
+            len(rows),
+            extra={"progress": dict(kind="leaderboard", rows=rows)},
+        )
+
     @property
     def best(self) -> type[Policy] | None:
         return None if self._best is None else self._best.policy
 
-    async def initialize(self, proposal: int, *, provider, record=None) -> Program:
-        schema = Program.model_json_schema()
+    async def initialize(self, proposal: int, *, provider, record=None) -> type[Policy]:
+        schema = _PolicyResponse.model_json_schema()
         context = render("initialize.j2", instance=self, schema=schema, proposal=proposal)
         raw, _ = await provider.acall(context)
         if record is not None:
             record["raw"] = raw
-        return parse(raw, Program)
+        return parse(raw, _PolicyResponse).to_policy()
 
-    async def diff(self, data: dict, *, provider, record=None) -> Mutation:
+    async def diff(self, data: dict, *, provider, record=None) -> type[Policy]:
         schema = Mutation.model_json_schema()
         context = render("diff.j2", instance=self, schema=schema, data=data)
         raw, _ = await provider.acall(context)
         if record is not None:
             record["raw"] = raw
-        return parse(raw, Mutation)
+        mutation = parse(raw, Mutation)
+        return Policy.from_text(
+            apply_edits(data["parents"][0]["implementation"], mutation.edits),
+            name=mutation.name,
+            description=mutation.description,
+        )
 
-    async def rewrite(self, data: dict, *, provider, record=None) -> Program:
-        schema = Program.model_json_schema()
+    async def rewrite(self, data: dict, *, provider, record=None) -> type[Policy]:
+        schema = _PolicyResponse.model_json_schema()
         context = render("full.j2", instance=self, schema=schema, data=data)
         raw, _ = await provider.acall(context)
         if record is not None:
             record["raw"] = raw
-        return parse(raw, Program)
+        return parse(raw, _PolicyResponse).to_policy()
 
-    async def crossover(self, data: dict, *, provider, record=None) -> Program:
-        schema = Program.model_json_schema()
+    async def crossover(self, data: dict, *, provider, record=None) -> type[Policy]:
+        schema = _PolicyResponse.model_json_schema()
         context = render("cross.j2", instance=self, schema=schema, data=data)
         raw, _ = await provider.acall(context)
         if record is not None:
             record["raw"] = raw
-        return parse(raw, Program)
+        return parse(raw, _PolicyResponse).to_policy()
 
     async def judge(
         self, implementation: str, nearest: dict, similarity: float, *, provider, record=None
@@ -279,6 +351,20 @@ class ShinkaEvolve:
         self._batch_start, self._event_start = len(self.evaluations), len(self.events)
         self.generations.append(Generation(number=len(self.generations) + 1))
         logger.info(
+            "Generation %s",
+            len(self.generations),
+            extra={
+                "progress": dict(
+                    kind="batch_started",
+                    batch_id=str(len(self.generations)),
+                    label=f"Generation {len(self.generations)}",
+                    total_candidates=n,
+                    optimizer="ShinkaEvolve",
+                    columns=self.leaderboard_columns,
+                )
+            },
+        )
+        logger.info(
             "Generating %s policies (concurrency=%s)",
             n,
             concurrency,
@@ -320,6 +406,7 @@ class ShinkaEvolve:
             parents=[p.policy.id for p in parents],
         )
         self.evaluations.append(row)
+        self._log_candidate(row)
         reference = parents[0].policy._implementation if parents else ""
         failures = []
         try:
@@ -357,18 +444,13 @@ class ShinkaEvolve:
                             attempt=row.attempt,
                             call=call,
                         )
-                        content = (
-                            apply_edits(reference, proposal.edits)
-                            if patch == "diff"
-                            else proposal.implementation
-                        )
-                        if reference and patch != "diff":
+                        content = proposal._implementation
+                        if reference:
                             check_rewrite(reference, content)
-                        check_program(content)
-                        policy = Policy.from_text(
-                            content, name=proposal.name, description=proposal.description
-                        )
-                    except InvalidCandidate as exc:
+                        evolution_regions(content)
+                        validate_policy(proposal)
+                        policy = proposal
+                    except InvalidPolicy as exc:
                         failed = content or call.get("raw", "")
                         policy = await self._repair_valid(row, reference, failed, str(exc))
                     await self.check_novelty(policy._implementation, self.islands[island], row)
@@ -386,8 +468,9 @@ class ShinkaEvolve:
                         policy.description,
                         extra={"event": "policy_generated", "policy_id": policy.id},
                     )
+                    self._log_candidate(row)
                     return row
-                except InvalidCandidate as exc:
+                except InvalidPolicy as exc:
                     row.error = str(exc)
                     failures.append(dict(implementation=content, error=str(exc)))
                     logger.warning("Rejected proposal for attempt %s: %s", row.attempt, exc)
@@ -398,6 +481,7 @@ class ShinkaEvolve:
                 row.error,
                 extra={"event": "proposal_discarded"},
             )
+            self._log_candidate(row)
             return row
         except asyncio.CancelledError:
             row.status = "cancelled"
@@ -429,16 +513,15 @@ class ShinkaEvolve:
                     attempt=row.attempt,
                     call=call,
                 )
-                content = proposal.implementation
+                content = proposal._implementation
                 if content == failed:
                     raise InvalidCandidate("Repair returned the unchanged implementation")
                 if reference:
                     check_rewrite(reference, content)
-                check_program(content)
-                return Policy.from_text(
-                    content, name=proposal.name, description=proposal.description
-                )
-            except InvalidCandidate as exc:
+                evolution_regions(content)
+                validate_policy(proposal)
+                return proposal
+            except InvalidPolicy as exc:
                 failed = call.get("raw", failed)
                 diagnostic = str(exc)
         raise InvalidCandidate(f"Repair exhausted after {row.repairs} repairs: {diagnostic}")
@@ -447,6 +530,7 @@ class ShinkaEvolve:
         for policy_id, diagnostic in failures.items():
             for row in self._pending[policy_id]:
                 row.status, row.error = "failed", diagnostic
+                self._log_candidate(row)
 
     async def repair(self, policy: type[Policy], diagnostic: str) -> type[Policy] | None:
         self.evaluation_failed({policy.id: diagnostic})
@@ -462,7 +546,7 @@ class ShinkaEvolve:
                 row, reference, policy._implementation, diagnostic
             )
             await self.check_novelty(replacement._implementation, self.islands[row.island], row)
-        except InvalidCandidate as exc:
+        except InvalidPolicy as exc:
             for item in self._pending.pop(policy.id):
                 item.status, item.error = "discarded", str(exc)
                 self._finish(item)
@@ -485,6 +569,8 @@ class ShinkaEvolve:
         self._pending.setdefault(replacement.id, []).extend(replacements)
         self.evaluations.extend(replacements)
         self._policies[replacement.id] = replacement
+        for row in replacements:
+            self._log_candidate(row)
         logger.info("Repaired %s → %s — %s", policy.name, replacement.name, replacement.description)
         return replacement
 
@@ -500,6 +586,7 @@ class ShinkaEvolve:
                 self._finish(row, score)
 
     def _finish(self, row: Evaluation, score: float | None = None) -> None:
+        self._log_candidate(row)
         if row.attempt in self._counted:
             return
         gain = Decimal(0)
@@ -531,6 +618,8 @@ class ShinkaEvolve:
             and self.completed % self.config.migration_interval == 0
         ):
             self.migrate()
+
+        self._log_leaderboard()
 
     def prune(self, island) -> None:
         if len(island) > self.config.archive_size:
@@ -640,7 +729,7 @@ class ShinkaEvolve:
                 self.reflect, evidence, self.scratchpad, provider=self.meta_provider
             )
             event["recommendations"] = self.scratchpad
-        except (InvalidCandidate, ProviderError, TimeoutError) as exc:
+        except (InvalidPolicy, ProviderError, TimeoutError) as exc:
             event["error"] = str(exc)
             logger.warning("Keeping previous search guidance: %s", exc)
 

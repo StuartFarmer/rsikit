@@ -3,120 +3,19 @@
 import argparse
 import asyncio
 import json
-import logging
 import os
 from contextlib import AsyncExitStack
 from pathlib import Path
 
-from rich.console import Console
-from rich.progress import (
-    BarColumn,
-    MofNCompleteColumn,
-    Progress,
-    SpinnerColumn,
-    TextColumn,
-    TimeElapsedColumn,
-)
 from slick import prompts
 from slick.providers import OpenRouterAPI
 
 from research import shinkaevolve
-from research.rewards import mean_rewards
 from research.rollouts import Rollouts
 from research.shinkaevolve import Config, ShinkaEvolve
+from research.shinkaevolve.search import run_search as run_search
 from rsikit import Executor, Run
 from rsikit.envs.tasks import TASKS, make_environment
-from rsikit.evaluation import PolicyError
-from rsikit.progress import ProgressHandler, show_scores
-
-
-async def run_search(
-    generator,
-    run,
-    rollouts,
-    *,
-    generations,
-    batch_size,
-    generation_concurrency=4,
-    seeds=(0,),
-    console=None,
-):
-    seeds = tuple(seeds)
-    console = console or Console()
-    logger = logging.getLogger("research.shinkaevolve")
-    loggers = (logger, logging.getLogger("rsikit"), logging.getLogger("research.rewards"))
-    old_settings = [(item.level, item.propagate) for item in loggers]
-    with Progress(
-        SpinnerColumn(),
-        TextColumn("{task.description}"),
-        BarColumn(),
-        MofNCompleteColumn(),
-        TimeElapsedColumn(),
-        console=console,
-    ) as progress:
-        overall = progress.add_task("Generations", total=generations)
-        display = ProgressHandler(progress)
-        log = logging.FileHandler(run.path / "run.log", encoding="utf-8")
-        log.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(name)s: %(message)s"))
-        for item in loggers:
-            item.addHandler(display)
-            item.addHandler(log)
-            item.setLevel(logging.INFO)
-            item.propagate = False
-        try:
-            logger.info("Run: %s", run.path)
-            logger.info("Optimizer: %s", type(generator).__module__)
-            for generation in range(generations):
-                logger.info("Generation %s/%s", generation + 1, generations)
-                complete = False
-                try:
-                    policies = await generator.generate(
-                        n=batch_size, concurrency=generation_concurrency
-                    )
-                    scores = {}
-                    while policies:
-                        run.save(*generator.records(seeds=seeds))
-                        try:
-                            scores = await mean_rewards(rollouts, policies, seeds=seeds)
-                            break
-                        except PolicyError as exc:
-                            if not exc.failures:
-                                raise
-                            generator.evaluation_failed(exc.failures)
-                            run.save(*generator.records(seeds=seeds))
-                            replacements = {}
-                            for policy in policies:
-                                if policy.id in exc.failures and policy.id not in replacements:
-                                    replacements[policy.id] = await generator.repair(
-                                        policy, exc.failures[policy.id]
-                                    )
-                            policies = [
-                                replacement
-                                for policy in policies
-                                if (replacement := replacements.get(policy.id, policy)) is not None
-                            ]
-                    generator.update(scores)
-                    complete = True
-                finally:
-                    run.save(*generator.records(seeds=seeds, complete=complete))
-                show_scores(policies, run, console)
-                if not policies:
-                    logger.warning("No surviving policies in this generation; continuing")
-                if generator.best is not None:
-                    logger.info("Best so far: %s", generator.best.name)
-                progress.advance(overall)
-        except Exception:
-            logger.exception("Run failed; saved results and details are in %s", run.path)
-            show_scores(run.policies(), run, console)
-            raise
-        finally:
-            for item, (level, propagate) in zip(loggers, old_settings):
-                item.removeHandler(display)
-                item.removeHandler(log)
-                item.setLevel(level)
-                item.propagate = propagate
-            display.close()
-            log.close()
 
 
 async def main():

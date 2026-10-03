@@ -44,12 +44,12 @@ there is no exact-text voting on policies or claim of MAKER's error guarantee.
 
 ## Run
 
-Install the repository's `openrouter` extra, build the existing Docker worker,
+Install the repository's `openrouter` extra, build the existing application image,
 and set `OPENROUTER_API_KEY` as described in the README. This command makes paid
 model calls and executes generated policies in Docker:
 
 ```sh
-.venv/bin/python -B -m examples.lineagesearch \
+./scripts/run examples.lineagesearch \
   --env CartPole-v1 --families 10 --initial 10 --batch-size 10 \
   --patience 3 --max-attempts 500 --seeds 0 1 2 3 4
 ```
@@ -153,15 +153,15 @@ the allowance discards the policy and lets the search continue. Provider or work
 infrastructure failures still propagate. Held-out evaluation never repairs a policy,
 since that would feed test information back into search.
 
-Dependency availability is determined by execution in the sandbox, not an import
+Dependency availability is determined by execution in the application, not an import
 allowlist. Missing-module errors feed into the same bounded policy repair loop,
 which evaluates the replacement and preserves the original failure in history.
 The standard image includes NumPy, SciPy, python-control, CVXPY with
 OSQP/Clarabel/SCS, scikit-learn and CPU-only PyTorch. Shared prompt guidance
 describes useful APIs and CPU/episode constraints during decomposition,
 implementation and repair. Slycot-dependent synthesis is not advertised.
-Rebuild `rsikit-sandbox:local` after updating these dependencies; the build tests
-numerical operations and saves installed versions in `/opt/worker/libraries.json`.
+The launcher rebuilds `rsikit:local` after dependency changes; the build tests
+numerical operations and reports installed versions during the image build.
 
 Repair calls do not consume new proposal slots or reset family patience. Their
 separate counts and failed versions are saved in each trial's `repairs` and

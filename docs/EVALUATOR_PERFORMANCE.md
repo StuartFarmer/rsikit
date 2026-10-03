@@ -1,5 +1,9 @@
 # Evaluation throughput — 2026-09-24
 
+> Historical benchmark: the separate policy/evaluator and legacy host-environment
+> paths described here have been removed. See [the current sandbox](IN_PROCESS_SANDBOX.md).
+
+
 This report describes the API and scalar-result protocol at measurement time.
 Current execution returns full Episodes; use the [current run API](RUNS.md).
 The current benchmark requires both images to support the Episode protocol;

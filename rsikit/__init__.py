@@ -2,19 +2,15 @@
 
 from .episode import Episode
 from .evaluation import Evaluator
-from .execution import Executor
+from .execution import Executor, run_program
 from .generation import generate
 from .optimization import Optimizer
 from .policy import Policy
 from .run import Run
-from .sandbox import run_program
-from .sandbox.docker import DockerSandbox, InProcessDockerSandbox
 
 __all__ = [
-    "DockerSandbox",
     "Episode",
     "Evaluator",
-    "InProcessDockerSandbox",
     "Executor",
     "Optimizer",
     "Policy",

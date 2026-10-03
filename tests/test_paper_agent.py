@@ -10,9 +10,9 @@ from slick import prompts, render
 
 from research import alphaevolve
 from research.alphaevolve import paper
+from research.alphaevolve.generation import Mutation
 from research.alphaevolve.original.agent import Guidance
 from rsikit.evaluation import PolicyError
-from rsikit.generation.edits import Mutation
 from rsikit.policy import Policy
 from tests.providers import ScriptedProvider
 from tests.test_alphaevolve import program

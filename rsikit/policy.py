@@ -1,9 +1,11 @@
 """The executable policy contract; training is not part of this lifecycle."""
 
+import ast
 import hashlib
 import json
 import tempfile
 from abc import ABC, abstractmethod
+from inspect import Parameter, Signature
 from pathlib import Path
 from typing import Generic, TypeVar
 
@@ -26,11 +28,9 @@ class Policy(ABC, Generic[Observation, Action]):
         Serialized metadata supplies the name/description unless overridden.
         Raw Python defaults to name='Solution' and an empty description.
         The ID hashes the name and exact source; description edits do not change it.
-        Execution creates a fresh instance from the returned definition in its sandbox.
+        Loading does not validate source; optimizers use validate_policy explicitly.
+        Execution creates a fresh instance from the returned definition in a fresh evaluation process.
         """
-        # Generation imports Policy, so load its validator only when called.
-        from .generation.edits import check_program
-
         metadata = {}
         prefix = "# rsikit-policy: "
         if text.startswith(prefix):
@@ -50,7 +50,6 @@ class Policy(ABC, Generic[Observation, Action]):
             raise ValueError("The policy needs a nonempty name")
         if not isinstance(description, str):
             raise ValueError("The policy description must be text")
-        check_program(text)
         return type(
             "Solution",
             (cls,),
@@ -115,3 +114,85 @@ class Policy(ABC, Generic[Observation, Action]):
 
     async def close(self) -> None:
         """Release policy resources."""
+
+
+class InvalidPolicy(ValueError):
+    """Policy source failed validation."""
+
+
+def validate_policy(policy: type[Policy]) -> None:
+    """Check policy source syntax and construction without importing or executing it.
+
+    Optimizers call this after generation, before accepting a candidate. Runtime
+    behavior is still checked by the executor; mutation rules belong to optimizers.
+    """
+    source = policy._implementation
+    try:
+        tree = ast.parse(source)
+    except (SyntaxError, ValueError) as exc:
+        raise InvalidPolicy(f"Invalid Python: {exc}") from exc
+    solutions = [
+        node for node in tree.body if isinstance(node, ast.ClassDef) and node.name == "Solution"
+    ]
+    if len(solutions) != 1:
+        raise InvalidPolicy("Policy source must define exactly one top-level Solution class")
+    for method in reversed(solutions[0].body):
+        if (
+            not isinstance(method, (ast.FunctionDef, ast.AsyncFunctionDef))
+            or method.name != "__init__"
+        ):
+            continue
+        if isinstance(method, ast.AsyncFunctionDef):
+            raise InvalidPolicy(
+                "Solution.__init__ must be synchronous; initialize state in async reset"
+            )
+        args = method.args
+        positional = [*args.posonlyargs, *args.args]
+        required = len(positional) - len(args.defaults)
+        parameters = [
+            Parameter(
+                arg.arg,
+                Parameter.POSITIONAL_ONLY
+                if i < len(args.posonlyargs)
+                else Parameter.POSITIONAL_OR_KEYWORD,
+                default=Parameter.empty if i < required else None,
+            )
+            for i, arg in enumerate(positional)
+        ]
+        if args.vararg is not None:
+            parameters.append(Parameter(args.vararg.arg, Parameter.VAR_POSITIONAL))
+        parameters.extend(
+            Parameter(
+                arg.arg,
+                Parameter.KEYWORD_ONLY,
+                default=Parameter.empty if default is None else None,
+            )
+            for arg, default in zip(args.kwonlyargs, args.kw_defaults)
+        )
+        if args.kwarg is not None:
+            parameters.append(Parameter(args.kwarg.arg, Parameter.VAR_KEYWORD))
+        try:
+            # Bind the worker's actual call without evaluating any generated code or defaults.
+            Signature(parameters).bind(None, None, None, instructions="")
+        except (TypeError, ValueError) as exc:
+            raise InvalidPolicy(
+                "Solution.__init__ must accept (self, observation_space, action_space, *, "
+                "instructions=''). Prefer removing __init__ and initializing state in "
+                f"async reset after await super().reset(seed=seed). Signature mismatch: {exc}"
+            ) from exc
+        break  # Python uses the last definition of a method in the class body.
+
+
+MAX_SOURCE = 65_536
+
+
+def load_policy(source, observation_space, action_space, instructions):
+    """Load a Solution instance in an evaluation process."""
+    if len(source.encode()) > MAX_SOURCE:
+        raise ValueError("Source exceeds 64 KiB")
+    namespace = {"__name__": "candidate"}
+    exec(compile(source, "candidate.py", "exec"), namespace)
+    solution = namespace["Solution"]
+    if not isinstance(solution, type) or not issubclass(solution, Policy):
+        raise TypeError("Solution must subclass rsikit.Policy")
+    return solution(observation_space, action_space, instructions=instructions)

@@ -18,6 +18,7 @@ from statistics import fmean, stdev
 from typing import Annotated
 
 from pydantic import BaseModel, Field, StrictInt, StringConstraints, ValidationError
+from rich.table import Column
 from slick import parse, render
 from slick.providers import Provider
 from sqlmodel import SQLModel
@@ -25,8 +26,9 @@ from sqlmodel import SQLModel
 from research.rewards import Measurement
 from rsikit import Policy
 from rsikit.generation import WORKER_LIBRARIES
-from rsikit.generation.edits import InvalidCandidate, Program, check_program, check_rewrite
+from rsikit.policy import InvalidPolicy, validate_policy
 
+from .generation import InvalidCandidate, _PolicyResponse, check_rewrite, evolution_regions
 from .healing import SelfHealer
 from .records import Family, Study, Trial
 
@@ -126,6 +128,72 @@ class LineageSearch:
     def records(self) -> list[SQLModel]:
         return [self.study, *self.families, *self.trials]
 
+    leaderboard_columns = {
+        "family": Column("Family"),
+        "operation": Column("Operation"),
+        "parent": Column("Parent"),
+    }
+
+    def _log_candidate(self, row, *, terminal=False):
+        status = {
+            "planning": "planned",
+            "rejected": "repairing",
+            "execution_failed": "repairing",
+        }.get(row.status, row.status)
+        if terminal and status != "evaluated":
+            status = "discarded"
+        logger.info(
+            "%s: %s — %s",
+            row.name or f"Attempt {row.id}",
+            status,
+            row.description,
+            extra={
+                "progress": dict(
+                    kind="candidate",
+                    batch_id=str(row.batch),
+                    attempt_id=str(row.id),
+                    revision=row.repairs,
+                    status=status,
+                    proposal_done=bool(row.policy_id),
+                    policy_id=row.policy_id or "—",
+                    name=row.name,
+                    description=row.description,
+                    score=row.score,
+                    error=row.error,
+                )
+            },
+        )
+
+    def _log_leaderboard(self):
+        rows = sorted(
+            (self.trials[f.best_id - 1] for f in self.families if f.best_id is not None),
+            key=lambda row: (-row.score, row.id),
+        )
+        logger.info(
+            "Family leaderboard: %s entries",
+            len(rows),
+            extra={
+                "progress": dict(
+                    kind="leaderboard",
+                    rows=[
+                        dict(
+                            id=row.policy_id or str(row.id),
+                            name=row.name,
+                            description=row.description,
+                            score=row.score,
+                            generation=row.batch,
+                            extras=dict(
+                                family=self.families[row.family_id - 1].name,
+                                operation=row.kind,
+                                parent=row.parent_id,
+                            ),
+                        )
+                        for row in rows
+                    ],
+                )
+            },
+        )
+
     def _checkpoint(self):
         # ponytail: full in-memory history snapshots; use incremental writes for very long runs.
         if self.on_checkpoint is not None:
@@ -186,13 +254,13 @@ class LineageSearch:
             raise InvalidCandidate("Vote must identify one of the numbered proposals")
         return generated.candidate - 1
 
-    async def implement(self, data: dict, approach: dict, *, provider, record=None) -> Program:
-        schema = Program.model_json_schema()
+    async def implement(self, data: dict, approach: dict, *, provider, record=None) -> type[Policy]:
+        schema = _PolicyResponse.model_json_schema()
         context = render("implement.j2", instance=self, schema=schema, data=data, approach=approach)
         raw, _ = await provider.acall(context)
         if record is not None:
             record["raw"] = raw
-        return parse(raw, Program)
+        return parse(raw, _PolicyResponse).to_policy()
 
     @staticmethod
     def _check_approaches(generated, count):
@@ -278,7 +346,7 @@ class LineageSearch:
                     slots[index] = await self._call(
                         operation, *args, family_id=family_id, repair=repair, record=record
                     )
-                except InvalidCandidate as exc:
+                except InvalidPolicy as exc:
                     errors.append(str(exc))
                     # Keep full history in study.calls, not in every future prompt.
                     feedback[:] = [dict(error=str(exc), raw=record.get("raw", ""))]
@@ -327,7 +395,7 @@ class LineageSearch:
             async def vote():
                 try:
                     return await self._call(self.elect, decision, data, family_id=family_id)
-                except InvalidCandidate as exc:
+                except InvalidPolicy as exc:
                     logger.warning("%s: flagged discriminator vote: %s", label, exc)
                     return None
 
@@ -376,7 +444,7 @@ class LineageSearch:
                 count=self.config.families,
                 retries=self.config.discovery_attempts - 1,
             )
-        except InvalidCandidate as exc:
+        except InvalidPolicy as exc:
             self.study.reason = "generation_exhausted"
             self.study.error = str(exc)
             return
@@ -400,7 +468,7 @@ class LineageSearch:
                 approaches = await self._plan_approaches(
                     family, self.found, self._evidence(family, None), self.config.initial_per_family
                 )
-            except InvalidCandidate as exc:
+            except InvalidPolicy as exc:
                 family.status = "generation_exhausted"
                 logger.warning("%s: initial decomposition exhausted: %s", family.name, exc)
             else:
@@ -434,22 +502,23 @@ class LineageSearch:
             return self.rng.choice(ranked)
         return self.rng.choices(ranked, weights=range(len(ranked), 0, -1))[0]
 
-    def _accept_program(self, row, program, parent):
+    def _accept_policy(self, row, policy, parent):
         row.policy_id = None
         self._policies.pop(row.id, None)
-        row.name, row.description = program.name, program.description
-        row.implementation = program.implementation
-        check_program(row.implementation)
+        row.name, row.description = policy.name, policy.description
+        row.implementation = policy._implementation
+        evolution_regions(row.implementation)
+        validate_policy(policy)
         if parent is not None:
             check_rewrite(parent.implementation, row.implementation)
         key = ast.dump(ast.parse(row.implementation), include_attributes=False)
         if key in self._sources:
             raise InvalidCandidate("Duplicate program AST across lineages")
         self._sources.add(key)
-        policy = Policy.from_text(row.implementation, name=row.name, description=row.description)
         self._policies[row.id] = policy
         row.policy_id, row.status, row.error = policy.id, "generated", None
         row.score, row.seed_scores, row.feedback = None, {}, ""
+        self._log_candidate(row)
         logger.info(
             "Generated %s — %s",
             policy.name,
@@ -472,6 +541,7 @@ class LineageSearch:
             diagnostic = row.model_dump(exclude={"revisions"})
             row.repairs += 1
             row.status = "repairing"
+            self._log_candidate(row)
             self._checkpoint()
             logger.warning(
                 "Repairing attempt %s (%s/%s): %s",
@@ -481,7 +551,7 @@ class LineageSearch:
                 row.error,
             )
             try:
-                program = await self._call(
+                policy = await self._call(
                     self.healer.repair,
                     data,
                     diagnostic,
@@ -490,9 +560,9 @@ class LineageSearch:
                     trial_id=row.id,
                     repair=row.repairs,
                 )
-                self._accept_program(row, program, parent)
+                self._accept_policy(row, policy, parent)
                 return
-            except InvalidCandidate as exc:
+            except InvalidPolicy as exc:
                 row.status, row.error = "rejected", str(exc)
 
     async def _generate(self, rows, data, parent):
@@ -507,15 +577,16 @@ class LineageSearch:
             async with slots:
                 if row.status != "execution_failed":
                     row.status = "generating"
+                    self._log_candidate(row)
                     try:
                         approach = row.model_dump(
                             include={"hypothesis", "mechanism", "change", "test"}
                         )
-                        program = await self._call(
+                        policy = await self._call(
                             self.implement, data, approach, family_id=row.family_id, trial_id=row.id
                         )
-                        self._accept_program(row, program, parent)
-                    except InvalidCandidate as exc:
+                        self._accept_policy(row, policy, parent)
+                    except InvalidPolicy as exc:
                         row.status, row.error = "rejected", str(exc)
                 if row.error is not None:
                     await self._repair(row, data, parent)
@@ -551,6 +622,7 @@ class LineageSearch:
         async with self._evaluation_lock:
             for row in generated:
                 row.status = "evaluating"
+                self._log_candidate(row)
             self._checkpoint()
             results = await self.evaluate([self._policies[row.id] for row in generated])
         if set(results) != {row.policy_id for row in generated}:
@@ -576,6 +648,7 @@ class LineageSearch:
             else:
                 row.seed_scores = {str(seed): score for seed, score in result.scores.items()}
                 row.score, row.status = fmean(result.scores.values()), "evaluated"
+            self._log_candidate(row)
 
     def _improves(self, child, parent, minimum=0.0):
         differences = [
@@ -680,7 +753,21 @@ class LineageSearch:
             for i in range(count)
         ]
         data = self._evidence(family, parent)
+        logger.info(
+            "Starting batch %s",
+            rows[0].batch,
+            extra={
+                "progress": dict(
+                    kind="batch_started",
+                    batch_id=str(rows[0].batch),
+                    label=f"Batch {rows[0].batch}",
+                    total_candidates=count,
+                )
+            },
+        )
         self.trials.extend(rows)
+        for row in rows:
+            self._log_candidate(row)
         self.study.attempts += count
         logger.info("%s: %s batch %s (%s attempts)", family.name, kind, self.study.batches, count)
         self._checkpoint()
@@ -690,7 +777,7 @@ class LineageSearch:
                 if initial_approaches is not None
                 else await self._plan_approaches(family, operation, data, count)
             )
-        except InvalidCandidate as exc:
+        except InvalidPolicy as exc:
             approaches = []
             for row in rows:
                 row.status = "rejected"
@@ -702,7 +789,19 @@ class LineageSearch:
             await self._generate(rows, data, parent)
             self._checkpoint()
             await self._measure(rows, data, parent)
+        for row in rows:
+            self._log_candidate(row, terminal=True)
         self._update(family, rows, count == wanted)
+        self._log_leaderboard()
+        logger.info(
+            "Finished batch %s",
+            rows[0].batch,
+            extra={
+                "progress": dict(
+                    kind="batch_finished", batch_id=str(rows[0].batch), status="completed"
+                )
+            },
+        )
         self._checkpoint()
 
     def _sample_family(self):
@@ -722,6 +821,18 @@ class LineageSearch:
     async def run(self) -> Study:
         """Elect the complete initial tree, then expand by measured fitness until stopped."""
         self.study.reason = "running"
+        logger.info(
+            "Starting LineageSearch",
+            extra={
+                "progress": dict(
+                    kind="search_started",
+                    optimizer="LineageSearch",
+                    total_candidates=self.config.max_attempts,
+                    columns=self.leaderboard_columns,
+                    resumed=False,
+                )
+            },
+        )
         try:
             if self.config.max_attempts > 0:
                 await self._discover()
@@ -761,3 +872,20 @@ class LineageSearch:
             raise
         finally:
             self._checkpoint()
+            logger.info(
+                "Search %s",
+                self.study.reason,
+                extra={
+                    "progress": dict(
+                        kind="search_finished",
+                        status="failed"
+                        if self.study.reason == "error"
+                        else "cancelled"
+                        if self.study.reason == "cancelled"
+                        else "completed"
+                        if self.study.attempts >= self.config.max_attempts
+                        else "stopped",
+                        reason=self.study.reason,
+                    )
+                },
+            )

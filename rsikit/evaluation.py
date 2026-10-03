@@ -1,5 +1,9 @@
 """Evaluate a policy in a Gymnasium environment and collect its episode."""
 
+import logging
+import sys
+from collections.abc import Callable
+from contextlib import contextmanager
 from copy import deepcopy
 from typing import Any
 
@@ -26,6 +30,17 @@ class PolicyTimeout(PolicyError):
     """An isolated policy exceeded its execution deadline."""
 
 
+@contextmanager
+def _policy_boundary(convert):
+    """Normalize generated-code calls; direct Evaluator callers keep native errors."""
+    try:
+        yield
+    except BaseException as exc:
+        if not convert or isinstance(exc, PolicyError):
+            raise
+        raise PolicyError(f"{type(exc).__name__}: {str(exc)[:2000]}") from exc
+
+
 class Evaluator:
     """Collect one episode from existing, already-reset environment and policy.
 
@@ -33,7 +48,14 @@ class Evaluator:
     This class neither isolates code nor prevents reuse of stateful instances.
     """
 
-    def __init__(self, environment: gym.Env, policy: Policy, *, max_steps: int | None = None):
+    def __init__(
+        self,
+        environment: gym.Env,
+        policy: Policy,
+        *,
+        max_steps: int | None = None,
+        _policy_errors: bool = False,
+    ):
         if max_steps is not None and (
             isinstance(max_steps, bool) or not isinstance(max_steps, int) or max_steps < 1
         ):
@@ -41,6 +63,7 @@ class Evaluator:
         self.environment = environment
         self.policy = policy
         self.max_steps = max_steps
+        self._policy_errors = _policy_errors
 
     async def run(self, observation: Any, *, info: dict[str, Any] | None = None) -> Episode:
         """Start from the supplied reset result and stop at termination/truncation.
@@ -54,7 +77,9 @@ class Evaluator:
             infos=[deepcopy(info) if info is not None else {}],
         )
         while True:
-            action = await self.policy.act(deepcopy(observation))
+            policy_observation = deepcopy(observation)
+            with _policy_boundary(self._policy_errors):
+                action = await self.policy.act(policy_observation)
             try:
                 valid = env.action_space.contains(action)
             except (ValueError, TypeError, OverflowError):
@@ -82,3 +107,58 @@ class Evaluator:
             episode.infos.append(deepcopy(info))
             if terminated or truncated:
                 return episode
+
+
+async def _run_episode(
+    make_env: str | Callable[[], gym.Env],
+    make_policy: Callable[..., Policy],
+    *,
+    env_seed: int | None = None,
+    policy_seed: int | None = None,
+    max_steps: int | None = None,
+    instructions: str | None = None,
+    _policy_errors: bool = False,
+) -> Episode:
+    """Prepare and clean up instances for one episode.
+
+    Accept an environment ID or a factory returning a fresh environment. Existing
+    Gymnasium time limits apply unless max_steps supplies an additional cap.
+    Instructions are optional. Exceptions propagate after resources are closed.
+    """
+    env = gym.make(make_env) if isinstance(make_env, str) else make_env()
+    policy = None
+    try:
+        if max_steps is not None:
+            env = gym.wrappers.TimeLimit(env, max_episode_steps=max_steps)
+        env = gym.wrappers.RecordEpisodeStatistics(env, buffer_length=1)
+        if instructions is None:
+            instructions = (
+                env.get_wrapper_attr("instructions") if env.has_wrapper_attr("instructions") else ""
+            )
+        with _policy_boundary(_policy_errors):
+            policy = make_policy(
+                deepcopy(env.observation_space),
+                deepcopy(env.action_space),
+                instructions=instructions,
+            )
+        observation, info = env.reset(seed=env_seed)
+        with _policy_boundary(_policy_errors):
+            await policy.reset(seed=policy_seed)
+        episode = await Evaluator(env, policy, _policy_errors=_policy_errors).run(
+            observation, info=info
+        )
+        return episode
+    finally:
+        primary = sys.exc_info()[1]
+        try:
+            try:
+                if policy is not None:
+                    with _policy_boundary(_policy_errors):
+                        await policy.close()
+            finally:
+                env.close()
+        except BaseException:
+            if primary is None:
+                raise
+            # Keep the original failure/cancellation; expose secondary cleanup errors.
+            logging.getLogger(__name__).exception("Cleanup failed while handling an episode error")

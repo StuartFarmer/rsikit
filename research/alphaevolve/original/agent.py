@@ -14,22 +14,23 @@ from statistics import fmean
 from typing import Literal
 
 from pydantic import BaseModel, Field, ValidationError
+from rich.table import Column
 from slick import parse, render
 from slick.providers import Provider, ProviderError
 
 from rsikit.episode import Episode
 from rsikit.generation import WORKER_LIBRARIES
-from rsikit.generation.edits import (
+from rsikit.optimization import Optimizer
+from rsikit.policy import InvalidPolicy, Policy, validate_policy
+
+from ..generation import (
     InvalidCandidate,
     Mutation,
-    Program,
+    _PolicyResponse,
     apply_edits,
-    check_program,
     check_rewrite,
+    evolution_regions,
 )
-from rsikit.optimization import Optimizer
-from rsikit.policy import Policy
-
 from .healing import SelfHealer
 
 logger = logging.getLogger(__name__)
@@ -102,24 +103,112 @@ class AlphaEvolve(Optimizer):
         # ponytail: in-memory attempt history; bound it if searches exceed RAM.
         self.attempts: list[dict] = []
         self._attempt_offset = 0
+        self._batch_number = 0
+        self._streaming_progress = None
         self._prior_failures: list[dict] = []
         self.events: list[dict] = []
         self.generation_calls = self.repair_calls = self.meta_calls = self.completed = 0
+
+    leaderboard_columns = {"island": Column("Island"), "parent": Column("Parent")}
+
+    def _log_batch(self, batch, total, *, streaming=False):
+        logger.info(
+            "Starting %s %s",
+            "batch" if streaming else "generation",
+            batch,
+            extra={
+                "progress": dict(
+                    kind="batch_started",
+                    batch_id=str(batch),
+                    label=f"{'Batch' if streaming else 'Generation'} {batch}",
+                    total_candidates=total,
+                    optimizer=f"AlphaEvolve ({type(self).__module__.split('.')[-2]})",
+                    columns=self.leaderboard_columns,
+                )
+            },
+        )
+
+    def _log_candidate(self, row, *, status=None, restored=False):
+        policy = row.get("policy")
+        state = status or {"repaired": "generated", "rejected": "failed", "error": "failed"}.get(
+            row["status"], row["status"]
+        )
+        logger.info(
+            "%s: %s — %s",
+            policy.name if policy else f"Attempt {row['id']}",
+            state,
+            policy.description if policy else "",
+            extra={
+                "progress": dict(
+                    kind="candidate",
+                    batch_id=str(row.get("batch", self._batch_number)),
+                    attempt_id=str(row["id"]),
+                    revision=row.get("revision", 0),
+                    status=state,
+                    proposal_done=policy is not None,
+                    policy_id=policy.id if policy else "—",
+                    name=policy.name if policy else "",
+                    description=policy.description if policy else "",
+                    score=row.get("score"),
+                    error=row.get("error"),
+                    restored=restored,
+                )
+            },
+        )
+
+    def evaluation_started(self, policies):
+        for policy in policies:
+            for row in self._pending.get(policy.id, ()):
+                self._log_candidate(row, status="evaluating")
+
+    def _log_leaderboard(self):
+        rows = []
+        seen = set()
+        for island, candidate in sorted(
+            enumerate(self.islands), key=lambda pair: -pair[1].score if pair[1] else math.inf
+        ):
+            if candidate is None or candidate.policy.id in seen:
+                continue
+            seen.add(candidate.policy.id)
+            record = next(
+                (
+                    row
+                    for row in reversed(self.attempts)
+                    if row.get("policy") is not None and row["policy"].id == candidate.policy.id
+                ),
+                {},
+            )
+            parent = record.get("parent")
+            rows.append(
+                dict(
+                    id=candidate.policy.id,
+                    name=candidate.policy.name,
+                    description=candidate.policy.description,
+                    score=candidate.score,
+                    generation=record.get("batch"),
+                    extras=dict(island=island, parent=parent.policy.id[:6] if parent else "—"),
+                )
+            )
+        logger.info(
+            "AlphaEvolve leaderboard: %s entries",
+            len(rows),
+            extra={"progress": dict(kind="leaderboard", rows=rows)},
+        )
 
     @property
     def best(self) -> type[Policy] | None:
         return None if self._best is None else self._best.policy
 
-    async def initialize(self, proposal: int, *, provider, record=None) -> Program:
+    async def initialize(self, proposal: int, *, provider, record=None) -> type[Policy]:
         """Create an initial named policy without a hand-written seed program."""
-        schema = Program.model_json_schema()
+        schema = _PolicyResponse.model_json_schema()
         context = render(
             "original/prompts/initialize.j2", instance=self, schema=schema, proposal=proposal
         )
         raw, _ = await provider.acall(context)
         if record is not None:
             record["raw"] = raw
-        return parse(raw, Program)
+        return parse(raw, _PolicyResponse).to_policy()
 
     async def mutate(
         self,
@@ -130,7 +219,7 @@ class AlphaEvolve(Optimizer):
         *,
         provider,
         record=None,
-    ) -> Mutation:
+    ) -> type[Policy]:
         schema = Mutation.model_json_schema()
         context = render(
             "original/prompts/mutate.j2",
@@ -144,7 +233,12 @@ class AlphaEvolve(Optimizer):
         raw, _ = await provider.acall(context)
         if record is not None:
             record["raw"] = raw
-        return parse(raw, Mutation)
+        mutation = parse(raw, Mutation)
+        return Policy.from_text(
+            apply_edits(parent.policy._implementation, mutation.edits),
+            name=mutation.name,
+            description=mutation.description,
+        )
 
     async def rewrite(
         self,
@@ -155,8 +249,8 @@ class AlphaEvolve(Optimizer):
         *,
         provider,
         record=None,
-    ) -> Program:
-        schema = Program.model_json_schema()
+    ) -> type[Policy]:
+        schema = _PolicyResponse.model_json_schema()
         context = render(
             "original/prompts/rewrite.j2",
             instance=self,
@@ -169,7 +263,7 @@ class AlphaEvolve(Optimizer):
         raw, _ = await provider.acall(context)
         if record is not None:
             record["raw"] = raw
-        return parse(raw, Program)
+        return parse(raw, _PolicyResponse).to_policy()
 
     async def _repair_valid(self, record, reference, failed, diagnostic) -> type[Policy]:
         # Adapt main's check/repair/recheck loop; count all repairs for this proposal.
@@ -197,18 +291,17 @@ class AlphaEvolve(Optimizer):
                     ),
                     self.config.generation_timeout,
                 )
-                content = proposal.implementation
+                content = proposal._implementation
                 call["implementation"] = content
                 if content == failed:
                     raise InvalidCandidate("Repair returned the unchanged implementation")
                 if reference:
                     check_rewrite(reference, content)
-                check_program(content)
+                evolution_regions(content)
+                validate_policy(proposal)
                 call["valid"] = True
-                return Policy.from_text(
-                    content, name=proposal.name, description=proposal.description
-                )
-            except (InvalidCandidate, ValidationError) as exc:
+                return proposal
+            except (InvalidPolicy, ValidationError) as exc:
                 if isinstance(exc, ValidationError) and "raw" not in call:
                     raise  # Provider-side failures do not establish invalid model output.
                 failed = call.get("implementation", call.get("raw", failed))
@@ -217,7 +310,7 @@ class AlphaEvolve(Optimizer):
         raise InvalidCandidate(f"Repair exhausted after {len(repairs)} repairs: {diagnostic}")
 
     async def repair(self, policy: type[Policy], diagnostic: str) -> type[Policy] | None:
-        """Repair an unevaluated policy after a sandbox failure, preserving its ancestry.
+        """Repair an unevaluated policy after a episode failure, preserving its ancestry.
 
         The same budget covers generation and runtime repairs. The caller evaluates
         the returned replacement through Run; failed versions remain in storage.
@@ -225,19 +318,23 @@ class AlphaEvolve(Optimizer):
         """
         records = self._pending[policy.id]
         record = max(records, key=lambda row: len(row.get("repairs", [])))
+        for row in records:
+            self._log_candidate(row, status="repairing")
         parent = record["parent"]
         reference = policy._implementation if parent is None else parent.policy._implementation
         try:
             replacement = await self._repair_valid(
                 record, reference, policy._implementation, diagnostic
             )
-        except InvalidCandidate as exc:
+        except InvalidPolicy as exc:
             for row in self._pending.pop(policy.id):
                 row.update(status="discarded", error=str(exc))
+                self._log_candidate(row)
             logger.warning("Discarded %s: %s", policy.name, exc)
             return None
         for row in records:
             row.update(policy=replacement, status="repaired", revision=row.get("revision", 0) + 1)
+            self._log_candidate(row)
         self._pending.pop(policy.id)
         self._pending.setdefault(replacement.id, []).extend(records)
         logger.info("Repaired %s → %s — %s", policy.name, replacement.name, replacement.description)
@@ -276,6 +373,9 @@ class AlphaEvolve(Optimizer):
             concurrency,
             extra={"event": "generation_started", "total": n},
         )
+        if self._streaming_progress is None:
+            self._batch_number += 1
+            self._log_batch(self._batch_number, n)
         slots = asyncio.Semaphore(concurrency)
 
         async def propose():
@@ -332,9 +432,12 @@ class AlphaEvolve(Optimizer):
                     improvement = (score - parent.score) / max(1.0, abs(parent.score))
                     idea.reward += max(0.0, improvement)
                 record.update(status="evaluated", score=score)
+                self._log_candidate(record)
                 self.completed += 1
                 if self.config.reset_interval and self.completed % self.config.reset_interval == 0:
                     self.reset_islands()
+
+        self._log_leaderboard()
 
     def sample(self) -> tuple[int, _Candidate, list[_Candidate]]:
         island_id = self.rng.choice(
@@ -364,7 +467,15 @@ class AlphaEvolve(Optimizer):
             ]
         )[-3:]
         record = {"id": attempt_id, "model": model_id, "status": "generating"}
+        if self._streaming_progress is not None:
+            offset, size, total = self._streaming_progress
+            group = (attempt_id - offset - 1) // size
+            record["batch"] = f"stream-{offset}-{group + 1}"
+            self._log_batch(record["batch"], min(size, total - group * size), streaming=True)
+        else:
+            record["batch"] = self._batch_number
         self.attempts.append(record)
+        self._log_candidate(record)
         try:
             parent = idea = None
             island_id = self._founding_island(attempt_id)
@@ -392,20 +503,14 @@ class AlphaEvolve(Optimizer):
                     operation(*arguments, provider=provider, record=record),
                     self.config.generation_timeout,
                 )
-                if parent is None:
-                    content = proposal.implementation
-                elif self.config.mode == "diff":
-                    content = apply_edits(reference, proposal.edits)
-                else:
-                    content = proposal.implementation
-                    record["content"] = content
-                    check_rewrite(reference, content)
+                content = proposal._implementation
                 record["content"] = content
-                check_program(content)
-                policy = Policy.from_text(
-                    content, name=proposal.name, description=proposal.description
-                )
-            except (InvalidCandidate, ValidationError) as exc:
+                if parent is not None:
+                    check_rewrite(reference, content)
+                evolution_regions(content)
+                validate_policy(proposal)
+                policy = proposal
+            except (InvalidPolicy, ValidationError) as exc:
                 if isinstance(exc, ValidationError) and "raw" not in record:
                     raise
                 if self.config.max_repairs == 0:
@@ -425,8 +530,9 @@ class AlphaEvolve(Optimizer):
                 policy.description,
                 extra={"event": "policy_generated", "policy_id": policy.id},
             )
+            self._log_candidate(record)
             return record
-        except InvalidCandidate as exc:
+        except InvalidPolicy as exc:
             record.update(status="discarded", error=f"{type(exc).__name__}: {exc}")
             logger.warning(
                 "Discarded proposal %s: %s",
@@ -434,6 +540,7 @@ class AlphaEvolve(Optimizer):
                 exc,
                 extra={"event": "proposal_discarded"},
             )
+            self._log_candidate(record)
             return None
         except (
             ValidationError,

@@ -8,6 +8,7 @@ from pydantic import ValidationError
 from slick import prompts
 
 from research import alphaevolve
+from rsikit import Policy
 from tests.providers import ScriptedProvider
 from tests.test_alphaevolve import program
 
@@ -24,7 +25,8 @@ class SelfHealerTests(unittest.IsolatedAsyncioTestCase):
                 await healer.repair("", "broken code", "invalid Python", record=first)
             repaired = await healer.repair("", first["raw"], "invalid JSON", record=second)
         self.assertEqual(first["raw"], "malformed JSON")
-        self.assertEqual(repaired.implementation, program(1).implementation)
+        self.assertTrue(issubclass(repaired, Policy))
+        self.assertEqual(repaired._implementation, program(1).implementation)
         self.assertIn("Balance the pole", provider.calls[0])
         self.assertIn("Discrete left/right actions", provider.calls[0])
         self.assertIn("malformed JSON", provider.calls[1])

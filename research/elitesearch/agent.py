@@ -13,21 +13,22 @@ from dataclasses import dataclass
 from statistics import fmean
 
 from pydantic import ValidationError
+from rich.table import Column
 from slick import parse, render
 from slick.providers import Provider
 
 from research.rewards import Measurement
 from rsikit import Policy
 from rsikit.generation import WORKER_LIBRARIES
-from rsikit.generation.edits import (
+from rsikit.policy import InvalidPolicy, validate_policy
+
+from .generation import (
     InvalidCandidate,
     Mutation,
-    Program,
+    _PolicyResponse,
     apply_edits,
-    check_program,
     check_rewrite,
 )
-
 from .healing import SelfHealer
 from .records import Generation, Organism
 
@@ -57,6 +58,60 @@ class EliteSearch:
     Evaluation callbacks run concurrently as candidates arrive; use Executor to
     bound episode workers. Each generation still ranks only after all candidates finish.
     """
+
+    leaderboard_columns = {"operation": Column("Operation"), "parents": Column("Parents")}
+
+    def _log_candidate(self, row, *, restored=False):
+        status = {"rejected": "repairing", "execution_failed": "repairing", "error": "failed"}.get(
+            row.status, row.status
+        )
+        logger.info(
+            "%s: %s — %s",
+            row.name or f"Attempt {row.id}",
+            status,
+            row.description,
+            extra={
+                "progress": dict(
+                    kind="candidate",
+                    batch_id=str(row.generation),
+                    attempt_id=str(row.id),
+                    revision=row.repairs,
+                    status=status,
+                    proposal_done=bool(row.policy_id),
+                    policy_id=row.policy_id or "—",
+                    name=row.name,
+                    description=row.description,
+                    score=row.score,
+                    error=row.error,
+                    restored=restored,
+                )
+            },
+        )
+
+    def _log_leaderboard(self):
+        logger.info(
+            "Elite leaderboard: %s entries",
+            len(self.elites),
+            extra={
+                "progress": dict(
+                    kind="leaderboard",
+                    rows=[
+                        dict(
+                            id=row.policy_id or str(row.id),
+                            name=row.name,
+                            description=row.description,
+                            score=row.score,
+                            generation=row.generation,
+                            extras=dict(
+                                operation=row.kind,
+                                parents=", ".join(map(str, row.parent_ids)) or "—",
+                            ),
+                        )
+                        for row in self.elites
+                    ],
+                )
+            },
+        )
 
     libraries = WORKER_LIBRARIES
 
@@ -147,7 +202,7 @@ class EliteSearch:
                     if revision.get("policy_id") is not None
                 )
                 for implementation in implementations:
-                    check_program(implementation)
+                    validate_policy(Policy.from_text(implementation))
                     self._sources.add(ast.dump(ast.parse(implementation), include_attributes=False))
             if generation.status == "completed":
                 ranked = self._rank(rows)
@@ -168,8 +223,8 @@ class EliteSearch:
 
     async def invent(
         self, proposal: int, elites: list[Organism], *, provider, record=None
-    ) -> Program:
-        schema = Program.model_json_schema()
+    ) -> type[Policy]:
+        schema = _PolicyResponse.model_json_schema()
         context = render(
             "new.j2",
             instance=self,
@@ -181,9 +236,9 @@ class EliteSearch:
         raw, _ = await provider.acall(context)
         if record is not None:
             record["raw"] = raw
-        return parse(raw, Program)
+        return parse(raw, _PolicyResponse).to_policy()
 
-    async def edit(self, parent: Organism, *, provider, record=None) -> Mutation:
+    async def edit(self, parent: Organism, *, provider, record=None) -> type[Policy]:
         schema = Mutation.model_json_schema()
         context = render(
             "edit.j2",
@@ -195,10 +250,17 @@ class EliteSearch:
         raw, _ = await provider.acall(context)
         if record is not None:
             record["raw"] = raw
-        return parse(raw, Mutation)
+        mutation = parse(raw, Mutation)
+        if record is not None:
+            record.update(name=mutation.name, description=mutation.description)
+        return Policy.from_text(
+            apply_edits(parent.implementation, mutation.edits),
+            name=mutation.name,
+            description=mutation.description,
+        )
 
-    async def remix(self, parents: list[Organism], *, provider, record=None) -> Program:
-        schema = Program.model_json_schema()
+    async def remix(self, parents: list[Organism], *, provider, record=None) -> type[Policy]:
+        schema = _PolicyResponse.model_json_schema()
         context = render(
             "remix.j2",
             instance=self,
@@ -209,7 +271,7 @@ class EliteSearch:
         raw, _ = await provider.acall(context)
         if record is not None:
             record["raw"] = raw
-        return parse(raw, Program)
+        return parse(raw, _PolicyResponse).to_policy()
 
     async def _call(self, row, operation, *args):
         call = dict(operation=operation.__name__)
@@ -229,6 +291,10 @@ class EliteSearch:
         except BaseException as exc:
             call["error"] = f"{type(exc).__name__}: {exc}"
             raise
+        finally:
+            if "name" in call:
+                # Keep parsed identity even when applying the mutation fails.
+                row.name, row.description = call["name"], call["description"]
 
     def _population(self, generation):
         n = self.config.population_size
@@ -264,6 +330,7 @@ class EliteSearch:
             if repairing:
                 if row.repairs >= self.config.max_repairs:
                     row.status = "discarded"
+                    self._log_candidate(row)
                     logger.warning(
                         "Discarded organism %s: %s",
                         row.id,
@@ -297,24 +364,19 @@ class EliteSearch:
                 operation, args = self.remix, (parents,)
             row.status, row.policy_id, row.implementation = "generating", None, ""
             self._policies.pop(row.id, None)
+            self._log_candidate(row)
             try:
                 proposal = await self._call(row, operation, *args)
                 row.name, row.description = proposal.name, proposal.description
-                row.implementation = (
-                    apply_edits(reference, proposal.edits)
-                    if operation == self.edit
-                    else proposal.implementation
-                )
-                check_program(row.implementation)
+                row.implementation = proposal._implementation
+                validate_policy(proposal)
                 if reference:
                     check_rewrite(reference, row.implementation)
                 key = ast.dump(ast.parse(row.implementation), include_attributes=False)
                 if key in self._sources:
                     raise InvalidCandidate("Duplicate program; make a substantive change")
                 self._sources.add(key)
-                policy = Policy.from_text(
-                    row.implementation, name=row.name, description=row.description
-                )
+                policy = proposal
                 self._policies[row.id] = policy
                 row.policy_id, row.status, row.error = policy.id, "generated", None
                 logger.info(
@@ -324,9 +386,10 @@ class EliteSearch:
                     row.description,
                     extra={"event": "policy_generated"},
                 )
+                self._log_candidate(row)
                 self._checkpoint()
                 return row
-            except InvalidCandidate as exc:
+            except InvalidPolicy as exc:
                 row.status, row.error = "rejected", str(exc)
                 repairing = True
             except BaseException as exc:
@@ -338,6 +401,7 @@ class EliteSearch:
         while rows:
             for row in rows:
                 row.status = "evaluating"
+                self._log_candidate(row)
             self._checkpoint()
             results = await self.evaluate([self._policies[row.id] for row in rows])
             if set(results) != {row.policy_id for row in rows}:
@@ -364,6 +428,7 @@ class EliteSearch:
                     row.score = fmean(result.scores.values())
                     row.seed_scores = {str(seed): value for seed, value in result.scores.items()}
                     row.status = "evaluated"
+                self._log_candidate(row)
             self._checkpoint()
             if not failed:
                 return
@@ -440,6 +505,50 @@ class EliteSearch:
 
     async def run(self) -> list[Organism]:
         self.reason = "running"
+        logger.info(
+            "Starting EliteSearch",
+            extra={
+                "progress": dict(
+                    kind="search_started",
+                    optimizer="EliteSearch",
+                    total_candidates=self.config.population_size * self.config.generations,
+                    total_generations=self.config.generations,
+                    leaderboard_size=self.config.elite_size,
+                    columns=self.leaderboard_columns,
+                    resumed=bool(self.generations),
+                )
+            },
+        )
+        for generation in self.generations:
+            logger.info(
+                "Restoring generation %s",
+                generation.number,
+                extra={
+                    "progress": dict(
+                        kind="batch_started",
+                        batch_id=str(generation.number),
+                        label=f"Generation {generation.number}",
+                        total_candidates=self.config.population_size,
+                    )
+                },
+            )
+            for row in self.organisms:
+                if row.generation == generation.number:
+                    self._log_candidate(row, restored=True)
+            if generation.status == "completed":
+                logger.info(
+                    "Restored generation %s",
+                    generation.number,
+                    extra={
+                        "progress": dict(
+                            kind="batch_finished",
+                            batch_id=str(generation.number),
+                            status="completed",
+                            restored=True,
+                        )
+                    },
+                )
+        self._log_leaderboard()
         try:
             pending = self.generations and self.generations[-1].status != "completed"
             if (
@@ -462,9 +571,33 @@ class EliteSearch:
                     )
                     self.generations.append(generation)
                     rows = self._population(generation)
+                logger.info(
+                    "Generation %s",
+                    number,
+                    extra={
+                        "progress": dict(
+                            kind="batch_started",
+                            batch_id=str(number),
+                            label=f"Generation {number}",
+                            total_candidates=len(rows),
+                        )
+                    },
+                )
+                for row in rows:
+                    self._log_candidate(row, restored=bool(pending))
                 self._checkpoint()
                 await self._experiment(rows)
                 self._promote(generation, rows)
+                self._log_leaderboard()
+                logger.info(
+                    "Finished generation %s",
+                    number,
+                    extra={
+                        "progress": dict(
+                            kind="batch_finished", batch_id=str(number), status="completed"
+                        )
+                    },
+                )
                 self._checkpoint()
                 if (
                     self.config.target_score is not None
@@ -489,3 +622,16 @@ class EliteSearch:
             raise
         finally:
             self._checkpoint()
+            logger.info(
+                "Search %s",
+                self.reason,
+                extra={
+                    "progress": dict(
+                        kind="search_finished",
+                        status={"error": "failed", "target_reached": "stopped"}.get(
+                            self.reason, self.reason
+                        ),
+                        reason=self.reason,
+                    )
+                },
+            )

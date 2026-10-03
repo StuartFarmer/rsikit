@@ -17,12 +17,11 @@ from examples.alphaevolve import run_search
 from research import alphaevolve
 from research.alphaevolve import improved, original
 from research.alphaevolve.history import Evaluation, Generation
-from rsikit import Executor
-from tests.helpers import recorded_run
+from tests.helpers import fake_executor, recorded_run
 from tests.providers import ScriptedProvider
 from tests.test_alphaevolve import program
 from tests.test_episode_storage import trajectory
-from tests.test_run import FakeSandbox
+from tests.test_run import FakeEvaluation
 
 
 class HistoryTests(unittest.IsolatedAsyncioTestCase):
@@ -35,21 +34,25 @@ class HistoryTests(unittest.IsolatedAsyncioTestCase):
                 patch.object(prompts, "TEMPLATE_ROOT", Path(alphaevolve.__file__).parent),
             ):
                 path = Path(directory) / "run"
-                sandbox = FakeSandbox()
+                evaluation = FakeEvaluation()
 
-                async def evaluate(implementation, environment, seed, call_timeout):
+                async def evaluate(implementation, environment, seed):
                     return trajectory(
                         float(implementation.split("return ")[1].split()[0]) + seed, {}
                     )
 
-                sandbox.evaluate.side_effect = evaluate
+                evaluation.evaluate.side_effect = evaluate
                 agent = variant.AlphaEvolve(
                     "task",
                     ScriptedProvider([program(i) for i in range(5)]),
                     config=variant.Config(islands=2, mode="rewrite", reset_interval=3),
                 )
                 with recorded_run(
-                    name="history", path=path, environment=env, executor=Executor(sandbox=sandbox)
+                    name="history",
+                    path=path,
+                    environment=env,
+                    executor=fake_executor(evaluation=evaluation),
+                    console=Console(file=io.StringIO()),
                 ) as (run, rollouts):
                     await run_search(
                         agent,
@@ -58,7 +61,6 @@ class HistoryTests(unittest.IsolatedAsyncioTestCase):
                         generations=2,
                         batch_size=2,
                         seeds=(0, 1),
-                        console=Console(file=io.StringIO()),
                     )
                     await run_search(
                         agent,
@@ -67,7 +69,6 @@ class HistoryTests(unittest.IsolatedAsyncioTestCase):
                         generations=1,
                         batch_size=1,
                         seeds=(0, 1),
-                        console=Console(file=io.StringIO()),
                     )
                 with recorded_run(path, environment=env) as (run, rollouts), run.database() as db:
                     generations = db.exec(select(Generation).order_by(Generation.number)).all()
@@ -106,7 +107,7 @@ class HistoryTests(unittest.IsolatedAsyncioTestCase):
                     [program(0)] if cancelled else [program(0), ProviderError("offline")]
                 )
                 agent = improved.AlphaEvolve("task", provider, config=improved.Config(islands=1))
-                sandbox = FakeSandbox()
+                evaluation = FakeEvaluation()
                 started = asyncio.Event()
 
                 async def blocked(*args):
@@ -114,12 +115,13 @@ class HistoryTests(unittest.IsolatedAsyncioTestCase):
                     await asyncio.Event().wait()
 
                 if cancelled:
-                    sandbox.evaluate.side_effect = blocked
+                    evaluation.evaluate.side_effect = blocked
                 with recorded_run(
                     name="interrupted",
                     path=path,
                     environment=env,
-                    executor=Executor(sandbox=sandbox),
+                    executor=fake_executor(evaluation=evaluation),
+                    console=Console(file=io.StringIO()),
                 ) as (run, rollouts):
                     task = asyncio.create_task(
                         run_search(
@@ -128,7 +130,6 @@ class HistoryTests(unittest.IsolatedAsyncioTestCase):
                             rollouts,
                             generations=2,
                             batch_size=1,
-                            console=Console(file=io.StringIO()),
                         )
                     )
                     if cancelled:

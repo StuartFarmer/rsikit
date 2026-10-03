@@ -1,4 +1,4 @@
-Scientific libraries in the standard Docker worker:
+Scientific libraries in the application image:
 - numpy: arrays, random sampling and linear algebra (numpy.linalg.solve, lstsq).
 - scipy: reliable numerical methods. Use scipy.linalg.solve_discrete_are or
   solve_continuous_are for Riccati equations; scipy.optimize.minimize for bounded
@@ -19,7 +19,7 @@ Scientific libraries in the standard Docker worker:
 Python's standard library, gymnasium and rsikit.Policy are also available.
 Choose libraries that fit the mechanism; do not use every library by default.
 Precompute expensive matrices/models in reset and bound per-action computation.
-Only observations/actions within the current episode are available: no reward
-input, environment access, pretrained downloads, or state across evaluation episodes.
-No network or runtime dependency installation. Missing imports and solver failures
+Use only observations/actions within the current episode: do not inspect rewards
+or the environment, download pretrained models, or rely on state across episodes.
+Do not use the network or install dependencies at runtime. Missing imports and solver failures
 must be repaired using the actual diagnostic and available alternatives.

@@ -36,4 +36,4 @@ box2d-py = ["swig>=4,<5"]
 packages = ["rsikit"]
 
 [tool.hatch.build.targets.sdist]
-include = ["rsikit/", "research/", "examples/", "tests/", "docs/", "README.md", "pyproject.toml", "ruff.toml", ".gitignore"]
+include = ["Dockerfile", ".dockerignore", "scripts/", "data/", "uv.lock", "rsikit/", "research/", "examples/", "tests/", "docs/", "README.md", "pyproject.toml", "ruff.toml", ".gitignore"]
