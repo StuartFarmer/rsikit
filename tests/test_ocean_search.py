@@ -219,7 +219,8 @@ class OceanSearchTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(manifest["search_seeds"], [7, 9])
             self.assertEqual(manifest["max_calls"], 4)
             self.assertEqual(manifest["max_tokens"], 4 * (65536 + 16384))
-            self.assertEqual(panels[:4], [(7, 9)] * 4)
+            self.assertEqual(panels[:2], [(7, 9)] * 2)
+            self.assertEqual(manifest["optimization_schedule"], "round-v1")
             self.assertEqual(summary["validation"][summary["winner"]]["scores"]["1000"], 1)
             self.assertIn("2 upstream Ocean episode seeds", raw.calls[0])
 

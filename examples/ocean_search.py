@@ -354,6 +354,7 @@ async def main(argv=None):
     upstream = metadata(args.env)
     manifest = dict(
         vars(args),
+        optimization_schedule="round-v1",
         config=asdict(config),
         **upstream,
         platform=platform.platform(),

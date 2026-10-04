@@ -138,6 +138,22 @@ async def run_search(
         )
     offset = max(0, last_generation - generator._batch_number)
     event_starts = {}
+    with run.database() as db:
+        saved_batches = (
+            {row.number - offset for row in db.exec(select(Generation)) if row.complete}
+            if inspect(db.bind).has_table(Generation.__tablename__)
+            else set()
+        )
+    # Earlier batches may have been driven manually, outside this Run.
+    saved_batches.update(
+        batch
+        for batch in {row["batch"] for row in generator.attempts}
+        if all(
+            row["status"] in ("evaluated", "discarded")
+            for row in generator.attempts
+            if row["batch"] == batch
+        )
+    )
     logger = logging.getLogger("rsikit")
     logger.info("Run: %s", run.path)
     logger.info("Optimizer: %s", type(generator).__module__)
@@ -166,39 +182,40 @@ async def run_search(
         return await measure_rewards(rollouts, policies, seeds=seeds)
 
     def checkpoint(agent):
-        batch = agent._batch_number
-        rows = [row for row in agent.attempts if row.get("batch") == batch]
-        if rows:
-            start = event_starts.setdefault(batch, len(agent.events))
-            complete = all(row["status"] in ("evaluated", "discarded") for row in rows)
-            for row in rows:
-                if row.get("policy") is not None:
-                    run.save_policy(row["policy"])
-            run.save(
-                *history_records(
-                    agent,
-                    generation=offset + batch,
-                    attempt_start=0,
-                    attempts=rows,
-                    event_start=start,
-                    seeds=seeds,
-                    complete=complete,
-                    failures={
-                        row["policy"].id: row["error"]
-                        for row in rows
-                        if row["status"] == "execution_failed"
-                    },
+        for batch in sorted({row["batch"] for row in agent.attempts} - saved_batches):
+            rows = [row for row in agent.attempts if row.get("batch") == batch]
+            if rows:
+                start = event_starts.setdefault(batch, len(agent.events))
+                complete = all(row["status"] in ("evaluated", "discarded") for row in rows)
+                for row in rows:
+                    if row.get("policy") is not None:
+                        run.save_policy(row["policy"])
+                run.save(
+                    *history_records(
+                        agent,
+                        generation=offset + batch,
+                        attempt_start=0,
+                        attempts=rows,
+                        event_start=start,
+                        seeds=seeds,
+                        complete=complete,
+                        failures={
+                            row["policy"].id: row["error"]
+                            for row in rows
+                            if row["status"] == "execution_failed"
+                        },
+                    )
                 )
-            )
-            if complete:
-                logger.info(
-                    "Finished generation",
-                    extra={
-                        "progress": dict(
-                            kind="batch_finished", batch_id=str(batch), status="completed"
-                        )
-                    },
-                )
+                if complete:
+                    saved_batches.add(batch)
+                    logger.info(
+                        "Finished generation",
+                        extra={
+                            "progress": dict(
+                                kind="batch_finished", batch_id=str(batch), status="completed"
+                            )
+                        },
+                    )
         if is_paper:
             agent.checkpoint()
 

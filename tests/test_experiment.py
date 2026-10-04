@@ -11,12 +11,87 @@ import yaml
 
 from research.cli import load_component, parse_config
 from research.experiment import EvaluationConfig
-from rsikit import Policy, Run
+from rsikit import Measurement, Policy, Run
 from tests.providers import ScriptedProvider
 from tests.test_elitesearch import program
 
 
 class ExperimentTests(unittest.IsolatedAsyncioTestCase):
+    async def test_all_builtin_adapters_delegate_and_rank_finalists(self):
+        from research.providers import BudgetProvider
+        from rsikit import Measurement, search
+        from tests.test_alphaevolve import program as alpha_program
+        from tests.test_lineagesearch import experiments, families
+        from tests.test_lineagesearch import program as lineage_program
+
+        cases = [
+            (
+                "alphaevolve",
+                {
+                    "variant": v,
+                    "proposals": 2,
+                    "proposal_batch_size": 2,
+                    "islands": 1,
+                    "meta_interval": 0,
+                },
+                [alpha_program(0), alpha_program(1)],
+            )
+            for v in ("paper", "original", "improved")
+        ] + [
+            (
+                "shinka",
+                {"generations": 1, "proposal_batch_size": 2, "islands": 1},
+                [alpha_program(0), alpha_program(1)],
+            ),
+            ("elite", {"generations": 1, "population": 2, "elites": 1}, [program(0), program(1)]),
+            (
+                "lineage",
+                {"families": 1, "decomposition_k": 1, "initial_per_family": 2, "max_attempts": 2},
+                [families(), experiments(0, 1), lineage_program(0), lineage_program(1)],
+            ),
+        ]
+        for selector, options, responses in cases:
+            with (
+                self.subTest(selector=selector, options=options),
+                tempfile.TemporaryDirectory() as d,
+            ):
+                component = load_component(selector, kind="optimizer", base_dir=Path.cwd())
+                config = parse_config(
+                    ["run"],
+                    config=dict(
+                        env="CartPole-v1",
+                        optimizer=selector,
+                        model="scripted",
+                        output=d,
+                        optimizer_options=options,
+                    ),
+                )
+                provider = BudgetProvider(
+                    ScriptedProvider(responses), max_input_tokens=65536, max_output_tokens=16384
+                )
+
+                async def evaluate(policies):
+                    return {p.id: Measurement({0: i + 1}) for i, p in enumerate(policies)}
+
+                with Run.create(name="adapter", path=Path(d) / "run") as run:
+                    with patch.object(component, "search", wraps=search) as shared:
+                        result = await component.optimize(
+                            task="task",
+                            provider=provider,
+                            evaluate=evaluate,
+                            run=run,
+                            seed=0,
+                            options={
+                                **config["optimizer_options"],
+                                "generation": config["generation"],
+                                "videos": config["videos"],
+                            },
+                        )
+                    self.assertEqual(shared.await_count, 1)
+                    self.assertEqual(len(result), 2)
+                    self.assertIn("1", result[0].name)
+                    self.assertEqual(len({p.id for p in result}), 2)
+
     async def test_resume_keeps_completed_candidates_and_charges_previous_calls(self):
         from slick.providers import ProviderError
         from sqlmodel import select
@@ -51,6 +126,7 @@ class ExperimentTests(unittest.IsolatedAsyncioTestCase):
                 await experiment.run_experiment(config)
             original_config = (output / "config.yaml").read_bytes()
             original_manifest = (output / "manifest.json").read_bytes()
+            self.assertEqual(json.loads(original_manifest)["optimization_schedule"], "round-v1")
             with Run.open(output) as run:
                 with run.database() as db:
                     first = db.get(Organism, 1).model_dump()
@@ -82,6 +158,52 @@ class ExperimentTests(unittest.IsolatedAsyncioTestCase):
                     self.assertEqual(rows[0].model_dump(), first)
                     self.assertEqual([r.status for r in rows], ["evaluated", "evaluated"])
 
+    async def test_legacy_resume_requires_completed_round_and_preserves_manifest(self):
+        from research.elitesearch.records import Generation
+        from research.experiment import resume_experiment, run_experiment
+
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory) / "run"
+            config = parse_config(
+                ["run"],
+                config=dict(
+                    env="CartPole-v1",
+                    optimizer="elite",
+                    model="scripted",
+                    output=str(output),
+                    optimizer_options=dict(population=1, elites=1, generations=1),
+                    evaluation=dict(seeds=[7], workers=1, max_steps=1),
+                ),
+            )
+            with (
+                patch.dict("os.environ", {"OPENROUTER_API_KEY": "scripted"}),
+                patch(
+                    "research.providers.UsageOpenRouter",
+                    return_value=ScriptedProvider([program(0)]),
+                ),
+            ):
+                await run_experiment(config)
+            manifest = json.loads((output / "manifest.json").read_text())
+            manifest.pop("optimization_schedule")
+            original = json.dumps(manifest)
+            (output / "manifest.json").write_text(original)
+            with (
+                patch.dict("os.environ", {"OPENROUTER_API_KEY": "scripted"}),
+                patch("research.providers.UsageOpenRouter", return_value=ScriptedProvider([])),
+            ):
+                await resume_experiment(output)
+            self.assertEqual((output / "manifest.json").read_text(), original)
+            event = json.loads((output / "schedule_changes.jsonl").read_text())
+            self.assertEqual(event["to"], "round-v1")
+            with Run.open(output) as run:
+                with run.database() as db:
+                    row = db.get(Generation, 1)
+                    row.status = "running"
+                    db.add(row)
+                    db.commit()
+            with self.assertRaisesRegex(ValueError, "incomplete legacy"):
+                await resume_experiment(output)
+
     async def test_gym_sessions_match_direct_episode_and_cache(self):
         from rsikit.envs.tasks import make_environment
         from rsikit.evaluation import _run_episode
@@ -112,6 +234,7 @@ class ExperimentTests(unittest.IsolatedAsyncioTestCase):
                         options=options, evaluation=evaluation, run=run
                     ) as evaluate:
                         result = await evaluate([policy], [7])
+                        self.assertIs(type(result[policy.id]), Measurement)
                         self.assertEqual(result[policy.id].scores, {7: direct.total_reward})
                         self.assertEqual(await evaluate([policy], [7]), result)
                         self.assertIsNotNone(run.load_episode(policy, 7))
@@ -142,6 +265,7 @@ class ExperimentTests(unittest.IsolatedAsyncioTestCase):
                         options=definition.Options(), evaluation=evaluation, run=run
                     ) as evaluate:
                         result = await evaluate([policy], [7])
+                    self.assertIs(type(result[policy.id]), Measurement)
                     self.assertEqual(result[policy.id].scores[7], direct["results"][0]["score"])
                     events = [
                         json.loads(s)

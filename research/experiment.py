@@ -183,6 +183,8 @@ async def _experiment(config, *, resume=False):
         else None,
         source_hashes={},
     )
+    if search:
+        manifest["optimization_schedule"] = "round-v1"
     manifest["versions"] = {}
     for package in ("rsikit", "gymnasium", "numpy", "slick-ai"):
         try:
@@ -407,6 +409,27 @@ async def resume_experiment(path: str | Path) -> dict:
     config = read_config(path / "config.yaml")
     if config.get("command") != "run" or config.get("optimizer") != "elite":
         raise ValueError("Resume currently supports unified CLI Elite searches only")
+    manifest_path = path / "manifest.json"
+    manifest = json.loads(manifest_path.read_text()) if manifest_path.exists() else {}
+    if manifest.get("optimization_schedule") != "round-v1":
+        from sqlalchemy import inspect as inspect_database
+        from sqlmodel import select
+
+        from research.elitesearch.records import Generation
+
+        with Run.open(path) as run, run.database() as db:
+            if inspect_database(db.get_bind()).has_table(Generation.__tablename__):
+                if any(row.status != "completed" for row in db.exec(select(Generation))):
+                    raise ValueError(
+                        "Cannot resume an incomplete legacy streaming checkpoint; start a new run from an exported policy"
+                    )
+        changes = path / "schedule_changes.jsonl"
+        if not changes.exists():
+            with changes.open("a") as stream:
+                stream.write(
+                    json.dumps({"from": manifest.get("optimization_schedule"), "to": "round-v1"})
+                    + "\n"
+                )
     config["output"] = str(path)
     return await _experiment(config, resume=True)
 

@@ -17,6 +17,35 @@ BASE = dict(
 
 
 class CliTests(unittest.TestCase):
+    def test_all_builtin_selectors_variants_and_invalid_options(self):
+        from research.cli import parse_config
+
+        for selector, field in (
+            ("alphaevolve", "proposals"),
+            ("shinka", "generations"),
+            ("elite", "population"),
+            ("lineage", "families"),
+        ):
+            with self.subTest(selector=selector):
+                config = parse_config(["run"], config={**BASE, "optimizer": selector})
+                self.assertEqual(config["optimizer"], selector)
+                self.assertEqual(parse_config(["run"], config=config), config)
+                for invalid in ({field: -1}, {"typo": 1}, {"generation_concurrency": 0}):
+                    with self.assertRaises(ValueError):
+                        parse_config(
+                            ["run"],
+                            config={**BASE, "optimizer": selector, "optimizer_options": invalid},
+                        )
+                with self.assertRaises(ValueError):
+                    parse_config(
+                        ["run"], config={**BASE, "optimizer": selector, "videos": {"top": 1}}
+                    )
+        for variant in ("paper", "original", "improved"):
+            config = parse_config(
+                ["run", "--variant", variant], config={**BASE, "optimizer": "alphaevolve"}
+            )
+            self.assertEqual(config["optimizer_options"]["variant"], variant)
+
     def test_budget_is_opt_in(self):
         from research.cli import parse_config
 

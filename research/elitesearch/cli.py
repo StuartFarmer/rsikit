@@ -11,7 +11,7 @@ from sqlalchemy import inspect
 from sqlmodel import select
 
 from research.providers import CALL, BudgetExceeded
-from rsikit import Policy
+from rsikit import Policy, search
 
 from .agent import Config, EliteSearch
 from .records import Generation, Organism
@@ -133,7 +133,6 @@ async def optimize(*, task, provider, evaluate, run, options, seed):
     agent = Search(
         task,
         provider,
-        evaluate,
         context=task,
         config=Config(**values),
         seed=seed,
@@ -145,7 +144,7 @@ async def optimize(*, task, provider, evaluate, run, options, seed):
                 agent.restore(list(db.exec(select(Organism))), list(db.exec(select(Generation))))
                 reported = sum(g.status == "completed" for g in agent.generations)
         try:
-            await agent.run()
+            await search(agent, evaluate, on_checkpoint=checkpoint)
         except BudgetExceeded:
             agent.reason = "budget_exhausted"
             checkpoint(agent)
@@ -156,10 +155,11 @@ async def optimize(*, task, provider, evaluate, run, options, seed):
             (row for row in agent.organisms if row.score is not None),
             key=lambda row: (-row.score, row.id),
         )
-        return [
+        policies = [
             Policy.from_text(row.implementation, name=row.name, description=row.description)
             for row in ranked
         ]
+        return list({p.id: p for p in policies}.values())
     finally:
         if video_task is not None:
             video_task.cancel()

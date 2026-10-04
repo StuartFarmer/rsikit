@@ -127,9 +127,17 @@ def load_component(selector: str, *, kind: str, base_dir: Path):
         else:
             component = module
     elif kind == "optimizer":
-        if selector != "elite":
-            raise ValueError(f"Unknown optimizer {selector!r}; choose elite or a .py file")
-        component = importlib.import_module("research.elitesearch.cli")
+        builtins = {
+            "alphaevolve": "alphaevolve",
+            "shinka": "shinkaevolve",
+            "elite": "elitesearch",
+            "lineage": "lineagesearch",
+        }
+        if selector not in builtins:
+            raise ValueError(
+                f"Unknown optimizer {selector!r}; choose {', '.join(builtins)} or a .py file"
+            )
+        component = importlib.import_module(f"research.{builtins[selector]}.cli")
     elif selector.startswith("ocean:"):
         from research.ocean.environment import definition
 

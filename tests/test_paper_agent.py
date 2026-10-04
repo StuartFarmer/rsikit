@@ -24,6 +24,75 @@ class PaperAgentTests(unittest.IsolatedAsyncioTestCase):
         root.start()
         self.addCleanup(root.stop)
 
+    async def test_reopen_preserves_pending_round_then_repairs_without_new_attempts(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "population.sqlite"
+            config = paper.Config(
+                islands=1, proposals=2, batch_size=2, max_repairs=1, meta_interval=0
+            )
+            agent = paper.AlphaEvolve(
+                "task",
+                ScriptedProvider([program(0), program(1)]),
+                config=config,
+                database_path=path,
+            )
+            first, second = await agent.propose()
+            agent.close()
+            provider = ScriptedProvider([])
+            agent = paper.AlphaEvolve("task", provider, config=config, database_path=path)
+            self.assertEqual([p.id for p in await agent.propose()], [first.id, second.id])
+            self.assertEqual(provider.calls, [])
+            agent.update(
+                {first.id: Measurement({0: 1, 1: 3}), second.id: Measurement(failure="broken")}
+            )
+            agent.close()
+            agent = paper.AlphaEvolve(
+                "task", ScriptedProvider([program(2)]), config=config, database_path=path
+            )
+            (repaired,) = await agent.propose()
+            agent.update({repaired.id: Measurement({0: 4, 1: 6})})
+            self.assertTrue(agent.done)
+            self.assertEqual(len(agent.attempts), 2)
+            self.assertEqual(agent.completed, 2)
+            self.assertEqual(agent.best.id, repaired.id)
+            agent.close()
+            agent = paper.AlphaEvolve(
+                "task", ScriptedProvider([]), config=config, database_path=path
+            )
+            self.assertTrue(agent.done)
+            self.assertEqual(agent.best.id, repaired.id)
+            self.assertEqual(await agent.propose(), [])
+            agent.close()
+
+    async def test_legacy_completed_archive_opens_but_unresolved_stream_is_rejected(self):
+        for complete in (True, False):
+            with self.subTest(complete=complete), tempfile.TemporaryDirectory() as directory:
+                path = Path(directory) / "population.sqlite"
+                config = paper.Config(islands=1, proposals=1, meta_interval=0)
+                agent = paper.AlphaEvolve(
+                    "task", ScriptedProvider([program(0)]), config=config, database_path=path
+                )
+                (policy,) = await agent.propose()
+                if complete:
+                    agent.update({policy.id: Measurement({0: 3})})
+                agent.checkpoint()
+                state = agent.database.load_state("optimizer")
+                state.pop("round_state")
+                agent.database.save_state("optimizer", state)
+                agent.database.close()
+                if complete:
+                    restored = paper.AlphaEvolve(
+                        "task", ScriptedProvider([]), config=config, database_path=path
+                    )
+                    self.assertTrue(restored.done)
+                    self.assertEqual(restored.best.id, policy.id)
+                    restored.close()
+                else:
+                    with self.assertRaisesRegex(ValueError, "Legacy streaming checkpoint"):
+                        paper.AlphaEvolve(
+                            "task", ScriptedProvider([]), config=config, database_path=path
+                        )
+
     def test_invalid_counters_fail_before_starting_a_search(self):
         for field in (
             "migration_interval",
