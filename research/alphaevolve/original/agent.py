@@ -8,7 +8,7 @@ import asyncio
 import logging
 import math
 import random
-from collections.abc import Iterable, Mapping, Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from statistics import fmean
 from typing import Literal
@@ -18,9 +18,8 @@ from rich.table import Column
 from slick import parse, render
 from slick.providers import Provider, ProviderError
 
-from rsikit.episode import Episode
 from rsikit.generation import WORKER_LIBRARIES
-from rsikit.optimization import Optimizer
+from rsikit.optimization import Optimizer, validate_results
 from rsikit.policy import InvalidPolicy, Policy, validate_policy
 
 from ..generation import (
@@ -60,6 +59,9 @@ class PromptIdea:
 
 @dataclass(frozen=True)
 class Config:
+    batch_size: int = 10
+    proposals: int = 250
+    generation_concurrency: int = 4
     islands: int = 4
     inspirations: int = 3
     exploration: float = 0.2
@@ -68,6 +70,12 @@ class Config:
     mode: Literal["diff", "rewrite"] = "diff"
     generation_timeout: float | None = None
     max_repairs: int = 2
+
+    def __post_init__(self):
+        for name, minimum in (("batch_size", 1), ("proposals", 0), ("generation_concurrency", 1)):
+            value = getattr(self, name)
+            if type(value) is not int or value < minimum:
+                raise ValueError(f"{name} must be an integer >= {minimum}")
 
 
 class AlphaEvolve(Optimizer):
@@ -99,6 +107,10 @@ class AlphaEvolve(Optimizer):
         self.islands: list[_Candidate | None] = [None] * config.islands
         self._best: _Candidate | None = None
         self._pending: dict[str, list[dict]] = {}
+        self._round = {}
+        self._repairs = {}
+        self._proposing = False
+        self._seed_panel = None
         self.prompt_ideas = [PromptIdea("")]
         # ponytail: in-memory attempt history; bound it if searches exceed RAM.
         self.attempts: list[dict] = []
@@ -394,17 +406,88 @@ class AlphaEvolve(Optimizer):
             self._pending.setdefault(record["policy"].id, []).append(record)
         return [record["policy"] for record in records]
 
-    async def propose(self, n: int = 1) -> list[type[Policy]]:
-        return await self.generate(n)
+    @property
+    def done(self) -> bool:
+        return (
+            not self._proposing
+            and not self._pending
+            and not self._round
+            and not self._repairs
+            and self._attempt_offset + len(self.attempts) >= self.config.proposals
+        )
 
-    def update(self, results: Iterable[tuple[type[Policy], Episode]]) -> None:
-        """Rank candidates by mean episode return within this update."""
-        returns = {}
-        for policy, episode in results:
-            if not episode.rewards:
-                raise ValueError("Expected a nonempty episode")
-            returns.setdefault(policy.id, []).append(episode.total_reward)
-        self.update_scores({policy_id: fmean(values) for policy_id, values in returns.items()})
+    async def propose(self) -> list[type[Policy]]:
+        if self._proposing or self._round:
+            raise RuntimeError("Previous proposal round is still outstanding")
+        self._proposing = True
+        try:
+            while True:
+                policies = []
+                if self._repairs:
+                    slots = asyncio.Semaphore(self.config.generation_concurrency)
+
+                    async def repair(policy_id, diagnostic):
+                        async with slots:
+                            policy = self._pending[policy_id][0]["policy"]
+                            replacement = await self.repair(policy, diagnostic)
+                            self._repairs.pop(policy_id, None)
+                            return replacement
+
+                    tasks = [
+                        asyncio.create_task(repair(id, diagnostic))
+                        for id, diagnostic in list(self._repairs.items())
+                    ]
+                    try:
+                        policies = [p for p in await asyncio.gather(*tasks) if p is not None]
+                    finally:
+                        for task in tasks:
+                            task.cancel()
+                        await asyncio.gather(*tasks, return_exceptions=True)
+                elif self._pending:
+                    # Restored or interrupted proposals retain their original attempt identities.
+                    policies = [rows[0]["policy"] for rows in self._pending.values()]
+                else:
+                    remaining = self.config.proposals - self._attempt_offset - len(self.attempts)
+                    if remaining <= 0:
+                        return []
+                    policies = await self.generate(
+                        min(self.config.batch_size, remaining),
+                        concurrency=self.config.generation_concurrency,
+                    )
+                if policies:
+                    self._round = {p.id: p for p in policies}
+                    self.evaluation_started(self._round.values())
+                    return list(self._round.values())
+        finally:
+            self._proposing = False
+
+    def discard(self, policy, reason):
+        for record in self._pending.pop(policy.id, []):
+            record.update(status="discarded", error=reason)
+            self._log_candidate(record)
+
+    def _accept_measurements(self, results):
+        scores = {}
+        for policy_id, result in results.items():
+            if not result.scores:
+                raise ValueError("AlphaEvolve reward feedback requires per-seed scores")
+            scores[policy_id] = fmean(result.scores.values())
+        self.update_scores(scores, seed_scores={id: r.scores for id, r in results.items()})
+
+    def update(self, results) -> None:
+        panel = validate_results(results, self._round, seed_panel=self._seed_panel)
+        self._accept_measurements({id: r for id, r in results.items() if r.accepted})
+        for policy_id, result in results.items():
+            if result.failure is not None:
+                self._repairs[policy_id] = result.failure
+                for row in self._pending[policy_id]:
+                    row.update(status="execution_failed", error=result.failure)
+                    self._log_candidate(row)
+            elif not result.accepted:
+                self.discard(self._round[policy_id], result.feedback or "Evaluation rejected")
+        self._seed_panel = panel
+        self._round.clear()
+        self._log_leaderboard()
 
     def update_scores(
         self,

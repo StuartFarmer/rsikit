@@ -69,17 +69,15 @@ class EvaluationTests(unittest.IsolatedAsyncioTestCase):
 
         self.evaluation.evaluate.side_effect = evaluate
         results = await assess(self.rollouts, [self.good, self.bad], seeds=iter([0, 1, 0]))
-        self.assertEqual(results[self.good.id].seed_scores, {0: 2, 1: 3})
-        self.assertEqual(
-            results[self.good.id].metrics, {"reward": 2.5, "worst_reward": 2, "stability": -0.5}
-        )
+        self.assertEqual(results[self.good.id].scores, {0: 2, 1: 3})
+        self.assertEqual(results[self.good.id].metrics, {})
         self.assertIn("invalid action", results[self.bad.id].failure)
         self.assertFalse(results[self.bad.id].accepted)
         self.assertEqual(results[self.bad.id].metrics, {})
         self.assertEqual(self.run.scores(self.bad), {0: 2, 1: None})
         self.evaluation.evaluate.side_effect = None
         recovered = await assess(self.rollouts, [self.good, self.bad], seeds=[0, 1])
-        self.assertEqual(recovered[self.bad.id].seed_scores, {0: 2, 1: 7})
+        self.assertEqual(recovered[self.bad.id].scores, {0: 2, 1: 7})
         self.assertEqual(self.evaluation.evaluate.await_count, 5)
 
     async def test_screening_handles_failure_rejection_and_success_separately(self):
@@ -102,7 +100,7 @@ class EvaluationTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNotNone(results[self.bad.id].failure)
         self.assertIsNone(results[low.id].failure)
         self.assertFalse(results[low.id].accepted)
-        self.assertEqual(results[self.good.id].features, {"mean_reward": 11, "reward_std": 1})
+        self.assertEqual(results[self.good.id].features, {})
         self.assertEqual(self.run.scores(low), {0: 0})
         self.assertEqual(self.evaluation.evaluate.await_count, 4)
 

@@ -11,11 +11,11 @@ from slick.providers import ProviderError
 
 from research import alphaevolve
 from research.alphaevolve.paper.evaluation import (
-    EvaluationResult,
     EvaluationStage,
     evaluate_cascade,
 )
 from research.alphaevolve.paper.feedback import LLMFeedback
+from rsikit import Measurement
 from rsikit.policy import Policy
 from tests.providers import ScriptedProvider
 from tests.test_alphaevolve import program
@@ -27,8 +27,11 @@ class FeedbackTests(unittest.IsolatedAsyncioTestCase):
         root.start()
         self.addCleanup(root.stop)
         self.policy = Policy.from_text(program(0).implementation, name="Candidate")
-        self.measured = EvaluationResult(
-            {"reward": 9}, {"variability": 2}, "Completed every episode", {3: 9}
+        self.measured = Measurement(
+            metrics={"reward": 9},
+            features={"variability": 2},
+            feedback="Completed every episode",
+            scores={3: 9},
         )
 
     async def test_rubric_grades_add_objectives_to_measured_cascade(self):
@@ -53,7 +56,7 @@ class FeedbackTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(result.metrics, {"reward": 9, "clarity": 0.8})
         self.assertEqual(result.features, self.measured.features)
-        self.assertEqual(result.seed_scores, {3: 9})
+        self.assertEqual(result.scores, {3: 9})
         self.assertEqual(
             result.feedback, "Completed every episode\nThe branches are understandable."
         )

@@ -1,14 +1,11 @@
 """Published AlphaEvolve mechanisms with explicitly documented local archive rules."""
 
 import json
-import math
-from collections.abc import Iterable
 from dataclasses import asdict, dataclass, field
 from statistics import fmean, pstdev
 
 from slick import parse, render
 
-from rsikit.episode import Episode
 from rsikit.policy import Policy, validate_policy
 
 from ..generation import Mutation, _PolicyResponse, apply_edits, evolution_regions
@@ -31,6 +28,7 @@ class Config(BaselineConfig):
     meta_interval: int = 25
 
     def __post_init__(self):
+        super().__post_init__()
         if self.reset_interval:
             raise ValueError("The paper variant uses migration_interval, not champion resets")
         for value in (
@@ -78,6 +76,42 @@ class AlphaEvolve(Baseline):
             self.prompt_ideas = [PromptIdea(**idea) for idea in state["prompt_ideas"]]
             version, internal, gaussian = state["rng"]
             self.rng.setstate((version, tuple(internal), gaussian))
+            round_state = state.get("round_state")
+            if round_state is not None:
+                self._attempt_offset = round_state["attempt_offset"]
+                self._batch_number = round_state["batch_number"]
+                self._seed_panel = (
+                    set(round_state["seed_panel"])
+                    if round_state["seed_panel"] is not None
+                    else None
+                )
+                self._repairs = dict(round_state["repairs"])
+                for saved in round_state["attempts"]:
+                    row = dict(saved)
+                    if row.get("policy") is not None:
+                        row["policy"] = Policy.from_text(row["policy"])
+                    if row.get("parent") is not None:
+                        parent = dict(row["parent"])
+                        parent["policy"] = Policy.from_text(parent["policy"])
+                        parent["seed_scores"] = {
+                            int(k): v for k, v in parent["seed_scores"].items()
+                        }
+                        row["parent"] = Candidate(**parent)
+                    if row.get("idea") is not None:
+                        row["idea"] = self.prompt_ideas[row["idea"]]
+                    self.attempts.append(row)
+                    if row.get("policy") is not None and row["status"] in (
+                        "generated",
+                        "repaired",
+                        "execution_failed",
+                        "evaluating",
+                    ):
+                        self._pending.setdefault(row["policy"].id, []).append(row)
+            elif state["attempts"] != state["completed"]:
+                self.database.close()
+                raise ValueError(
+                    "Legacy streaming checkpoint has unresolved attempts; start a new run from an exported policy"
+                )
         self._completed_offset = self.completed
         self._sync()
         self._log_leaderboard()
@@ -88,9 +122,30 @@ class AlphaEvolve(Baseline):
         self._best = self.database.best
 
     def checkpoint(self):
+        attempts = []
+        for record in self.attempts:
+            row = dict(record)
+            if row.get("policy") is not None:
+                row["policy"] = row["policy"].to_text()
+            if row.get("parent") is not None:
+                row["parent"] = {**asdict(row["parent"]), "policy": row["parent"].policy.to_text()}
+            if row.get("idea") is not None:
+                row["idea"] = next(
+                    i for i, idea in enumerate(self.prompt_ideas) if idea is row["idea"]
+                )
+            attempts.append(row)
         self.database.save_state(
             "optimizer",
             {
+                "round_state": {
+                    "attempts": attempts,
+                    "attempt_offset": self._attempt_offset,
+                    "batch_number": self._batch_number,
+                    "repairs": self._repairs,
+                    "seed_panel": sorted(self._seed_panel)
+                    if self._seed_panel is not None
+                    else None,
+                },
                 "task": self.task,
                 "context": self.context,
                 "completed": self.completed,
@@ -197,32 +252,33 @@ class AlphaEvolve(Baseline):
         self._log_leaderboard()
         self.checkpoint()
 
-    def update(self, results: Iterable[tuple[type[Policy], Episode]]) -> None:
-        """Derive reward fitness from episodes before updating the archive.
-
-        Repeated policy IDs aggregate episode returns in this update. Episodes
-        carry no seed IDs, so no seed labels are invented. Custom metrics and
-        externally graded feedback can still be supplied through update_results.
-        """
-        unknown = self.config.features.keys() - {"mean_reward", "reward_std"}
-        if unknown:
-            raise ValueError(f"Episode reward descriptors unavailable: {sorted(unknown)}")
-        returns = {}
-        for policy, episode in results:
-            if not isinstance(episode, Episode):
-                raise TypeError("Expected an Episode")
-            if not episode.rewards or not math.isfinite(episode.total_reward):
-                raise ValueError("Expected a nonempty episode with a finite return")
-            returns.setdefault(policy.id, []).append(episode.total_reward)
-        assessed = {}
-        for policy_id, values in returns.items():
+    def _evaluation_result(self, measurement):
+        metrics, features = {}, {}
+        if measurement.scores:
+            values = list(measurement.scores.values())
             mean, std = fmean(values), pstdev(values)
-            descriptors = {"mean_reward": mean, "reward_std": std}
-            assessed[policy_id] = EvaluationResult(
-                metrics={"reward": mean, "worst_reward": min(values), "stability": -std},
-                features={name: descriptors[name] for name in self.config.features},
-            )
-        self.update_results(assessed)
+            metrics = {"reward": mean, "worst_reward": min(values), "stability": -std}
+            features = {"mean_reward": mean, "reward_std": std}
+        metrics.update(measurement.metrics)
+        features.update(measurement.features)
+        missing = self.config.features.keys() - features.keys()
+        if measurement.accepted and missing:
+            raise ValueError(f"Missing measured descriptors: {sorted(missing)}")
+        return EvaluationResult(
+            metrics=metrics,
+            features={name: features[name] for name in self.config.features if name in features},
+            seed_scores=measurement.scores,
+            feedback=measurement.feedback,
+            accepted=measurement.accepted,
+            failure=measurement.failure,
+        )
+
+    def _accept_measurements(self, results):
+        self.update_results({id: self._evaluation_result(r) for id, r in results.items()})
+
+    def update(self, results):
+        super().update(results)
+        self.checkpoint()
 
     def update_scores(self, scores, *, seed_scores=None):
         """Scalar feedback for tasks without descriptor dimensions."""

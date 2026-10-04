@@ -4,10 +4,11 @@ import math
 from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass, field, replace
 from numbers import Real
-from statistics import fmean, pstdev
+from statistics import fmean
 from typing import Any
 
 from research.rewards import measure_rewards
+from rsikit import Measurement
 
 
 def _numbers(values, *, seeds=False):
@@ -65,22 +66,23 @@ class EvaluationResult:
 class EvaluationStage:
     """Run evaluate(policy); each named objective must meet its lower bound."""
 
-    evaluate: Callable[[Any], Awaitable[EvaluationResult]]
+    evaluate: Callable[[Any], Awaitable[Measurement]]
     thresholds: dict[str, float] = field(default_factory=dict)
 
     def __post_init__(self):
         if not callable(self.evaluate):
             raise ValueError("Evaluation stage requires a callable evaluator")
-        object.__setattr__(self, "thresholds", EvaluationResult(self.thresholds).metrics)
+        object.__setattr__(
+            self, "thresholds", Measurement(metrics=self.thresholds, accepted=False).metrics
+        )
 
 
 async def evaluate_cascade(
     policy,
     stages: Sequence[EvaluationStage],
     *,
-    feedback_evaluator: Callable[[Any, EvaluationResult], Awaitable[EvaluationResult]]
-    | None = None,
-) -> EvaluationResult:
+    feedback_evaluator: Callable[[Any, Measurement], Awaitable[Measurement]] | None = None,
+) -> Measurement:
     """Prune after cheap checks, then optionally grade (policy, combined_result).
 
     Later measurements overwrite earlier estimates. Feedback is concatenated;
@@ -92,20 +94,20 @@ async def evaluate_cascade(
         raise ValueError("A cascade requires at least one valid EvaluationStage")
     if feedback_evaluator is not None and not callable(feedback_evaluator):
         raise ValueError("Feedback evaluator must be callable")
-    result = EvaluationResult({})
+    result = Measurement(accepted=False)
 
     def combine(next_result, thresholds):
-        if not isinstance(next_result, EvaluationResult):
-            raise ValueError("Evaluators must return EvaluationResult")
+        if not isinstance(next_result, Measurement):
+            raise ValueError("Evaluators must return Measurement")
         metrics = {**result.metrics, **next_result.metrics}
         missing = thresholds.keys() - metrics.keys()
         if missing and next_result.failure is None:
             raise ValueError(f"Threshold metrics missing from evaluation: {sorted(missing)}")
-        return EvaluationResult(
+        return Measurement(
             metrics=metrics,
             features={**result.features, **next_result.features},
             feedback="\n".join(text for text in (result.feedback, next_result.feedback) if text),
-            seed_scores={**result.seed_scores, **next_result.seed_scores},
+            scores={**result.scores, **next_result.scores},
             failure=next_result.failure,
             accepted=next_result.accepted
             and all(metrics[key] >= value for key, value in thresholds.items()),
@@ -122,11 +124,11 @@ async def evaluate_cascade(
 
 async def assess(
     rollouts, policies, seeds=(0,), *, features=(), screening_seeds=(), screening_min_reward=None
-) -> dict[str, EvaluationResult]:
-    """Apply AlphaEvolve objectives and screening to requested rollouts.
+) -> dict[str, Measurement]:
+    """Return per-seed evidence; the optimizer derives objectives and descriptors.
 
-    Return reward, worst_reward and stability (-population standard deviation).
-    Optional descriptors are mean_reward and reward_std. Screening uses a cheap
+    The features argument validates the requested reward-derived descriptors.
+    Screening uses a cheap
     seed panel first; rejected/failed candidates skip the full panel. Full results
     contain only the requested evaluation seeds, even when Run has other scores.
     The caller owns rollout execution and run persistence.
@@ -151,28 +153,14 @@ async def assess(
         if not batch:
             return {}
         measured = await measure_rewards(rollouts, batch, panel)
-        results = {}
-        for policy in batch:
-            measurement = measured[policy.id]
-            if measurement.failure is not None:
-                results[policy.id] = EvaluationResult(failure=measurement.failure)
-                continue
-            scores = measurement.scores
-            mean, std = fmean(scores.values()), pstdev(scores.values())
-            descriptors = {"mean_reward": mean, "reward_std": std}
-            results[policy.id] = EvaluationResult(
-                metrics={"reward": mean, "worst_reward": min(scores.values()), "stability": -std},
-                features={name: descriptors[name] for name in features},
-                seed_scores=scores,
-            )
-        return results
+        return measured
 
     results = {}
     if screening_seeds:
         for policy_id, result in (await measure(policies, screening_seeds)).items():
             if result.failure is not None:
                 results[policy_id] = result
-            elif result.metrics["reward"] < screening_min_reward:
+            elif fmean(result.scores.values()) < screening_min_reward:
                 results[policy_id] = replace(
                     result,
                     accepted=False,

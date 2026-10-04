@@ -5,8 +5,7 @@ from typing import Annotated
 
 from pydantic import BaseModel, Field, StringConstraints
 
-from rsikit.policy import Policy
-from rsikit.policy import InvalidPolicy
+from rsikit.policy import InvalidPolicy, Policy
 
 MARKER = re.compile(r"^.*?EVOLVE-BLOCK-(START|END)[^\r\n]*(?:\r?\n|$)", re.MULTILINE)
 
