@@ -170,3 +170,48 @@ class OptimizerContractTests(unittest.IsolatedAsyncioTestCase):
             with self.assertRaises(ValueError):
                 agent.update({replacement.id: Measurement({0: 7})})
 
+    async def test_lineage_rounds_preserve_family_update_and_repair_boundaries(self):
+        from research import lineagesearch
+        from research.lineagesearch import Config, LineageSearch
+        from tests.test_lineagesearch import experiments, families
+        from tests.test_lineagesearch import program as lineage_program
+
+        with patch.object(
+            prompts, "TEMPLATE_ROOT", Path(lineagesearch.__file__).parent / "prompts"
+        ):
+            agent = LineageSearch(
+                "task",
+                ScriptedProvider(
+                    [
+                        families(),
+                        experiments(0, 1),
+                        lineage_program(0),
+                        lineage_program(1),
+                        lineage_program(2),
+                    ]
+                ),
+                config=Config(
+                    families=1,
+                    decomposition_k=1,
+                    initial_per_family=2,
+                    max_attempts=2,
+                    max_repairs=1,
+                    generation_concurrency=1,
+                ),
+            )
+            first, second = await agent.propose()
+            with self.assertRaises(RuntimeError):
+                await agent.propose()
+            with self.assertRaises(ValueError):
+                agent.update({first.id: Measurement({0: 3}), second.id: Measurement({1: 4})})
+            self.assertIsNone(agent.trials[0].score)
+            agent.update({first.id: Measurement({0: 3}), second.id: Measurement(failure="broken")})
+            self.assertEqual(agent.families[0].batches, 0)
+            (repaired,) = await agent.propose()
+            agent.update({repaired.id: Measurement({0: 7})})
+            self.assertTrue(agent.done)
+            self.assertEqual(agent.best.id, repaired.id)
+            self.assertEqual(agent.study.attempts, 2)
+            self.assertEqual(agent.families[0].batches, 1)
+            with self.assertRaises(ValueError):
+                agent.update({repaired.id: Measurement({0: 7})})
