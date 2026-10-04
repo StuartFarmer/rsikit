@@ -16,6 +16,7 @@ COPY pyproject.toml .
 # Resolve project dependencies before copying frequently edited source.
 RUN python -c "import subprocess, tomllib; p=tomllib.load(open('pyproject.toml','rb'))['project']; subprocess.check_call(['pip','install','--no-cache-dir',*p['dependencies'],*(d for e in ('openai','box2d','video','dev') for d in p['optional-dependencies'][e])])"
 COPY scripts/install_ocean.py /tmp/install_ocean.py
+COPY scripts/ocean-episodes.patch /tmp/ocean-episodes.patch
 RUN if [ "$OCEAN" = 1 ]; then \
     apt-get update && apt-get install -y --no-install-recommends git ca-certificates libgl1 libx11-6 && \
     rm -rf /var/lib/apt/lists/* && \

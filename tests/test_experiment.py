@@ -17,6 +17,71 @@ from tests.test_elitesearch import program
 
 
 class ExperimentTests(unittest.IsolatedAsyncioTestCase):
+    async def test_resume_keeps_completed_candidates_and_charges_previous_calls(self):
+        from slick.providers import ProviderError
+        from sqlmodel import select
+
+        from research import experiment
+        from research.elitesearch.records import Organism
+
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory) / "run"
+            config = parse_config(
+                ["run"],
+                config=dict(
+                    env="CartPole-v1",
+                    optimizer="elite",
+                    model="scripted",
+                    output=str(output),
+                    optimizer_options=dict(
+                        population=1, elites=1, generations=2, new_fraction=1.0, remix_fraction=0.0
+                    ),
+                    evaluation=dict(seeds=[7], max_steps=2, workers=1),
+                    budget=dict(max_calls=3),
+                ),
+            )
+            with (
+                patch.dict("os.environ", {"OPENROUTER_API_KEY": "scripted"}),
+                patch(
+                    "research.providers.UsageOpenRouter",
+                    return_value=ScriptedProvider([program(0), ProviderError("connection lost")]),
+                ),
+                self.assertRaisesRegex(ProviderError, "connection lost"),
+            ):
+                await experiment.run_experiment(config)
+            original_config = (output / "config.yaml").read_bytes()
+            original_manifest = (output / "manifest.json").read_bytes()
+            with Run.open(output) as run:
+                with run.database() as db:
+                    first = db.get(Organism, 1).model_dump()
+            self.assertEqual(first["status"], "evaluated")
+            moved = output.rename(Path(directory) / "moved")
+            with (
+                patch.dict("os.environ", {"OPENROUTER_API_KEY": "scripted"}),
+                patch(
+                    "research.providers.UsageOpenRouter",
+                    return_value=ScriptedProvider([program(1)]),
+                ),
+            ):
+                from research.cli import main
+
+                await asyncio.to_thread(main, ["resume", str(moved)])
+                summary = json.loads((moved / "summary.json").read_text())
+                # Resuming a finished search must not generate or evaluate it again.
+                again = await experiment.resume_experiment(moved)
+            self.assertEqual(summary, again)
+            self.assertEqual(summary["status"], "completed")
+            self.assertEqual(summary["generation"]["calls"], 3)
+            self.assertEqual(summary["phases"]["search"]["requested_candidates"], 2)
+            self.assertEqual(summary["phases"]["search"]["seed_runs"], 2)
+            self.assertEqual((moved / "config.yaml").read_bytes(), original_config)
+            self.assertEqual((moved / "manifest.json").read_bytes(), original_manifest)
+            with Run.open(moved) as run:
+                with run.database() as db:
+                    rows = db.exec(select(Organism).order_by(Organism.id)).all()
+                    self.assertEqual(rows[0].model_dump(), first)
+                    self.assertEqual([r.status for r in rows], ["evaluated", "evaluated"])
+
     async def test_gym_sessions_match_direct_episode_and_cache(self):
         from rsikit.envs.tasks import make_environment
         from rsikit.evaluation import _run_episode
@@ -82,7 +147,7 @@ class ExperimentTests(unittest.IsolatedAsyncioTestCase):
                         json.loads(s)
                         for s in (run.path / "panels/evaluations.jsonl").read_text().splitlines()
                     ]
-                    self.assertEqual(events[0]["steps"], 8)
+                    self.assertEqual(events[0]["steps"], 4)
 
     async def test_scripted_search_real_backends_and_evaluate_only(self):
         from research.experiment import evaluate_policies, run_experiment
@@ -115,12 +180,6 @@ class ExperimentTests(unittest.IsolatedAsyncioTestCase):
                     "4",
                     "--workers",
                     "1",
-                    "--spend-cap",
-                    "100",
-                    "--input-price",
-                    "1",
-                    "--output-price",
-                    "1",
                 ]
                 if name.startswith("ocean:"):
                     args += ["--batch-size", "2"]
@@ -146,6 +205,7 @@ class ExperimentTests(unittest.IsolatedAsyncioTestCase):
                     summary = await run_experiment(config)
                 self.assertEqual(summary["status"], "completed", summary)
                 self.assertEqual(summary["generation"]["calls"], 2)
+                self.assertIsNone(summary["generation"]["reserved_cost"])
                 self.assertEqual(summary["phases"]["search"]["requested_candidates"], 2)
                 self.assertIsNone(summary["generation"]["output_tokens"])
                 winner = Path(config["output"]) / "winner.py"

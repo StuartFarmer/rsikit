@@ -12,7 +12,7 @@ from pathlib import Path
 from typing import Literal
 
 import yaml
-from pydantic import BaseModel, Field, ValidationError
+from pydantic import BaseModel, Field, ValidationError, model_validator
 
 from research.experiment import EvaluationConfig, Options
 
@@ -26,11 +26,17 @@ class Generation(Options):
 
 
 class Budget(Options):
-    spend_cap: float = Field(gt=0)
-    input_price: float = Field(gt=0)
-    output_price: float = Field(gt=0)
+    spend_cap: float | None = Field(default=None, gt=0)
+    input_price: float | None = Field(default=None, gt=0)
+    output_price: float | None = Field(default=None, gt=0)
     max_calls: int | None = Field(default=None, ge=1)
     max_tokens: int | None = Field(default=None, ge=1)
+
+    @model_validator(mode="after")
+    def spend_requires_prices(self):
+        if self.spend_cap is not None and (self.input_price is None or self.output_price is None):
+            raise ValueError("spend_cap requires input_price and output_price")
+        return self
 
 
 class Selection(Options):
@@ -59,7 +65,7 @@ class SearchConfig(Common):
     search_seed: int = Field(default=0, ge=0)
     optimizer_options: dict = Field(default_factory=dict)
     generation: dict = Field(default_factory=dict)
-    budget: dict
+    budget: dict = Field(default_factory=dict)
     selection: dict = Field(default_factory=dict)
     videos: dict = Field(default_factory=dict)
 
@@ -243,7 +249,7 @@ def parse_config(argv=None, *, config=None):
     argv = list(sys.argv[1:] if argv is None else argv)
     if not argv or argv in (["--help"], ["-h"]):
         help_parser = argparse.ArgumentParser(prog="rsikit", description=__doc__)
-        help_parser.add_argument("command", choices=("run", "evaluate"))
+        help_parser.add_argument("command", choices=("run", "evaluate", "resume"))
         help_parser.print_help()
         raise SystemExit(0)
     bootstrap = argparse.ArgumentParser(
@@ -374,17 +380,7 @@ def parse_config(argv=None, *, config=None):
         config["generation"] = _validate(
             Generation, config["generation"], "generation"
         ).model_dump()
-        budget = _validate(Budget, config["budget"], "budget").model_dump()
-        if budget["max_calls"] is None:
-            if config["optimizer"] != "elite":
-                raise ValueError("budget.max_calls is required for custom optimizers")
-            opt = config["optimizer_options"]
-            budget["max_calls"] = opt["population"] * opt["generations"] * (1 + opt["max_repairs"])
-        if budget["max_tokens"] is None:
-            budget["max_tokens"] = budget["max_calls"] * sum(
-                config["generation"][k] for k in ("max_input_tokens", "max_output_tokens")
-            )
-        config["budget"] = budget
+        config["budget"] = _validate(Budget, config["budget"], "budget").model_dump()
         selection = config["selection"]
         for key in ("validation_seeds", "test_seeds"):
             selection[key] = _seeds(selection.get(key, []), "selection." + key, empty=True)
@@ -402,27 +398,35 @@ def parse_config(argv=None, *, config=None):
         if seen.intersection(seeds):
             raise ValueError("Search, validation and test seeds must be disjoint")
         seen.update(seeds)
-    if env.protocol == "ocean-upstream-fixed-horizon-v1":
+    if env.protocol == "ocean-upstream-episodic-v2":
         width, horizon = evaluation["batch_size"], evaluation["max_steps"]
         if width is None or horizon is None or max(width, horizon) > 2**31 - 1:
             raise ValueError("Ocean requires positive int32 batch_size and max_steps")
-        if any((s + 1) * width > 2**31 for s in seen):
-            raise ValueError("Ocean seeds and batch_size exceed upstream signed integer limits")
+        if any(s > 2**31 - 1 for s in seen):
+            raise ValueError("Ocean seeds must be nonnegative int32 integers")
     return config
 
 
 def main(argv=None):
     argv = sys.argv[1:] if argv is None else argv
     try:
-        config = parse_config(argv)
-        if "--print-config" in argv:
-            print(yaml.safe_dump(config, sort_keys=False, allow_unicode=True), end="")
-            return
-        from research.experiment import evaluate_policies, run_experiment
+        from research.experiment import evaluate_policies, resume_experiment, run_experiment
 
-        summary = asyncio.run(
-            (run_experiment if config["command"] == "run" else evaluate_policies)(config)
-        )
+        if argv and argv[0] == "resume":
+            parser = argparse.ArgumentParser(
+                prog="rsikit resume", description="Continue a saved Elite search"
+            )
+            parser.add_argument("directory", type=Path)
+            args = parser.parse_args(argv[1:])
+            summary = asyncio.run(resume_experiment(args.directory))
+        else:
+            config = parse_config(argv)
+            if "--print-config" in argv:
+                print(yaml.safe_dump(config, sort_keys=False, allow_unicode=True), end="")
+                return
+            summary = asyncio.run(
+                (run_experiment if config["command"] == "run" else evaluate_policies)(config)
+            )
         print(json.dumps(summary, indent=2, allow_nan=False))
         if summary["status"] not in ("completed", "budget_exhausted"):
             raise SystemExit(1)

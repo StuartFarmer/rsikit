@@ -1,6 +1,6 @@
 # Ocean search controllers: GEPA, RRSI and alternatives
 
-> Implementation update (2026-10-03): evaluation now uses upstream Ocean bindings with batch reset seeds and a fixed horizon. See [the current protocol](OCEAN_BENCHMARK.md). Earlier episode counts, native-version details, and timing projections below are historical.
+> Implementation update (2026-10-03): evaluation now uses patched upstream Ocean bindings with one episode per seed; batch size only limits concurrency. See [the current protocol](OCEAN_BENCHMARK.md). Earlier episode counts, native-version details, and timing projections below are historical.
 
 Investigated 2026-10-02. This is a source-backed integration recommendation,
 not an Ocean performance comparison. No competitor was installed or run against

@@ -97,6 +97,7 @@ class RunDisplay:
         self.environment = self.optimizer = "—"
         self.columns, self.batches, self.candidates = {}, {}, {}
         self.leaders = []
+        self.workers = {}
         self.leaderboard_size = 10
         self.proposals, self.evaluations = deque(maxlen=50), deque(maxlen=50)
         self.logs = deque(maxlen=100)
@@ -180,8 +181,9 @@ class RunDisplay:
             .replace("+00:00", "Z")
         )
         with self.lock:
-            self.logs.extend(_event_lines(record, stamp))
             payload = getattr(record, "progress", None)
+            if not isinstance(payload, dict) or payload.get("kind") != "workers":
+                self.logs.extend(_event_lines(record, stamp))
             if payload is None:
                 return
             try:
@@ -201,6 +203,20 @@ class RunDisplay:
             return
         if kind == "environment":
             self.environment = str(p["name"])
+        elif kind == "workers":
+            pools = p["pools"]
+            if not isinstance(pools, dict) or any(
+                not isinstance(name, str)
+                or not isinstance(pool, dict)
+                or any(
+                    type(pool.get(k)) is not int or pool[k] < 0
+                    for k in ("active", "limit", "queued", "finished")
+                )
+                or pool["active"] > pool["limit"]
+                for name, pool in pools.items()
+            ):
+                raise ValueError("invalid worker counts")
+            self.workers = {name: dict(pool) for name, pool in pools.items()}
         elif kind in ("search_started", "batch_started"):
             total = p["total_candidates"]
             if total is not None and (type(total) is not int or total < 0):
@@ -512,8 +528,23 @@ class RunDisplay:
         else:
             work = Group(proposal, evaluation)
         log_lines = Text("\n").join(self.logs).wrap(self.console, max(1, width - 4))
+        worker_line = (
+            [
+                Text(
+                    " | ".join(
+                        f"{name} {p['active']}/{p['limit']} q{p['queued']} done{p['finished']}"
+                        for name, p in self.workers.items()
+                    ),
+                    style="bold cyan",
+                    no_wrap=True,
+                    overflow="ellipsis",
+                )
+            ]
+            if self.workers
+            else []
+        )
         logs = Panel(
-            Group(*log_lines[-(log_height - 2) :]),
+            Group(*worker_line, *log_lines[-max(1, log_height - 2 - len(worker_line)) :]),
             title="EVENT LOG",
             title_align="left",
             height=log_height,

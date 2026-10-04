@@ -1,12 +1,21 @@
 # Ocean meta-experiment: search for better policy searchers
 
-> Implementation update (2026-10-03): evaluation now uses upstream Ocean bindings with batch reset seeds and a fixed horizon. See [the current protocol](OCEAN_BENCHMARK.md). Earlier episode counts, native-version details, and timing projections below are historical.
+> Implementation update (2026-10-03): evaluation now uses patched upstream Ocean bindings with one episode per seed; batch size only limits concurrency. See [the current protocol](OCEAN_BENCHMARK.md). Earlier episode counts, native-version details, and timing projections below are historical.
 
-Status: proposed experiment, 2026-10-02. The [2048 evaluator and search example](OCEAN_BENCHMARK.md)
-exist. The multi-environment benchmark, protected scoring boundary and outer
-controller search described here are new work. No meta-experiment has run yet.
+Status: the [EliteTable experiment](ELITETABLE_META_EXPERIMENT.md) now writes sub-evolvers,
+each evaluated over five policy generations capped at 25 proposals in the supplied config.
+Its outer search uses 20 proposals across five generations, retaining 10 elites. The earlier
+[GEPA mixed-environment pilot](GEPA_META_EXPERIMENT.md) remains available. Both run 2048,
+Breakout and a headless Maze adapter, with isolated execution, metered oracles,
+and held-out seed/map audits. EliteTable fitness measures improvement over a fixed
+EliteTable optimizer under matching budgets and seeds, without heuristic calibration.
+Only the legacy GEPA pilot uses 64-case calibration. Both use 64-case
+development/validation audits and 512-case final audits.
+The larger protocol and recursive comparison below remain a design reference;
+the linked guide specifies the implemented settings. Automated verification uses
+scripted model responses and does not launch paid campaigns.
 
-Update: the [controller-options investigation](OCEAN_CONTROLLER_OPTIONS.md)
+Historical design: the [controller-options investigation](OCEAN_CONTROLLER_OPTIONS.md)
 recommends GEPA and RRSI as outer optimizers, starting from a simple shared
 generate/evaluate/revise controller. EliteTable is an optional reference rather
 than the required starting architecture. Earlier revision-count sizing below is

@@ -148,7 +148,7 @@ async def select_winner(candidates, evaluate, run, selection):
     return result
 
 
-async def _experiment(config):
+async def _experiment(config, *, resume=False):
     from research.cli import load_component, parse_config
 
     # The Python entry point receives the same validation as the CLI.
@@ -177,11 +177,9 @@ async def _experiment(config):
         provenance=provenance,
         image=os.environ.get("RSIKIT_IMAGE_ID"),
         revision=os.environ.get("RSIKIT_GIT_REVISION"),
-        seed_semantics="upstream batch reset" if evaluation.batch_size else "episode reset",
-        transitions_per_candidate=len(evaluation.seeds)
-        * evaluation.batch_size
-        * evaluation.max_steps
-        if evaluation.batch_size
+        seed_semantics="one episode per seed",
+        max_transitions_per_candidate=len(evaluation.seeds) * evaluation.max_steps
+        if evaluation.max_steps
         else None,
         source_hashes={},
     )
@@ -209,13 +207,30 @@ async def _experiment(config):
     counts = {}
     summary = dict(status="running", phases={})
     provider = None
-    with Run.create(
-        name=f"{config['env']}-{config.get('optimizer', 'evaluate')}", path=config["output"]
-    ) as run:
-        (run.path / "config.yaml").write_text(
-            yaml.safe_dump(config, sort_keys=False, allow_unicode=True)
+    with (
+        Run.open(config["output"])
+        if resume
+        else Run.create(
+            name=f"{config['env']}-{config.get('optimizer', 'evaluate')}", path=config["output"]
         )
-        save_json(run.path / "manifest.json", manifest)
+    ) as run:
+        previous = {}
+        previous_calls = []
+        if resume:
+            if (run.path / "summary.json").exists():
+                previous = json.loads((run.path / "summary.json").read_text())
+            if (run.path / "model_calls.jsonl").exists():
+                with (run.path / "model_calls.jsonl").open() as stream:
+                    previous_calls = [json.loads(line) for line in stream]
+            if max((e["call"] for e in previous_calls), default=0) < previous.get(
+                "generation", {}
+            ).get("calls", 0):
+                raise ValueError("Model call ledger is incomplete; cannot restore budget")
+        else:
+            (run.path / "config.yaml").write_text(
+                yaml.safe_dump(config, sort_keys=False, allow_unicode=True)
+            )
+            save_json(run.path / "manifest.json", manifest)
         # Retain the metadata expected by the existing generation-video exporter.
         if search and config["videos"]["top"]:
             save_json(
@@ -305,6 +320,7 @@ async def _experiment(config):
                         max_output_tokens=generation["max_output_tokens"],
                         log=log,
                     )
+                    provider.restore(previous_calls)
                     # Shared runtime settings are available to all optimizer entry points.
                     options = {
                         **config["optimizer_options"],
@@ -356,6 +372,13 @@ async def _experiment(config):
                     if not phase["evaluation_submissions"]:
                         for key in ("evaluation_submissions", "seed_runs", "transitions"):
                             phase[key] = None
+            for phase, prior in previous.get("phases", {}).items():
+                if phase == "rendering":
+                    continue  # Rendering is recounted from its full append-only log below.
+                current = summary["phases"].setdefault(phase, {})
+                for key, value in prior.items():
+                    added = current.get(key, 0)
+                    current[key] = None if value is None or added is None else value + added
             replay_log = run.path / "videos/executions.jsonl"
             if replay_log.exists():
                 replay = [json.loads(line) for line in replay_log.read_text().splitlines()]
@@ -374,6 +397,18 @@ async def run_experiment(config: dict) -> dict:
     if config.get("command") != "run":
         raise ValueError("run_experiment requires a run configuration")
     return await _experiment(config)
+
+
+async def resume_experiment(path: str | Path) -> dict:
+    """Continue an Elite search in place using its saved configuration and budget."""
+    from research.cli import read_config
+
+    path = Path(path).resolve()
+    config = read_config(path / "config.yaml")
+    if config.get("command") != "run" or config.get("optimizer") != "elite":
+        raise ValueError("Resume currently supports unified CLI Elite searches only")
+    config["output"] = str(path)
+    return await _experiment(config, resume=True)
 
 
 async def evaluate_policies(config: dict) -> dict:

@@ -151,8 +151,11 @@ class Executor:
                     except ProcessLookupError:
                         pass  # Child may not yet have reached setsid().
                     except PermissionError:
-                        # Darwin returns EPERM for an already-exited, empty process group.
-                        if sys.platform != "darwin" or process.is_alive():
+                        if sys.platform != "darwin":
+                            raise
+                        # Darwin can report EPERM before an exiting child is reapable.
+                        await asyncio.to_thread(process.join, 1.0)
+                        if process.is_alive():
                             raise
                     if process.is_alive():
                         process.kill()

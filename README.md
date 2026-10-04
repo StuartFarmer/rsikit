@@ -136,6 +136,9 @@ For finite-shoe blackjack with betting and memory across hands, see the
 Run a Blackjack test with automatic leader videos after each generation using
 `./scripts/run examples.blackjack_train --output runs/blackjack-test`.
 
+For single-asset strategy search from your own CSV, use `--env PriceSeries`
+with `--env-data-path prices.csv`; see the [price-series environment](docs/PRICE_SERIES.md).
+
 For daily BTC portfolio allocation with transaction fees and a seven-year training /
 three-year validation split, see the [Bitcoin environment](docs/BITCOIN.md).
 Use `--env Bitcoin` with the optimizer examples, or benchmark locally with
@@ -371,7 +374,8 @@ bindings, pinned to its Python-facing 3.0 source. The CLI supports 2048 and Brea
   --output runs/ocean-upstream-check
 ```
 
-Each seed identifies a whole batch rollout. Docker builds the upstream bindings
+Each seed identifies one episode; batch size limits concurrent games. Docker
+builds the upstream bindings with the episodic compatibility patch
 automatically; Ocean and full-test images use `linux/amd64` because upstream's
 Linux native archives are x86-64. Local development uses `uv sync --extra ocean
 --extra dev` followed by `.venv/bin/python scripts/install_ocean.py`.

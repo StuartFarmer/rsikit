@@ -45,11 +45,17 @@ TASKS = {
 
 def make_environment(name, *, max_steps=None, render_mode=None, shoes_per_episode=24):
     if name in ("Bitcoin", "Blackjack"):
-        if render_mode is not None:
-            raise ValueError(f"{name} does not support rendering")
+        if render_mode is not None and (name != "Blackjack" or render_mode != "rgb_array"):
+            raise ValueError(f"{name} does not support render_mode={render_mode!r}")
         env = (
             BitcoinEnv() if name == "Bitcoin" else BlackjackEnv(shoes_per_episode=shoes_per_episode)
         )
+        if render_mode == "rgb_array":
+            from .blackjack_render import BlackjackRenderer
+
+            instructions = env.instructions
+            env = BlackjackRenderer(env)
+            env.instructions = instructions
         if max_steps is not None:
             instructions = env.instructions
             env = gym.wrappers.TimeLimit(env, max_episode_steps=max_steps)

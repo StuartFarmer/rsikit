@@ -1,0 +1,53 @@
+{
+  "pair": "EUR/USD",
+  "quote": "USD per EUR",
+  "price_field": "vendor daily close",
+  "source_dataset": "Massive global_forex/day_aggs_v1",
+  "source_files": [
+    {
+      "path": "/Users/stuart/Developer/Data/massive/curated/global_forex/day_aggs_v1/ticker=EUR-USD/part-0.parquet",
+      "sha256": "33343a1f49bde09f8dd618b659ef8ce24b00b9cc71f07350f579dbf716325c6c"
+    }
+  ],
+  "source_query": "SELECT window_start, close FROM read_parquet('/Users/stuart/Developer/Data/massive/curated/global_forex/day_aggs_v1/ticker=EUR-USD/part-*.parquet', hive_partitioning=false) ORDER BY window_start",
+  "timestamp_transform": "UTC window_start + 1 day: daily close is labeled at the bar end, not the opening edge.",
+  "transformations": [
+    "Select EUR-USD daily close",
+    "Sort by window_start",
+    "Add one day to label the UTC bar end",
+    "Rename close to price",
+    "No filtering, filling, interpolation, or deduplication"
+  ],
+  "rows": 5298,
+  "first_bar": "2009-09-25",
+  "last_bar": "2026-08-02",
+  "first_timestamp": "2009-09-26T00:00:00+00:00",
+  "last_timestamp": "2026-08-03T00:00:00+00:00",
+  "invalid_prices": 0,
+  "duplicate_timestamps": 0,
+  "ohlc_violations": 0,
+  "gaps_over_three_days": [
+    {
+      "previous_bar": "2017-12-22",
+      "next_bar": "2017-12-26",
+      "days": 4
+    },
+    {
+      "previous_bar": "2020-10-23",
+      "next_bar": "2020-11-15",
+      "days": 23
+    }
+  ],
+  "missing_period_check": "No EUR-USD rows for 2020-10-24 through 2020-11-14 in either raw daily files or curated minute bars; preserve gap.",
+  "bar_weekday_counts": {
+    "Friday": 870,
+    "Monday": 875,
+    "Saturday": 71,
+    "Sunday": 864,
+    "Thursday": 874,
+    "Tuesday": 872,
+    "Wednesday": 872
+  },
+  "sha256": "7aa26d1f90bb702306df293d227ff357fa270bf1fe1fb4efa623081108bfdad5",
+  "exported_at": "2026-10-03T21:02:03.990119+00:00"
+}

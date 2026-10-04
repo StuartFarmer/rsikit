@@ -140,7 +140,7 @@ async def correctness(args, policies):
                     ],
                 )
             )
-            for width, reverse in ((args.batch_size, False), (args.batch_size, True)):
+            for width, reverse in ((1, False), (args.batch_size, False), (args.batch_size, True)):
                 seeds = list(range(args.seeds))
                 if reverse:
                     seeds.reverse()
@@ -386,14 +386,14 @@ def parser():
     result.add_argument("--workers", type=int, choices=(1, 2, 4), default=1)
     result.add_argument("--batch-size", type=int, default=32)
     result.add_argument(
-        "--seeds", type=int, default=32, help="Independent batch seeds 0 through N-1"
+        "--seeds", type=int, default=32, help="Independent episode seeds 0 through N-1"
     )
     result.add_argument("--max-steps", type=int, default=2000)
     result.add_argument(
         "--timeout",
         type=float,
         default=60,
-        help="Panel timeout allowance in seconds per batch seed",
+        help="Panel timeout allowance in seconds per episode seed",
     )
     result.add_argument("--duration", type=float, help="Default: capacity 30s, replay 300s")
     result.add_argument("--panels", type=int, default=100)

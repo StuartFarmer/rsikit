@@ -7,11 +7,14 @@ from pathlib import Path
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 from slick import prompts
+from sqlalchemy import inspect
+from sqlmodel import select
 
 from research.providers import CALL, BudgetExceeded
 from rsikit import Policy
 
 from .agent import Config, EliteSearch
+from .records import Generation, Organism
 
 
 class Options(BaseModel):
@@ -137,6 +140,10 @@ async def optimize(*, task, provider, evaluate, run, options, seed):
         on_checkpoint=checkpoint,
     )
     try:
+        with run.database() as db:
+            if inspect(db.get_bind()).has_table(Generation.__tablename__):
+                agent.restore(list(db.exec(select(Organism))), list(db.exec(select(Generation))))
+                reported = sum(g.status == "completed" for g in agent.generations)
         try:
             await agent.run()
         except BudgetExceeded:

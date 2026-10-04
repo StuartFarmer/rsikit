@@ -21,6 +21,13 @@ class BitcoinRenderer(gym.Wrapper):
 
     render_mode = "rgb_array"
     metadata = {"render_modes": ["rgb_array"], "render_fps": 30}
+    title = "BITCOIN"
+    price_label = "BTC / USD"
+    allocation_label = "BTC"
+    currency = "USD"
+    currency_symbol = "$"
+    step_label = "day"
+    value_key = "usd"
 
     def __init__(self, env, *, policy_name="Baseline agent", split="training"):
         super().__init__(env)
@@ -36,11 +43,14 @@ class BitcoinRenderer(gym.Wrapper):
         self.history = [self._point(observation, 0.0, self._peak)]
         return observation, info
 
+    def _date_label(self, observation):
+        return date.fromordinal(int(observation[4])).isoformat()
+
     def _point(self, observation, fees, buy_hold):
         equity = self.unwrapped._wealth
         self._peak = max(self._peak, equity)
         return dict(
-            date=date.fromordinal(int(observation[4])).isoformat(),
+            date=self._date_label(observation),
             price=float(observation[0]),
             equity=equity,
             fees=fees,
@@ -53,25 +63,26 @@ class BitcoinRenderer(gym.Wrapper):
         result = self.env.step(action)
         observation, _, done, _, info = result
         index = len(self.history) - 1
-        if info["trade_usd"]:
-            self.trades.append(
-                dict(
-                    index=index,
-                    price=self.history[-1]["price"],
-                    usd=info["trade_usd"],
-                    kind="buy" if info["trade_usd"] > 0 else "sell",
-                )
-            )
-        if info["liquidation_usd"]:
-            self.trades.append(
-                dict(
-                    index=index + 1,
-                    price=float(observation[0]),
-                    usd=-info["liquidation_usd"],
-                    kind="liquidation",
-                )
-            )
         game = self.unwrapped
+        trade, liquidation = info[game._trade_key], info[game._liquidation_key]
+        if trade:
+            self.trades.append(
+                {
+                    "index": index,
+                    "price": self.history[-1]["price"],
+                    self.value_key: trade,
+                    "kind": "buy" if trade > 0 else "sell",
+                }
+            )
+        if liquidation:
+            self.trades.append(
+                {
+                    "index": index + 1,
+                    "price": float(observation[0]),
+                    self.value_key: -liquidation,
+                    "kind": "liquidation",
+                }
+            )
         buy_hold = (
             game.initial_cash / (1 + game.fee_rate) * observation[0] / self.history[0]["price"]
         )
@@ -92,18 +103,25 @@ class BitcoinRenderer(gym.Wrapper):
         def text(x, y, value, size=13, color=INK, anchor="lt"):
             draw.text((x, y), str(value), font=_font(size), fill=color, anchor=anchor)
 
-        text(28, 20, "BITCOIN / POLICY PERFORMANCE", 25)
+        text(28, 20, f"{self.title} / POLICY PERFORMANCE", 25)
         text(
             28,
             54,
             f"{self.policy_name[:72]}  /  {self.split.upper()}  /  seed {self.seed}",
             color=MUTED,
         )
-        text(1250, 20, f"${current['equity']:,.2f}", 27, GREEN if profit >= 0 else RED, "rt")
+        text(
+            1250,
+            20,
+            f"{self.currency_symbol}{current['equity']:,.2f}",
+            27,
+            GREEN if profit >= 0 else RED,
+            "rt",
+        )
         text(
             1250,
             54,
-            f"Net {profit:+,.2f} USD  /  {profit / initial:+.2%}",
+            f"Net {profit:+,.2f} {self.currency}  /  {profit / initial:+.2%}",
             color=MUTED,
             anchor="rt",
         )
@@ -111,22 +129,26 @@ class BitcoinRenderer(gym.Wrapper):
         text(
             28,
             94,
-            f"{self.history[0]['date']} to {current['date']}  /  day {len(self.history) - 1}",
+            f"{self.history[0]['date']} to {current['date']}  /  {self.step_label} {len(self.history) - 1}",
         )
-        text(500, 94, f"Fees ${current['fees']:,.2f}  /  {len(self.trades)} fills")
+        text(
+            500,
+            94,
+            f"Fees {self.currency_symbol}{current['fees']:,.2f}  /  {len(self.trades)} fills",
+        )
         text(900, 94, f"Max drawdown {max(p['drawdown'] for p in self.history):.2%}")
-        text(28, 127, "BTC / USD", 15)
+        text(28, 127, self.price_label, 15)
         draw.polygon([(555, 126), (550, 137), (560, 137)], fill=GREEN)
         text(569, 127, "BUY", color=GREEN)
         draw.polygon([(665, 138), (660, 127), (670, 127)], fill=RED)
         text(679, 127, "SELL", color=RED)
         draw.polygon([(785, 126), (791, 132), (785, 138), (779, 132)], fill=RED)
         text(799, 127, "FINAL LIQUIDATION", color=RED)
-        text(28, 320, "EQUITY / USD", 15)
+        text(28, 320, f"EQUITY / {self.currency}", 15)
         text(550, 320, "Policy", color=BLUE)
         text(660, 320, "Buy & hold (same fees)", color=GOLD)
         text(940, 320, "Starting cash", color=MUTED)
-        text(28, 517, "BTC ALLOCATION / %", 14, BLUE)
+        text(28, 517, f"{self.allocation_label} ALLOCATION / %", 14, BLUE)
         text(735, 517, "DRAWDOWN / % BELOW PEAK", 14, RED)
 
         def chart(keys, colors, bounds, *, limits=None, cash=False):
@@ -149,7 +171,7 @@ class BitcoinRenderer(gym.Wrapper):
                 value = low + (high - low) * i / 2
                 y = xy(0, value)[1]
                 draw.line((left, y, right, y), fill="#e1e6e8")
-                label = f"{value:.0%}" if limits else f"{value:,.0f}"
+                label = f"{value:.0%}" if limits else self._value_label(value)
                 text(left - 10, y, label, 12, MUTED, "rm")
             if cash:
                 y = xy(0, initial)[1]
@@ -193,3 +215,6 @@ class BitcoinRenderer(gym.Wrapper):
             MUTED,
         )
         return np.asarray(image).copy()
+
+    def _value_label(self, value):
+        return f"{value:,.0f}"

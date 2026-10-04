@@ -122,6 +122,27 @@ if __name__ == "__main__":
 
 
 class DashboardTests(unittest.TestCase):
+    def test_worker_activity_stays_visible_without_changing_outer_progress(self):
+        d = self.display(width=160)
+        self.send(d, "search_started", optimizer="Meta", total_candidates=20)
+        self.send(d, "batch_started", batch_id="1", label="Generation 1", total_candidates=20)
+        self.send(
+            d,
+            "workers",
+            pools={
+                "Searches": dict(active=8, limit=8, queued=52, finished=2),
+                "Panels": dict(active=16, limit=16, queued=80, finished=100),
+                "Models": dict(active=3, limit=8, queued=0, finished=25),
+            },
+        )
+        with d.console.capture() as captured:
+            d.console.print(d.render())
+        self.assertIn("Panels 16/16", captured.get())
+        self.assertIn("Searches 8/8", captured.get())
+        self.assertIn("Models 3/8", captured.get())
+        self.assertEqual(d.batch_counts("1"), (0, 40))
+        self.assertFalse(d.evaluations)
+
     def display(self, width=120, height=45):
         from rsikit.progress import RunDisplay
 

@@ -240,7 +240,7 @@ async def main(argv=None):
         type=int,
         nargs="+",
         default=list(range(32)),
-        help="Independent upstream batch reset seeds",
+        help="Independent episode seeds",
     )
     parser.add_argument("--spend-cap", type=float, required=True)
     parser.add_argument(
@@ -264,10 +264,10 @@ async def main(argv=None):
         "--timeout",
         type=float,
         default=60,
-        help="Panel timeout allowance in seconds per batch seed",
+        help="Panel timeout allowance in seconds per episode seed",
     )
-    parser.add_argument("--batch-size", type=int, default=32, help="Games per batch seed")
-    parser.add_argument("--max-steps", type=int, default=2000, help="Vector steps per batch seed")
+    parser.add_argument("--batch-size", type=int, default=32, help="Maximum concurrent episodes")
+    parser.add_argument("--max-steps", type=int, default=2000, help="Maximum steps per episode")
     parser.add_argument(
         "--score-key", choices=("return", "merge_score", "score", "episode_return", "perf")
     )
@@ -369,8 +369,8 @@ async def main(argv=None):
         search_seeds=args.seeds,
         validation_seeds=list(range(1000, 1128)),
         test_seeds=list(range(2000, 2512)),
-        transitions_per_candidate=len(args.seeds) * args.batch_size * args.max_steps,
-        timeout_per_batch_seed=args.timeout,
+        max_transitions_per_candidate=len(args.seeds) * args.max_steps,
+        timeout_per_seed=args.timeout,
         cooperative_execution=True,
         budget_accounting="Unrefunded worst-case token-price reservations; actual billing may be unavailable",
         input_bound="UTF-8 bytes + 1024 framing tokens; byte-tokenized text models only",
@@ -389,10 +389,10 @@ async def main(argv=None):
             timeout=args.timeout,
         ) as evaluator:
             agent = Search(
-                f"Maximize {args.score_key} averaged over {len(args.seeds)} upstream Ocean batch seeds; "
-                f"each runs {args.batch_size} games for {args.max_steps} vector steps. "
-                "Logged metrics average completed episodes (zero if none complete); "
-                "return is total rollout reward divided by batch width.",
+                f"Maximize {args.score_key} averaged over {len(args.seeds)} upstream Ocean episode seeds; "
+                f"one game per seed, up to {args.max_steps} steps per episode. "
+                "Score comes from the final state, including capped episodes; "
+                "return is cumulative episode reward.",
                 provider,
                 None,
                 context=(CONTEXT if args.env == "g2048" else BREAKOUT_CONTEXT)

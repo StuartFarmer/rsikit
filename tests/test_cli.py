@@ -13,11 +13,26 @@ BASE = dict(
     optimizer="elite",
     model="scripted",
     output="run",
-    budget=dict(spend_cap=100, input_price=1, output_price=1),
 )
 
 
 class CliTests(unittest.TestCase):
+    def test_budget_is_opt_in(self):
+        from research.cli import parse_config
+
+        for options in ({}, {"budget": {}}, {"budget": {"max_calls": 2}}):
+            with self.subTest(options=options):
+                config = parse_config(["run"], config={**BASE, **options})
+                self.assertIsNone(config["budget"]["spend_cap"])
+                self.assertIsNone(config["budget"]["max_tokens"])
+                self.assertEqual(
+                    config["budget"]["max_calls"], options.get("budget", {}).get("max_calls")
+                )
+                self.assertEqual(parse_config(["run"], config=config), config)
+        for budget in ({"spend_cap": 1}, {"max_calls": 0}, {"max_tokens": -1}):
+            with self.subTest(budget=budget), self.assertRaises(ValueError):
+                parse_config(["run"], config={**BASE, "budget": budget})
+
     def test_file_overrides_paths_and_roundtrip(self):
         from research.cli import parse_config
 
@@ -141,7 +156,6 @@ async def optimize(**kwargs):
                         **BASE,
                         "optimizer": "a/opt.py",
                         "optimizer_options": {"count": 3},
-                        "budget": {**BASE["budget"], "max_calls": 5},
                     }
                 )
             )
@@ -234,7 +248,6 @@ async def optimize(**kwargs): return []
                         **BASE,
                         "optimizer": "optimizer.py",
                         "optimizer_options": {"data": "data.txt"},
-                        "budget": {**BASE["budget"], "max_calls": 1},
                     }
                 )
             )

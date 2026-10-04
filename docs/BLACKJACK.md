@@ -230,6 +230,29 @@ distributed under CC0; the license is included with the bundled assets.
 
 ## All-seed generation videos
 
+Render the best saved elite from every completed generation of the current run:
+
+```sh
+./scripts/blackjack-videos
+```
+
+This defaults to `runs/blackjack-parallel-20261003-225001` and writes MP4s under
+`videos/generation-NN/`, with a gallery at `videos/index.html`. It uses all saved
+training seeds and 24 shoes per seed. Incomplete generations are skipped; rerun
+the script to pick up newly completed generations. Docker is required, and the
+existing launcher rebuilds the image to include renderer fixes.
+The script uses host Python 3 to take a consistent SQLite backup before launching
+Docker, avoiding live database reads across Docker Desktop's file share. The
+temporary snapshot is removed when the exporter exits; the source is unchanged.
+
+Pass another run (relative to the repository root) and optional exporter flags:
+
+```sh
+./scripts/blackjack-videos runs/blackjack-parallel-20261003-225001 --seeds 0 --workers 2
+```
+
+For the top four elites per generation instead:
+
 ```sh
 ./scripts/run examples.blackjack_videos runs/blackjack-smoke3
 ```

@@ -33,6 +33,7 @@ openrouter = ["slick-ai[openai]>=0.3,<0.4"]
 box2d = ["box2d-py==2.3.8", "gymnasium[classic-control]>=1.3,<2"]
 video = ["gymnasium[classic-control]>=1.3,<2", "moviepy>=2,<3", "pillow>=11,<13"]
 ocean = ["torch>=2.9,<3", "gym==0.23.1", "pettingzoo>=1.24,<2", "setuptools>=70", "wheel", "Cython>=3"]
+meta = ["gepa==0.1.4", "slick-ai[openai]>=0.3,<0.4"]
 
 [tool.uv.extra-build-dependencies]
 box2d-py = ["swig>=4,<5"]

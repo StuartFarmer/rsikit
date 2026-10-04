@@ -1,4 +1,4 @@
-"""Render Bitcoin or Blackjack EliteSearch leaders on training or held-out panels."""
+"""Render price-series, Bitcoin or Blackjack EliteSearch leaders."""
 
 import argparse
 import asyncio
@@ -12,19 +12,21 @@ import signal
 import sqlite3
 import sys
 from concurrent.futures import ProcessPoolExecutor, as_completed
-from contextlib import contextmanager, suppress
+from contextlib import closing, contextmanager, suppress
 from datetime import date
 from hashlib import sha256
 from pathlib import Path
 
 import gymnasium as gym
 import numpy as np
+import yaml
 
 from rsikit import Executor
-from rsikit.envs import BitcoinEnv, BlackjackEnv
+from rsikit.envs import BitcoinEnv, BlackjackEnv, PriceSeriesEnv
 from rsikit.envs.bitcoin import TRAIN_DATA, load_prices
 from rsikit.envs.bitcoin_render import BitcoinRenderer
 from rsikit.envs.blackjack_render import BlackjackRenderer
+from rsikit.envs.price_series_render import PriceSeriesRenderer
 
 
 def evaluation_panel(
@@ -60,15 +62,36 @@ def evaluation_panel(
             end_date=date.fromordinal(env._dates[-1]).isoformat(),
             data_sha256=sha256(json.dumps([env._dates, env._prices]).encode()).hexdigest(),
         )
+    elif experiment["env"] == "PriceSeries":
+        if heldout and not (data_path or start_date or end_date):
+            raise ValueError(
+                "PriceSeries held-out replay requires a separate data path or time range"
+            )
+        options = dict(experiment["environment"])
+        if data_path:
+            options["data_path"] = str(Path(data_path).resolve())
+        if start_date:
+            options["start_time"] = start_date
+        if end_date:
+            options["end_time"] = end_date
+        env = PriceSeriesEnv(**options)
+        panel = dict(
+            split=split,
+            environment=options,
+            asset_name=env.asset_name,
+            start_date=env.dataset["first_timestamp"] or "bar 0",
+            end_date=env.dataset["last_timestamp"] or f"bar {len(env._prices) - 1}",
+            data_sha256=env.dataset["sha256"],
+        )
     elif experiment["env"] == "Blackjack":
         if data_path or start_date or end_date:
-            raise ValueError("Data paths and dates apply only to Bitcoin")
+            raise ValueError("Data paths and dates apply only to price environments")
         if heldout and set(seeds) & set(experiment["seeds"]):
             raise ValueError("Training and held-out seeds must be disjoint")
         env = BlackjackEnv(shoes_per_episode=experiment.get("shoes_per_seed", 1))
         panel = dict(split="holdout" if heldout else "training")
     else:
-        raise ValueError("Expected a Bitcoin or Blackjack run")
+        raise ValueError("Expected a PriceSeries, Bitcoin or Blackjack run")
     return env, seeds, panel
 
 
@@ -94,33 +117,38 @@ def render_policy(job):
     from moviepy.video.io.ffmpeg_writer import FFMPEG_VideoWriter
     from PIL import Image
 
-    """Stream one frame per action; Bitcoin equity resets independently per seed."""
+    """Stream one frame per action; price-series equity resets per seed."""
     path = Path(job["video"])
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary = path.with_suffix(".tmp.mp4")
     segments = []
     total_steps = 0
     total_reward = 0
-    bitcoin = job.get("env") == "Bitcoin"
-    renderer = (
-        BitcoinRenderer(
+    price_series = job.get("env") in ("Bitcoin", "PriceSeries")
+    if job.get("env") == "PriceSeries":
+        renderer = PriceSeriesRenderer(
+            PriceSeriesEnv(**job["environment"]),
+            policy_name=job["name"],
+            split=job["split"],
+        )
+    elif job.get("env") == "Bitcoin":
+        renderer = BitcoinRenderer(
             BitcoinEnv(
                 job["data_path"], start_date=job.get("start_date"), end_date=job.get("end_date")
             ),
             policy_name=job["name"],
             split=job["split"],
         )
-        if bitcoin
-        else BlackjackRenderer(
+    else:
+        renderer = BlackjackRenderer(
             BlackjackEnv(shoes_per_episode=job["shoes"]), policy_name=job["name"]
         )
-    )
     with renderer as env:
         with FFMPEG_VideoWriter(str(temporary), (1280, 720), 30, threads=1) as writer:
             for seed in job["seeds"]:
-                history = None if bitcoin else env.points
+                history = None if price_series else env.points
                 env.reset(seed=seed)
-                if not bitcoin:
+                if not price_series:
                     env.points = history
                 trace = json.loads((Path(job["traces"]) / f"{seed}.json").read_text())
                 reward = 0
@@ -128,7 +156,7 @@ def render_policy(job):
                 first_frame = total_steps
                 for action in trace["actions"]:
                     _, earned, done, truncated, _ = env.step(
-                        np.array(action) if bitcoin else action
+                        np.array(action) if price_series else action
                     )
                     reward += earned
                     writer.write_frame(env.render())
@@ -149,13 +177,13 @@ def render_policy(job):
                                 history=env.history,
                                 trades=env.trades,
                             )
-                            if bitcoin
+                            if price_series
                             else dict(rounds=env.unwrapped._rounds)
                         ),
                         "reward": reward,
                     }
                 )
-        if bitcoin:
+        if price_series:
             Image.fromarray(env.render()).save(path.with_suffix(".png"))
     with VideoFileClip(str(temporary)) as clip:
         assert clip.size == [1280, 720] and clip.fps == 30
@@ -176,6 +204,8 @@ def render_policy(job):
 def write_index(output, report):
     (output / "manifest.json").write_text(json.dumps(report, indent=2) + "\n")
     sections = []
+    price_series = report["env"] in ("Bitcoin", "PriceSeries")
+    label = html.escape(report.get("asset_name", report["env"]))
     for generation in sorted({r["generation"] for r in report["videos"]}):
         cards = []
         for row in report["videos"]:
@@ -192,25 +222,21 @@ def write_index(output, report):
                 f"<p>{len(row['segments'])} seeds · {row['frames']:,} actions · "
                 f"{row['duration_seconds']:.1f} seconds · "
                 f'<a href="{video}" download>Download MP4</a>'
-                + (
-                    f' · <a href="{snapshot}">Final chart (last seed)</a>'
-                    if report["env"] == "Bitcoin"
-                    else ""
-                )
+                + (f' · <a href="{snapshot}">Final chart (last seed)</a>' if price_series else "")
                 + "</p></article>"
             )
         sections.append(f"<h2>Generation {generation}</h2><section>{''.join(cards)}</section>")
     (output / "index.html").write_text(
         '<!doctype html><html lang="en"><meta charset="utf-8">'
         '<meta name="viewport" content="width=device-width,initial-scale=1">'
-        f"<title>{report['env']} — {report['split']}</title><style>"
+        f"<title>{label} — {report['split']}</title><style>"
         "body{margin:32px auto;padding:0 24px;max-width:1440px;background:#fafaf8;"
         "color:#1f2933;font:16px system-ui;line-height:1.5}h3{overflow-wrap:anywhere}"
         "section{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:24px}"
         "article{background:white;padding:16px;border:1px solid #cad3d5;border-radius:8px}"
         "video{display:block;width:100%;aspect-ratio:16/9}a{color:#284b63}"
         "@media(max-width:800px){section{grid-template-columns:1fr}}</style>"
-        f"<h1>{report['env']} leaders — {report['split']}</h1>"
+        f"<h1>{label} leaders — {report['split']}</h1>"
         f"<p>Source: {html.escape(report['source_run'])}. "
         f"{len(report['seeds'])} seeds. 1280×720 · 30 fps · one action per frame. "
         "Policies are selected by training score; policy memory resets at each seed.</p>"
@@ -218,8 +244,8 @@ def write_index(output, report):
             f"<p>Market dates: {report['start_date']} to {report['end_date']}. "
             "Each seed starts with fresh cash. Seeds change policy randomness, not market data. "
             "Equity and buy-and-hold include trading fees and final liquidation. "
-            "Daily equity/fills are in <a href='manifest.json'>manifest.json</a>.</p>"
-            if report["env"] == "Bitcoin"
+            "Equity/fills per bar are in <a href='manifest.json'>manifest.json</a>.</p>"
+            if price_series
             else f"<p>{report['shoes_per_seed']} shoe(s) per seed; points accumulate across seeds.</p>"
         )
         + "".join(sections)
@@ -256,6 +282,7 @@ async def export(
     source,
     output,
     *,
+    database=None,
     top=4,
     workers=2,
     through_generation=None,
@@ -266,7 +293,19 @@ async def export(
     start_date=None,
     end_date=None,
 ):
-    experiment = json.loads((source / "experiment.json").read_text())
+    if (source / "experiment.json").exists():
+        experiment = json.loads((source / "experiment.json").read_text())
+    else:
+        config = yaml.safe_load((source / "config.yaml").read_text())
+        experiment = dict(
+            env=config["env"],
+            environment=config["environment"],
+            seeds=config["evaluation"]["seeds"],
+            heldout_seeds=config["selection"]["test_seeds"],
+            max_steps=config["evaluation"]["max_steps"],
+            episode_timeout=config["evaluation"]["timeout_per_seed"],
+            shoes_per_seed=config["environment"].get("shoes_per_episode", 1),
+        )
     if experiment["max_steps"] is not None:
         raise ValueError("Expected a full-episode run")
     # Historic experiments predate multi-shoe episodes and must retain their rules.
@@ -289,7 +328,16 @@ async def export(
     # A separate cache identity prevents training traces from masquerading as validation.
     cache_key = sha256(json.dumps(context, sort_keys=True).encode()).hexdigest()[:16]
     verify_search = split == "training" and not (data_path or start_date or end_date)
-    with sqlite3.connect((source / "run.sqlite").resolve().as_uri() + "?mode=ro", uri=True) as db:
+    if verify_search and experiment["env"] == "PriceSeries":
+        saved_dataset = json.loads((source / "dataset.json").read_text())
+        if environment.dataset != saved_dataset:
+            raise ValueError("PriceSeries dataset differs from the saved search dataset")
+    with closing(
+        sqlite3.connect(
+            (database or source / "run.sqlite").resolve().as_uri() + "?mode=ro", uri=True
+        )
+    ) as db:
+        db.execute("BEGIN")
         db.row_factory = sqlite3.Row
         organisms = {r["id"]: dict(r) for r in db.execute("SELECT * FROM elitesearch_organism")}
         selections = [
@@ -389,7 +437,7 @@ async def export(
         path = directory / f"rank-{row['rank']:02}-policy-{row['id']:03}.mp4"
         shutil.copy2(result["video"], path)
         shutil.copy2(Path(result["video"]).with_suffix(".jpg"), path.with_suffix(".jpg"))
-        if experiment["env"] == "Bitcoin":
+        if experiment["env"] in ("Bitcoin", "PriceSeries"):
             shutil.copy2(Path(result["video"]).with_suffix(".png"), path.with_suffix(".png"))
         report["videos"].append(
             {
@@ -408,6 +456,7 @@ async def export(
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("run", type=Path)
+    parser.add_argument("--database", type=Path, help="Read a consistent SQLite snapshot")
     parser.add_argument("--output", type=Path)
     parser.add_argument("--top", type=int, default=4)
     parser.add_argument("--workers", type=int, default=2)
@@ -419,10 +468,10 @@ def main():
     )
     parser.add_argument("--seeds", type=int, nargs="+", help="Override the saved seed panel")
     parser.add_argument(
-        "--data-path", type=Path, help="Bitcoin CSV; validation must follow training"
+        "--data-path", type=Path, help="Price CSV; Bitcoin validation must follow training"
     )
-    parser.add_argument("--start-date", help="Inclusive Bitcoin start date, YYYY-MM-DD")
-    parser.add_argument("--end-date", help="Inclusive Bitcoin end date, YYYY-MM-DD")
+    parser.add_argument("--start-date", help="Inclusive start date (or PriceSeries ISO timestamp)")
+    parser.add_argument("--end-date", help="Inclusive end date (or PriceSeries ISO timestamp)")
     args = parser.parse_args()
     if min(args.top, args.workers) < 1:
         parser.error("top and workers must be positive")
@@ -432,6 +481,7 @@ def main():
         export(
             args.run,
             output,
+            database=args.database,
             top=args.top,
             workers=args.workers,
             through_generation=args.through_generation,

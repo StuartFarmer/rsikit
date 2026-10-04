@@ -60,6 +60,7 @@ class EliteSearch:
     """
 
     leaderboard_columns = {"operation": Column("Operation"), "parents": Column("Parents")}
+    optimizer_name = "EliteSearch"
 
     def _log_candidate(self, row, *, restored=False):
         status = {"rejected": "repairing", "execution_failed": "repairing", "error": "failed"}.get(
@@ -506,11 +507,12 @@ class EliteSearch:
     async def run(self) -> list[Organism]:
         self.reason = "running"
         logger.info(
-            "Starting EliteSearch",
+            "Starting %s",
+            self.optimizer_name,
             extra={
                 "progress": dict(
                     kind="search_started",
-                    optimizer="EliteSearch",
+                    optimizer=self.optimizer_name,
                     total_candidates=self.config.population_size * self.config.generations,
                     total_generations=self.config.generations,
                     leaderboard_size=self.config.elite_size,

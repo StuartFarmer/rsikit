@@ -19,12 +19,6 @@ generation:
   timeout: 120
   max_input_tokens: 65536
   max_output_tokens: 16384
-budget:
-  spend_cap: 100
-  input_price: 0.01
-  output_price: 0.01
-  max_calls: 1500
-  max_tokens: 122880000
 evaluation:
   seeds:
   - 0

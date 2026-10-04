@@ -1,4 +1,4 @@
-"""Build unmodified upstream Ocean bindings with PufferLib's build_<env> commands.
+"""Build pinned upstream Ocean bindings with the episodic-evaluation fix.
 
 Run with the project's Python after installing the `ocean` extra. The source
 checkout stays inside that Python environment; no C sources are vendored here.
@@ -13,6 +13,7 @@ import sysconfig
 from pathlib import Path
 
 UPSTREAM = "3b5c6046bb8b46685d62d151720025507e3418c2"
+EPISODIC_PATCH = "episodes-v1"
 
 
 def main():
@@ -64,21 +65,39 @@ def main():
     if revision != UPSTREAM:
         parser.error(f"Expected upstream {UPSTREAM}, found {revision}")
     subprocess.run(
-        ["git", "sparse-checkout", "add", *[f"/pufferlib/ocean/{name}/" for name in args.envs]],
+        [
+            "git",
+            "sparse-checkout",
+            "add",
+            *[
+                f"/pufferlib/ocean/{name}/"
+                for name in sorted(set(args.envs) | {"g2048", "breakout"})
+            ],
+        ],
         cwd=source,
         check=True,
     )
-    # Use upstream's selective build commands; do not build its neural trainer.
+    patch = Path(__file__).with_name("ocean-episodes.patch").resolve()
+    applied = (
+        subprocess.run(
+            ["git", "apply", "--reverse", "--check", str(patch)], cwd=source, capture_output=True
+        ).returncode
+        == 0
+    )
+    if not applied:
+        subprocess.run(["git", "apply", "--check", str(patch)], cwd=source, check=True)
+        subprocess.run(["git", "apply", str(patch)], cwd=source, check=True)
+    # Force rebuilding: distutils does not track transitive C header changes.
     environment = dict(os.environ, NO_TRAIN="1")
     for name in args.envs:
         subprocess.run(
-            [sys.executable, "setup.py", f"build_{name}", "--inplace"],
+            [sys.executable, "setup.py", f"build_{name}", "--inplace", "--force"],
             cwd=source,
             env=environment,
             check=True,
         )
     (source / "pufferlib" / "rsikit_ocean.json").write_text(
-        json.dumps(dict(upstream=UPSTREAM)) + "\n"
+        json.dumps(dict(upstream=UPSTREAM, episodic_patch=EPISODIC_PATCH)) + "\n"
     )
     (Path(sysconfig.get_path("purelib")) / "rsikit_ocean.pth").write_text(str(source) + "\n")
     # PufferLib creates this link on import. Precreate it for read-only Docker runs.

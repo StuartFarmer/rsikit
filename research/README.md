@@ -30,6 +30,11 @@ from research.elitesearch import Config, EliteSearch
 prompts.TEMPLATE_ROOT = Path(elitesearch.__file__).parent / "prompts"
 ```
 
+The [EliteTable meta-experiment](../docs/ELITETABLE_META_EXPERIMENT.md) writes and ranks
+sub-evolver programs across 2048, Breakout and Maze. Each program runs five inner
+generations capped at 50 game policies. The [earlier GEPA experiment](../docs/GEPA_META_EXPERIMENT.md)
+remains available through its original config: `python -m research.meta_ocean --help`.
+
 Shared modules available to every algorithm and runner:
 
 - `rsikit.policy.validate_policy`: explicit source checks after policy generation.

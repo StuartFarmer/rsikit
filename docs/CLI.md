@@ -11,7 +11,7 @@ rsikit run --config experiments/ocean-2048.yaml
 rsikit run --config experiments/blackjack-elite.yaml
 ```
 
-Set `OPENROUTER_API_KEY` through the existing `.env`/environment mechanism. Review the model name and your input/output price ceilings in the config before launching. Prices are USD per million tokens; the example values are illustrative ceilings, not verified provider pricing. Budget reservations are conservative accounting, not a provider billing guarantee.
+Set `OPENROUTER_API_KEY` through the existing `.env`/environment mechanism. Budgets are optional and unlimited by default. The example configs omit `budget`.
 
 Inspect configuration without creating a run or making model calls:
 
@@ -38,7 +38,6 @@ rsikit run --env ocean:g2048 --optimizer elite \
   --seeds 0 1 2 3 4 5 6 7 8 9 \
   --batch-size 32 --max-steps 2000 \
   --workers 4 --generation-concurrency 25 \
-  --spend-cap 100 --input-price 0.01 --output-price 0.01 \
   --output runs/ocean-elitetable-2048-1
 ```
 
@@ -47,6 +46,10 @@ This command requests search only. The checked-in Ocean config additionally requ
 Use `--env Blackjack --env-shoes-per-episode 24` for finite-shoe Blackjack, or `--env CartPole-v1` for Gymnasium CartPole. Omit `--batch-size` for scalar environments; it is rejected there. Other registered Gymnasium IDs use `gym.make` and a description of the observation/action spaces. Existing named task presets keep their settings, including continuous windy LunarLander.
 
 `rsikit run --env Blackjack --optimizer elite --help` shows shared flags and the selected components' options. Environment constructor flags have an `--env-` prefix. For example, Ocean supports `--env-reward-scaler 2` and `--env-use-sparse-reward`, with `--no-env-use-sparse-reward` to turn it off. Breakout supports its geometry and speed settings, frameskip, and continuous actions.
+
+For a single local price CSV, use `--env PriceSeries --env-data-path prices.csv`.
+It defaults to the `price` column and one seed. Column names, timestamp ranges,
+fees, and starting cash are configurable; see [PriceSeries](PRICE_SERIES.md).
 
 ## Configuration fields
 
@@ -60,18 +63,50 @@ YAML is the supported config format. See the complete [Ocean](../experiments/oce
 | `environment` | Selected environment constructor options |
 | `optimizer_options` | Selected optimizer settings, e.g. population/generations/elites |
 | `generation` | Provider (currently OpenRouter), concurrency, timeout, per-call token bounds |
-| `budget` | Spend/price ceilings, maximum calls, maximum reserved tokens |
+| `budget` | Optional spend, call, and reserved-token caps; omitted limits are unlimited |
 | `evaluation` | Seeds, workers, per-seed timeout allowance, score, optional batch width/horizon |
 | `selection` | Finalist count, validation seeds, test seeds |
 | `videos` | Top generation leaders and rendering worker count; disabled by default |
 
 Seed panels accept lists or an exclusive range: `{"start": 1000, "stop": 1128}`. All panels must be internally unique and mutually disjoint. Duplicate/unknown YAML keys, unsupported fields, invalid types, non-finite numbers, and unsupported environment/option combinations fail before paid generation. API keys stay in environment variables, outside config files and saved manifests.
 
-Defaults: search seeds 0–9; four evaluation workers; 60 seconds of timeout allowance per seed; four concurrent generation calls with 120-second timeouts; no validation/test panels; one finalist; no videos. Elite's default population/generations/elites are 50/20/10. Ocean defaults to 32 lanes and 2000 vector steps per seed, scoring merge_score for 2048 and return for Breakout. Other environments score cumulative episode reward.
+Delete the entire `budget` section (or use `budget: {}`) to disable cumulative budget limits. Limits are never inferred from optimizer settings. Population, generations, repair limits, and per-call `generation` token bounds still apply. Usage logging remains enabled; reserved cost is null without both prices.
 
-Each Ocean seed runs an entire fixed-width batch. Native autoresets continue until the horizon. `return` is total rollout reward divided by batch width; logged metrics average completed episodes and are zero if none finish. Ten seeds × 32 lanes × 2000 steps = 640,000 transitions per candidate. This differs from ten scalar episodes and from the old custom Ocean benchmark.
+To opt in, set only the caps you want, for example `budget: {max_calls: 1000}` or `--max-calls 1000`. A `spend_cap` also requires `input_price` and `output_price`, in USD per million tokens. Reservations use the full per-call token bounds, including failed calls, and are not a provider billing guarantee. Omitted or null individual caps are unlimited; zero is invalid.
+
+Defaults: search seeds 0–9; four evaluation workers; 60 seconds of timeout allowance per seed; four concurrent generation calls with 120-second timeouts; no validation/test panels; one finalist; no videos. Elite's default population/generations/elites are 50/20/10. Ocean defaults to at most 32 concurrent episodes and a 2000-step cap per episode, scoring merge_score for 2048 and return for Breakout. Other environments score cumulative episode reward.
+
+Each Ocean seed runs one episode, stopping at termination or the step cap. Batch size limits concurrent episodes without multiplying them. Finished lanes freeze. `return` sums rewards for that episode; other metrics read the final state, including capped games. Ten seeds with batch size 32 and max steps 2000 therefore request ten episodes and **at most 20,000 transitions per candidate**. See [the Ocean protocol](OCEAN_BENCHMARK.md) for the upstream compatibility patch and seeding details.
 
 `--workers` controls evaluation concurrency, while `--generation-concurrency` controls model calls. `--timeout-per-seed` applies per Gymnasium episode; Ocean's candidate process receives `number_of_seeds × timeout_per_seed` for its full panel.
+
+## Resume an interrupted search
+
+```bash
+rsikit resume runs/my-search
+# Equivalent without the installed entry point:
+python -m research.cli resume runs/my-search
+```
+
+Resume currently supports the built-in Elite optimizer. It loads the saved
+`config.yaml`, restores generations and candidates from `run.sqlite`, and continues
+in the same directory. Completed candidates are retained; unfinished evaluations
+reuse cached episodes, and calls whose responses were lost are sent again.
+Keep the full run directory, including `model_calls.jsonl`: previous calls,
+including failed or interrupted requests, still consume the original budget.
+Configuration and provenance remain unchanged; usage and phase counts accumulate
+across resumptions. A moved run directory is supported if its input paths still exist.
+
+A connection failure can surface as Slick's `ProviderError` wrapping an SDK
+`APIConnectionError` or an HTTP read error. Connection failures and SDK timeouts
+automatically retry up to three times, waiting roughly 1, 2, then 4 seconds with
+jitter. Each attempt is logged and consumes its own budget reservation; SDK retries
+remain disabled to avoid untracked requests. The generation timeout covers all
+attempts and delays together. Authentication errors, HTTP status errors, invalid
+requests, and cancellation are not retried. If retries, the deadline, or the budget
+are exhausted, the run retains its checkpoint; use `resume` after connectivity
+returns. Resuming does not reset budget limits. Custom optimizers own their
+recovery and are not supported by this command.
 
 ## Evaluate existing policies
 
@@ -117,7 +152,7 @@ async def optimize(*, task, provider, evaluate, run, options, seed):
     return []
 ```
 
-The `options` dictionary contains validated public options plus reserved `generation` and `videos` dictionaries. Do not use those names for public optimizer options. Generation settings include concurrency, timeout, and token limits; the custom optimizer owns scheduling/deadlines for its calls. All paid calls must go through the supplied budgeted provider. Supply `budget.max_calls` for custom optimizers; the runner cannot infer their call bound. Each measurement is the existing `research.rewards.Measurement`, keyed by policy ID, with per-seed scores and explicit failure status. The runner persists measurements and policy definitions; custom optimizers own their algorithm-specific checkpoints.
+The `options` dictionary contains validated public options plus reserved `generation` and `videos` dictionaries. Do not use those names for public optimizer options. Generation settings include concurrency, timeout, and token limits; the custom optimizer owns scheduling/deadlines for its calls. All paid calls must go through the supplied provider for usage logging and any explicitly configured budget limits. Budgets are optional for custom optimizers too. Each measurement is the existing `research.rewards.Measurement`, keyed by policy ID, with per-seed scores and explicit failure status. The runner persists measurements and policy definitions; custom optimizers own their algorithm-specific checkpoints.
 
 An environment file exports `environment`, an instance of `research.experiment.EnvironmentDefinition`. Its fields are:
 

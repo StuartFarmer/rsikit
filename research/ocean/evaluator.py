@@ -32,11 +32,9 @@ def _inputs(seeds, batch_size, max_steps):
     if any(type(x) is not int or not 1 <= x <= 0x7FFFFFFF for x in (batch_size, max_steps)):
         raise ValueError("Batch size and max_steps must be positive int32 integers")
     seeds = tuple(seeds)
-    largest_seed = (0x7FFFFFFF - batch_size + 1) // batch_size
+    largest_seed = 0x7FFFFFFF
     if not seeds or any(type(s) is not int or not 0 <= s <= largest_seed for s in seeds):
-        raise ValueError(
-            "Seeds must be nonempty nonnegative integers with (seed + 1) * batch_size <= 2**31"
-        )
+        raise ValueError("Seeds must be nonempty nonnegative int32 integers")
     if len(set(seeds)) != len(seeds):
         raise ValueError("Seeds must be unique within a panel")
 
@@ -54,40 +52,44 @@ async def rollout(
     env_name="g2048",
     score_key="merge_score",
     env_kwargs=None,
+    _policy_factory=load_policy,
+    _on_batch=None,
 ):
-    """Each seed is a fresh upstream batch run for a fixed number of vector steps.
-
-    Native autoresets and logging stay upstream. A logged score is the mean over
-    completed episodes (zero if none completed); `return` includes all rewards,
-    including unfinished episodes, averaged over the batch lanes.
-    """
+    """Run one episode per seed, batching at most batch_size independent games."""
     seeds = _inputs(seeds, batch_size, max_steps)
+    metadata(env_name)  # Fail clearly if the installed binding lacks the episode fix.
     constructor = factory(env_name)
     kwargs = dict(env_kwargs or {})
     if set(kwargs) & {"num_envs", "seed", "log_interval", "buf"}:
         raise ValueError("num_envs, seed, log_interval and buf are controlled by the evaluator")
     results = []
     timing = dict(reset=0.0, policy=0.0, environment=0.0, validation=0.0)
-    for seed in seeds:
+    for offset in range(0, len(seeds), batch_size):
+        panel = seeds[offset : offset + batch_size]
+        width = len(panel)
         start = perf_counter() if diagnostics else 0
-        env = constructor(num_envs=batch_size, seed=seed, log_interval=max_steps, **kwargs)
+        env = constructor(num_envs=width, seed=0, log_interval=max_steps + 1, **kwargs)
         policy = None
         try:
-            observation, _ = env.reset(seed=seed)
-            if env.num_agents != batch_size:
+            observation, _ = env.reset(seed=list(panel))
+            if env.num_agents != width:
                 raise ValueError("This evaluator requires one agent per environment")
-            policy = load_policy(
+            policy = _policy_factory(
                 source,
                 env.observation_space,
                 env.action_space,
                 "Independent rows of upstream Ocean observations; one action per row.",
             )
-            await policy.reset(seed=seed)
+            # Deterministic row-independent policies; episode memory resets per batch.
+            await policy.reset(seed=0)
             if diagnostics:
                 timing["reset"] += perf_counter() - start
-            actions = [] if trace else None
-            returns = np.zeros(batch_size, dtype=np.float64)
-            infos = []
+            actions = [[] for _ in panel] if trace else None
+            returns = np.zeros(width, dtype=np.float64)
+            steps = np.zeros(width, dtype=np.int64)
+            # ponytail: frozen lanes keep fixed buffers; compact only if inference dominates.
+            active = np.ones(width, dtype=bool)
+            terminated = np.zeros(width, dtype=bool)
             for _ in range(max_steps):
                 start = perf_counter() if diagnostics else 0
                 action = np.asarray(await policy.act(observation.copy()))
@@ -101,42 +103,45 @@ async def rollout(
                 if diagnostics:
                     timing["validation"] += perf_counter() - start
                 if trace:
-                    actions.append(action.tolist())
+                    for lane in np.flatnonzero(active):
+                        actions[lane].append(action[lane].tolist())
                 start = perf_counter() if diagnostics else 0
-                observation, reward, _, _, infos = env.step(action)
-                returns += reward
+                observation, reward, done, truncated, _ = env.step(action)
+                returns[active] += reward[active]
+                steps[active] += 1
+                terminated |= active & done
+                active &= ~(done | truncated)
                 if diagnostics:
                     timing["environment"] += perf_counter() - start
-            metrics = dict(infos[0]) if infos else {}
-            count = int(metrics.get("n", 0))
-            if score_key != "return" and count and score_key not in metrics:
-                raise ValueError(
-                    f"Unknown score key {score_key!r}; upstream logged {sorted(metrics)}"
+                if not active.any():
+                    break
+            for lane, metrics in enumerate(env.episode_stats()):
+                if score_key != "return" and score_key not in metrics:
+                    raise ValueError(
+                        f"Unknown score key {score_key!r}; available: {sorted(metrics)}"
+                    )
+                row = dict(
+                    seed=panel[lane],
+                    vector_steps=int(steps[lane]),
+                    steps=int(steps[lane]),
+                    score=float(returns[lane] if score_key == "return" else metrics[score_key]),
+                    score_key=score_key,
+                    episodes=1,
+                    metrics=metrics,
+                    ending="terminated" if terminated[lane] else "truncated",
                 )
-            score = (
-                float(returns.mean()) if score_key == "return" else float(metrics.get(score_key, 0))
-            )
-            row = dict(
-                seed=seed,
-                batch_size=batch_size,
-                vector_steps=max_steps,
-                steps=max_steps * batch_size,
-                score=score,
-                score_key=score_key,
-                episodes=count,
-                metrics=metrics,
-                ending="horizon",
-            )
-            row["return"] = float(returns.mean())
-            if trace:
-                row["actions"] = actions
-            results.append(row)
+                row["return"] = float(returns[lane])
+                if trace:
+                    row["actions"] = actions[lane]
+                results.append(row)
         finally:
             try:
                 if policy is not None:
                     await policy.close()
             finally:
                 env.close()
+        if _on_batch is not None:
+            _on_batch(results)
     return dict(
         results=results,
         steps=sum(row["steps"] for row in results),
@@ -257,7 +262,11 @@ class PanelEvaluator:
                     except ProcessLookupError:
                         pass
                     except PermissionError:
-                        if sys.platform != "darwin" or process.is_alive():
+                        if sys.platform != "darwin":
+                            raise
+                        # Darwin can report EPERM before an exiting child is reapable.
+                        await asyncio.to_thread(process.join, 1.0)
+                        if process.is_alive():
                             raise
                     if process.is_alive():
                         process.kill()
@@ -269,7 +278,7 @@ class PanelEvaluator:
                 reader.close()
 
     async def _reference(self, source, seeds):
-        # Same upstream workload, but a fresh process for each batch seed.
+        # Same episodes, but a fresh process for each seed.
         rows = []
         for seed in seeds:
             result = await self._panel(source, [seed])

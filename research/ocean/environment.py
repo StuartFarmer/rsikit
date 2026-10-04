@@ -1,4 +1,4 @@
-"""Use upstream Ocean factories and bindings; no local simulator or C adapter."""
+"""Use upstream Ocean factories and bindings with the pinned episodic compatibility patch."""
 
 import hashlib
 import importlib
@@ -14,10 +14,14 @@ from pydantic import Field, model_validator
 from research.experiment import EnvironmentDefinition, Options
 
 UPSTREAM = "3b5c6046bb8b46685d62d151720025507e3418c2"
-PROTOCOL = "ocean-upstream-fixed-horizon-v1"
+PROTOCOL = "ocean-upstream-episodic-v2"
 
 
 def factory(name="g2048"):
+    if name == "maze":
+        from .maze import Maze
+
+        return Maze
     try:
         from pufferlib.ocean import env_creator
     except ImportError as exc:
@@ -29,27 +33,38 @@ def factory(name="g2048"):
 
 
 def metadata(name="g2048"):
+    if name == "maze":
+        from .maze import metadata as maze_metadata
+
+        return maze_metadata()
     try:
         import pufferlib
     except ImportError as exc:
         raise ImportError("Install Ocean first: python scripts/install_ocean.py") from exc
 
     provenance = Path(pufferlib.__file__).with_name("rsikit_ocean.json")
-    if not provenance.exists() or json.loads(provenance.read_text())["upstream"] != UPSTREAM:
-        raise RuntimeError("Ocean source is not pinned; run python scripts/install_ocean.py")
+    installed = json.loads(provenance.read_text()) if provenance.exists() else {}
+    if installed.get("upstream") != UPSTREAM or installed.get("episodic_patch") != "episodes-v1":
+        raise RuntimeError("Ocean needs the episode fix; run python scripts/install_ocean.py")
     binding = importlib.util.find_spec(f"pufferlib.ocean.{name}.binding")
     if binding is None:
         raise ImportError(
             f"Build the upstream binding: python scripts/install_ocean.py --envs {name}"
         )
     library = Path(binding.origin)
+    native = importlib.import_module(f"pufferlib.ocean.{name}.binding")
+    if getattr(native, "rsikit_episodic_patch", None) != "episodes-v1":
+        raise RuntimeError(
+            f"Rebuild the episode fix: python scripts/install_ocean.py --envs {name}"
+        )
     return dict(
         protocol=PROTOCOL,
         upstream=UPSTREAM,
+        episodic_patch=installed["episodic_patch"],
         environment=name,
         native_library=str(library),
         native_sha256=hashlib.sha256(library.read_bytes()).hexdigest(),
-        seed_semantics="one upstream batch reset per seed; batch width is part of the workload",
+        seed_semantics="one episode per seed; independent per-lane rand_r state; batch width only limits concurrency",
     )
 
 
@@ -95,8 +110,21 @@ class BreakoutOptions(Options):
         return self
 
 
+class MazeOptions(Options):
+    # Fixed dimensions make map identity and the episode horizon explicit.
+    map_size: int = Field(default=15, ge=5, le=47)
+
+    @model_validator(mode="after")
+    def odd_size(self):
+        if self.map_size % 2 == 0:
+            raise ValueError("Maze map_size must be odd")
+        return self
+
+
 def arguments(parser, *, name):
-    if name == "g2048":
+    if name == "maze":
+        parser.add_argument("--env-map-size", dest="map_size", type=int)
+    elif name == "g2048":
         for key in (
             "reward_scaler",
             "endgame_env_prob",
@@ -129,10 +157,10 @@ def arguments(parser, *, name):
 
 
 def definition(name):
-    if name not in ("g2048", "breakout"):
-        raise ValueError(f"Unsupported Ocean environment {name!r}; choose g2048 or breakout")
+    if name not in ("g2048", "breakout", "maze"):
+        raise ValueError(f"Unsupported Ocean environment {name!r}; choose g2048, breakout or maze")
     return EnvironmentDefinition(
-        Options=G2048Options if name == "g2048" else BreakoutOptions,
+        Options={"g2048": G2048Options, "breakout": BreakoutOptions, "maze": MazeOptions}[name],
         add_arguments=partial(arguments, name=name),
         describe=partial(describe, name),
         open_evaluator=partial(open_evaluator, name),
@@ -153,22 +181,41 @@ Observation is uint8 (B,289). Columns 0:16 are encoded tile magnitudes;
 1 through 16; column 288 is a snake-pattern flag. Decode a cell as zero if
 its empty flag is set, otherwise argmax(one_hot) + 1.
 Return integer actions (B,): 0=up, 1=down, 2=left, 3=right.
-Rows are independent policy decisions. The batch width remains fixed.
-Native autoresets continue throughout the fixed rollout horizon.
+Policies must be stateless and deterministic, with independent row decisions.
+B varies between batches. Finished rows freeze until all rows finish; their actions are ignored.
+Each seed runs one episode, stopping at termination or the evaluator step cap.
 No environment, file, process, network, clock or evaluator access.
 """
 BREAKOUT_CONTEXT = """Upstream Ocean Breakout: Python/NumPy batch policy.
 Observation is float32 (B,10 + brick_rows * brick_cols): paddle x/y, ball x/y,
 ball vx/vy, balls fired, score, remaining balls, paddle width, then brick states.
-Positions are normalized by arena dimensions, velocities by 512.
+Positions (top-left coordinates) are normalized by arena dimensions, velocities by 512.
+Balls fired and remaining balls are divided by 5, score by 864, paddle width by 62.
 Return integer actions (B,): 0=noop, 1=left, 2=right.
-The batch width remains fixed; upstream handles episode resets.
+Policies must be stateless and deterministic, with independent row decisions.
+B varies between batches. Finished rows freeze and their actions are ignored.
+Each seed runs one episode, stopping at termination or the evaluator step cap.
 No environment, file, process, network, clock or evaluator access.
+"""
+MAZE_CONTEXT = """Ocean Maze: deterministic Python/NumPy batch policy with episode memory.
+Observation is uint8 (B,121), reshaped (B,11,11), centered on the agent at [5,5].
+Cells: 0=empty, 1=wall, 2=agent, 4=goal. Return integer actions (B,):
+0=noop, 1=east, 2=north, 3=west, 4=south.
+Each seed generates one 15x15 map; goal reward is 1, otherwise 0.
+The native timeout is twice the map area (450 steps for 15x15), or the evaluator cap.
+You may keep bounded per-row episode memory. Clear it in async reset(self, *, seed=None).
+Rows remain stable within each batch; finished rows freeze and their actions are ignored.
+A fresh policy instance starts each batch. Never share memory between rows.
+No seeds, map bank, simulator, file, process, network, clock or evaluator access.
 """
 
 
 def describe(name, options, evaluation):
-    context = CONTEXT if name == "g2048" else BREAKOUT_CONTEXT
+    context = {"g2048": CONTEXT, "breakout": BREAKOUT_CONTEXT, "maze": MAZE_CONTEXT}[name]
+    if name == "maze":
+        context = context.replace("15x15", f"{options.map_size}x{options.map_size}").replace(
+            "450 steps", f"{2 * options.map_size**2} steps"
+        )
     if name == "breakout" and options.continuous:
         context = context.replace(
             "Return integer actions (B,): 0=noop, 1=left, 2=right.",
@@ -176,9 +223,9 @@ def describe(name, options, evaluation):
         )
     return (
         context + f"\nOptions: {options.model_dump_json()}\n"
-        f"Score: {evaluation.score_key}; {evaluation.batch_size} games per seed, "
-        f"{evaluation.max_steps} vector steps. Return is rollout reward divided by batch width; "
-        "other scores average completed episodes, zero if none complete."
+        f"Score: {evaluation.score_key}; one episode per seed, at most "
+        f"{evaluation.batch_size} concurrent games and {evaluation.max_steps} steps per episode. "
+        "Return sums episode rewards; other scores read the final state, including capped episodes."
     )
 
 

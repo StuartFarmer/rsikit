@@ -284,7 +284,7 @@ class BlackjackTests(unittest.TestCase):
             self.assertTrue(env.step(4)[3])
             self.assertIn("truncated after 1 steps", env.instructions)
         with self.assertRaisesRegex(ValueError, "render"):
-            make_environment("Blackjack", render_mode="rgb_array")
+            make_environment("Blackjack", render_mode="human")
 
 
 if __name__ == "__main__":

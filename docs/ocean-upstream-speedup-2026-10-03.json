@@ -1,0 +1,389 @@
+{
+  "source_revision": "68e78ecefe93f209e98f5a480f3876a4faa2eb27",
+  "date": "2026-10-03T16:32:16.401732+00:00",
+  "description": "Current upstream serial versus vector evaluation, equal transition counts",
+  "environment": "g2048",
+  "protocol": "ocean-upstream-fixed-horizon-v1",
+  "hardware": {
+    "platform": "macOS-26.4-arm64-arm-64bit-Mach-O",
+    "machine": "arm64",
+    "native_sha256": "b4a4fa85e1b147847207a5cf2a344643271fb6232d419e012c2020452f3857f9",
+    "python": "3.14.2 (main, Dec  5 2025, 16:49:16) [Clang 17.0.0 (clang-1700.4.4.1)]",
+    "numpy": "2.5.3",
+    "host": "Stuarts-MacBook-Pro.local",
+    "cpu_budget": 4,
+    "memory_budget_bytes": 8589934592
+  },
+  "manifest": {
+    "kind": "capacity",
+    "date": "2026-10-03T16:32:16.401732+00:00",
+    "platform": "macOS-26.4-arm64-arm-64bit-Mach-O",
+    "libc": [
+      "",
+      ""
+    ],
+    "machine": "arm64",
+    "python": "3.14.2 (main, Dec  5 2025, 16:49:16) [Clang 17.0.0 (clang-1700.4.4.1)]",
+    "numpy": "2.5.3",
+    "host_cpu_count": 12,
+    "allocated_cpu_budget": 4,
+    "cpu_affinity": null,
+    "memory_budget_bytes": 8589934592,
+    "resource_budget_enforced": false,
+    "protocol": "ocean-upstream-fixed-horizon-v1",
+    "upstream": "3b5c6046bb8b46685d62d151720025507e3418c2",
+    "environment": "g2048",
+    "native_library": "/Users/stuart/Developer/AI/rsikit/.venv/share/rsikit-ocean/pufferlib/ocean/g2048/binding.cpython-314-darwin.so",
+    "native_sha256": "b4a4fa85e1b147847207a5cf2a344643271fb6232d419e012c2020452f3857f9",
+    "seed_semantics": "one upstream batch reset per seed; batch width is part of the workload",
+    "import_seconds": 0.0006750831380486488,
+    "cache_enabled": false,
+    "cooperative_execution": true,
+    "arguments": {
+      "kind": "capacity",
+      "output": "/Users/stuart/Developer/AI/rsikit/runs/ocean-upstream-speedup-2026-10-03/0-serial",
+      "env": "g2048",
+      "score_key": "merge_score",
+      "env_kwargs": {},
+      "mode": "reference",
+      "workers": 1,
+      "batch_size": 1,
+      "seeds": 32,
+      "max_steps": 2000,
+      "timeout": 60,
+      "duration": 0.001,
+      "panels": 8,
+      "repeats": 1,
+      "matrix": false,
+      "policy": [],
+      "trace": null,
+      "rate": 1,
+      "speed": 1,
+      "queue_limit": 128,
+      "correctness_report": null,
+      "capacity_report": null,
+      "diagnostics": false
+    },
+    "policy_provenance": "reviewed baselines; not LLM-generated",
+    "policies": [
+      {
+        "id": "d320eab977511fb8b6c59ce55706495c9d6839c36c4510556380f2694f829ba3",
+        "name": "legal-priority",
+        "sha256": "ed904103e3371e2113ba5fec4dee6f65a41d82773652f1c53ace1cc827952365"
+      },
+      {
+        "id": "44c98f17d2a3bf017ecae03673ecb2f9b23dadbef7ac014ee4b53936ca262954",
+        "name": "merge-greedy",
+        "sha256": "c939c22c1183ced727910a9f4c7d9c4bb7f7b2bfdcf11d8776f4fc4b1634fb07"
+      },
+      {
+        "id": "6ceb6b36385fb269a0e57338cd4cda970cdf32a7e962598237c26c8fbb4e942f",
+        "name": "empty-cells",
+        "sha256": "0666dadfc6023ca01a98f7e148fd3d2e74d2f7b10bbca0fbf67157153a913972"
+      },
+      {
+        "id": "8027bfe0d7ff253486e12e26b0bc497ef61c8576f7d090acfca9bd50973affe1",
+        "name": "corner",
+        "sha256": "2ed81800ca279f15d7e49e0ad2178617a69b650772620117330bd5c59f4c76ce"
+      },
+      {
+        "id": "3e1dd9c8b7a496c348ccf623547feeabd5216a2a05982ece32275f499c200159",
+        "name": "smooth-board",
+        "sha256": "2b6053d861db8fdce88b3c59643ba016d308c569c8deda0f94a74b00206b8f5f"
+      },
+      {
+        "id": "5c4ac0751ea74b607e0d96b7081a673a0429dd3221e07fbc223530a657a3f8cf",
+        "name": "corner-smooth",
+        "sha256": "60f9133a56867d3ba339b6c80ce4c66bacd8f3402f2f220b59609e72bee9af7c"
+      },
+      {
+        "id": "f9a647f1a7f17dabeea989ab4d5f1c1455afd3771d7108c9ea45e63505e04413",
+        "name": "merge-two-ply",
+        "sha256": "e16129ad94d8f3d4f6868dd8cd5ab63a87e31f67e15978c8587f383096d20416"
+      },
+      {
+        "id": "3e9f799ac24ddaab8964eff9286edee4901c2e54620bbbd3338d8a8e24c456f6",
+        "name": "board-two-ply",
+        "sha256": "1b6e53caa1468aa37b83a037e194ed45f7b185af4f8ec6cba873716fc9d11152"
+      }
+    ],
+    "trace_metadata": {}
+  },
+  "workload": {
+    "workers": 1,
+    "policies": 8,
+    "completed_repetitions": 1,
+    "max_steps": 2000,
+    "transitions_per_policy": 64000,
+    "transitions_per_trial": 512000,
+    "serial": {
+      "mode": "reference",
+      "batch_size": 1,
+      "seeds": [
+        0,
+        1,
+        2,
+        3,
+        4,
+        5,
+        6,
+        7,
+        8,
+        9,
+        10,
+        11,
+        12,
+        13,
+        14,
+        15,
+        16,
+        17,
+        18,
+        19,
+        20,
+        21,
+        22,
+        23,
+        24,
+        25,
+        26,
+        27,
+        28,
+        29,
+        30,
+        31
+      ]
+    },
+    "vector": {
+      "mode": "batch",
+      "batch_size": 32,
+      "seeds": [
+        0
+      ]
+    }
+  },
+  "elapsed_seconds": {
+    "serial": 431.0600479589775,
+    "vector": 16.75133145786822
+  },
+  "speedup": 25.732882728943054,
+  "trials": [
+    {
+      "repeat": 1,
+      "path": "serial",
+      "raw_directory": "runs/ocean-upstream-speedup-2026-10-03/0-serial",
+      "elapsed_seconds": 431.0600479589775,
+      "actual_steps_per_second": 1187.7695518855537,
+      "panels": [
+        {
+          "policy_id": "d320eab977511fb8b6c59ce55706495c9d6839c36c4510556380f2694f829ba3",
+          "policy_name": "legal-priority",
+          "service_seconds": 42.586874375119805,
+          "steps": 64000,
+          "status": "ok",
+          "results_sha256": "e374a79ea8ec6fbf06d46a05d06ba886694326167a9fb4ef9ea0cba811080f28"
+        },
+        {
+          "policy_id": "44c98f17d2a3bf017ecae03673ecb2f9b23dadbef7ac014ee4b53936ca262954",
+          "policy_name": "merge-greedy",
+          "service_seconds": 42.65368283260614,
+          "steps": 64000,
+          "status": "ok",
+          "results_sha256": "50b07c90b27e8e4a5ae59eea0f45b3109449aee42fa9353afda186cc2f7ee011"
+        },
+        {
+          "policy_id": "6ceb6b36385fb269a0e57338cd4cda970cdf32a7e962598237c26c8fbb4e942f",
+          "policy_name": "empty-cells",
+          "service_seconds": 42.43200874980539,
+          "steps": 64000,
+          "status": "ok",
+          "results_sha256": "2cdf803dbaa7fc14b63acc42b651586c2d81382af8479f0cd4314ab66fc19878"
+        },
+        {
+          "policy_id": "8027bfe0d7ff253486e12e26b0bc497ef61c8576f7d090acfca9bd50973affe1",
+          "policy_name": "corner",
+          "service_seconds": 42.52811300009489,
+          "steps": 64000,
+          "status": "ok",
+          "results_sha256": "03e313455b70ec7d73968daa7557d494790b432fda614e7a738a0470d9826660"
+        },
+        {
+          "policy_id": "3e1dd9c8b7a496c348ccf623547feeabd5216a2a05982ece32275f499c200159",
+          "policy_name": "smooth-board",
+          "service_seconds": 42.51932600000873,
+          "steps": 64000,
+          "status": "ok",
+          "results_sha256": "49145c9bc0bf0aa0aa532d8aaba6092428042b38026f5d8dfd8e703a6b2cafa7"
+        },
+        {
+          "policy_id": "5c4ac0751ea74b607e0d96b7081a673a0429dd3221e07fbc223530a657a3f8cf",
+          "policy_name": "corner-smooth",
+          "service_seconds": 42.51954975025728,
+          "steps": 64000,
+          "status": "ok",
+          "results_sha256": "f57f6e1feff2e69e6fb7c3868623841a1563ecfea2ca9e6a714f8b9ca2f7461c"
+        },
+        {
+          "policy_id": "f9a647f1a7f17dabeea989ab4d5f1c1455afd3771d7108c9ea45e63505e04413",
+          "policy_name": "merge-two-ply",
+          "service_seconds": 87.84491429198533,
+          "steps": 64000,
+          "status": "ok",
+          "results_sha256": "ddeea2386f93c022be55659ab1505da9126ec3270cf464de768ed1f24cd6d167"
+        },
+        {
+          "policy_id": "3e9f799ac24ddaab8964eff9286edee4901c2e54620bbbd3338d8a8e24c456f6",
+          "policy_name": "board-two-ply",
+          "service_seconds": 87.97180183324963,
+          "steps": 64000,
+          "status": "ok",
+          "results_sha256": "e0714aa84f75aafbde09da9c4676d31ba2fc59db08f266492e59152abc4ebb10"
+        }
+      ]
+    },
+    {
+      "repeat": 1,
+      "path": "vector",
+      "raw_directory": "runs/ocean-upstream-speedup-2026-10-03/0-vector",
+      "elapsed_seconds": 16.75133145786822,
+      "actual_steps_per_second": 30564.734587680192,
+      "panels": [
+        {
+          "policy_id": "d320eab977511fb8b6c59ce55706495c9d6839c36c4510556380f2694f829ba3",
+          "policy_name": "legal-priority",
+          "service_seconds": 1.5038013746961951,
+          "steps": 64000,
+          "status": "ok",
+          "results_sha256": "a9558183f5c47509447a7c8bc679850830f51c0f65404e1d5894a677a65c97aa"
+        },
+        {
+          "policy_id": "44c98f17d2a3bf017ecae03673ecb2f9b23dadbef7ac014ee4b53936ca262954",
+          "policy_name": "merge-greedy",
+          "service_seconds": 1.5392857496626675,
+          "steps": 64000,
+          "status": "ok",
+          "results_sha256": "4fdb1c4b9edc3c1029bee6da78e0f01196db667560610d8fb908dedeb3f86ee4"
+        },
+        {
+          "policy_id": "6ceb6b36385fb269a0e57338cd4cda970cdf32a7e962598237c26c8fbb4e942f",
+          "policy_name": "empty-cells",
+          "service_seconds": 1.5732787079177797,
+          "steps": 64000,
+          "status": "ok",
+          "results_sha256": "91393a3057cd7e581d2106c0c3a933807442f4d60b9da35f296e335d2aa06d4f"
+        },
+        {
+          "policy_id": "8027bfe0d7ff253486e12e26b0bc497ef61c8576f7d090acfca9bd50973affe1",
+          "policy_name": "corner",
+          "service_seconds": 1.6173891671933234,
+          "steps": 64000,
+          "status": "ok",
+          "results_sha256": "b8ebf2c0d481803b9a5e534d13a0c55b946b12f9d53d626adab42dad4152eff0"
+        },
+        {
+          "policy_id": "3e1dd9c8b7a496c348ccf623547feeabd5216a2a05982ece32275f499c200159",
+          "policy_name": "smooth-board",
+          "service_seconds": 1.5794335827231407,
+          "steps": 64000,
+          "status": "ok",
+          "results_sha256": "4f72eff328220ab5cb8727b0f78cf4fba1b41b22586049a9530d2bd68bfb6829"
+        },
+        {
+          "policy_id": "5c4ac0751ea74b607e0d96b7081a673a0429dd3221e07fbc223530a657a3f8cf",
+          "policy_name": "corner-smooth",
+          "service_seconds": 1.5844512078911066,
+          "steps": 64000,
+          "status": "ok",
+          "results_sha256": "093c2f4ccbd05a580acb03fc679889a1a891eaea68ccb6084a6423a8bb1ac384"
+        },
+        {
+          "policy_id": "f9a647f1a7f17dabeea989ab4d5f1c1455afd3771d7108c9ea45e63505e04413",
+          "policy_name": "merge-two-ply",
+          "service_seconds": 3.7000940409488976,
+          "steps": 64000,
+          "status": "ok",
+          "results_sha256": "c75f474ffb3b9dbf2c9fe8de264fd8a12bb2a2ece09838b20d9fe192c2a0fbf3"
+        },
+        {
+          "policy_id": "3e9f799ac24ddaab8964eff9286edee4901c2e54620bbbd3338d8a8e24c456f6",
+          "policy_name": "board-two-ply",
+          "service_seconds": 3.6506973328068852,
+          "steps": 64000,
+          "status": "ok",
+          "results_sha256": "542a70d203ffdb5607030e8391f0f433e6940048717c5432ba49587406012b23"
+        }
+      ]
+    }
+  ],
+  "aborted_second_serial_pass": [
+    {
+      "policy_name": "legal-priority",
+      "status": "ok",
+      "received_minus_started_seconds": 42.43195779202506,
+      "results_match_first_pass": true
+    },
+    {
+      "policy_name": "merge-greedy",
+      "status": "ok",
+      "received_minus_started_seconds": 95.61182375019416,
+      "results_match_first_pass": true
+    },
+    {
+      "policy_name": "empty-cells",
+      "status": "ok",
+      "received_minus_started_seconds": 86.30604254174978,
+      "results_match_first_pass": true
+    },
+    {
+      "policy_name": "corner",
+      "status": "ok",
+      "received_minus_started_seconds": 120.03138587484136,
+      "results_match_first_pass": true
+    },
+    {
+      "policy_name": "smooth-board",
+      "status": "ok",
+      "received_minus_started_seconds": 184.19805708387867,
+      "results_match_first_pass": true
+    },
+    {
+      "policy_name": "corner-smooth",
+      "status": "ok",
+      "received_minus_started_seconds": 94.00870449980721,
+      "results_match_first_pass": true
+    },
+    {
+      "policy_name": "merge-two-ply",
+      "status": "cancelled",
+      "received_minus_started_seconds": 5.681499958969653,
+      "results_match_first_pass": null
+    }
+  ],
+  "repeat_stop_reason": "Host timing drift: identical simple panels grew from ~42.5s to 86\u2013184s. Stopped during the seventh panel; third repetition not started.",
+  "clock_observation": "At 17:05:16 UTC, wall-clock elapsed since the first serial manifest was ~1980s, versus ~798s on perf_counter; consistent with host sleep or a clock discontinuity. Timings use perf_counter.",
+  "process_control": {
+    "workers": 1,
+    "batch_size": 32,
+    "seeds": [
+      0,
+      1
+    ],
+    "max_steps": 2000,
+    "policies": [
+      "legal-priority",
+      "board-two-ply"
+    ],
+    "repetitions": 1,
+    "reference_seconds": 17.16240862524137,
+    "batch_seconds": 11.617122791707516,
+    "speedup": 1.4773372833325102,
+    "exact_results_match": true
+  },
+  "limitations": [
+    "Batch widths use different random streams; this is equal work, not identical trajectories.",
+    "The old custom adapter stopped at episode ends; current upstream runs a fixed horizon with autoresets.",
+    "Native macOS ARM64, not emulated Docker. CPU/RAM allocation is not OS-enforced.",
+    "Reviewed NumPy policies only; no LLM generation or full search was benchmarked.",
+    "Only one complete eight-policy comparison; repeats stopped due to host timing drift. Not a repeated or sustained-capacity estimate."
+  ]
+}

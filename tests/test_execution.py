@@ -2,9 +2,11 @@
 
 import asyncio
 import os
+import pickle
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import Mock, patch
 
 import gymnasium as gym
 
@@ -43,6 +45,51 @@ class Solution(Policy):
 
 
 class ExecutionTests(unittest.IsolatedAsyncioTestCase):
+    async def test_darwin_cleanup_waits_for_exiting_worker(self):
+        from research.ocean.evaluator import PanelEvaluator
+        from rsikit.episode import Episode
+
+        for ocean in (False, True):
+            for exits in (True, False):
+                with (
+                    self.subTest(ocean=ocean, exits=exits),
+                    tempfile.TemporaryDirectory() as directory,
+                    patch("research.ocean.evaluator.metadata", return_value={}),
+                ):
+                    executor = PanelEvaluator(directory) if ocean else Executor()
+                    process = Mock(pid=12345)
+                    process.is_alive.return_value = True
+
+                    def join(timeout=None):
+                        process.is_alive.return_value = not exits
+
+                    process.join.side_effect = join
+                    receiving, sending = Mock(), Mock()
+                    receiving.recv_bytes.return_value = (
+                        b'{"results": [], "steps": 0}' if ocean else pickle.dumps(Episode())
+                    )
+                    executor._context = Mock()
+                    executor._context.Process.return_value = process
+                    executor._context.Pipe.return_value = receiving, sending
+                    with (
+                        patch("sys.platform", "darwin"),
+                        patch(
+                            "os.killpg", side_effect=PermissionError(1, "Operation not permitted")
+                        ),
+                    ):
+                        evaluation = (
+                            executor._panel(SOURCE, [1])
+                            if ocean
+                            else executor._evaluate(SOURCE, b"", 1)
+                        )
+                        if exits:
+                            await evaluation
+                            process.close.assert_called_once()
+                            receiving.close.assert_called_once()
+                        else:
+                            with self.assertRaises(PermissionError):
+                                await evaluation
+
     async def test_generated_traceback_preserves_chain_without_locals(self):
         import io
 

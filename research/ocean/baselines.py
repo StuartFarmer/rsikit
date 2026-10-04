@@ -62,7 +62,7 @@ class Solution(Policy):
 def policies(env_name="g2048"):
     """Return frozen source variants, from legal priority to bounded two-ply search."""
     if env_name != "g2048":
-        return [
+        result = [
             Policy.from_text(
                 """import numpy as np
 from rsikit import Policy
@@ -74,6 +74,15 @@ class Solution(Policy):
                 description="Upstream discrete-action fallback",
             )
         ]
+        if env_name in ("breakout", "maze"):
+            result.append(
+                Policy.from_text(
+                    BREAKOUT_REFERENCE if env_name == "breakout" else MAZE_REFERENCE,
+                    name="ball-tracker" if env_name == "breakout" else "depth-first-explorer",
+                    description="Frozen deterministic reference; independent state per row",
+                )
+            )
+        return result
     variants = [
         ("legal-priority", (0, 0, 0, 0), False, (4, 1, 3, 2)),
         ("merge-greedy", (1, 0, 0, 0), False, (0, 0, 0, 0)),
@@ -94,3 +103,47 @@ class Solution(Policy):
         )
         for name, weights, lookahead, priority in variants
     ]
+
+
+BREAKOUT_REFERENCE = """import numpy as np
+from rsikit import Policy
+class Solution(Policy):
+    async def act(self, observation):
+        # Default arena: x is top-left, paddle width is relative to 62 pixels.
+        paddle = observation[:, 0] + observation[:, 9] * 31 / 576
+        ball = observation[:, 2] + 16 / 576
+        delta = ball - paddle
+        return np.where(delta < -0.02, 1, np.where(delta > 0.02, 2, 0)).astype(np.int64)
+"""
+
+MAZE_REFERENCE = """import numpy as np
+from rsikit import Policy
+class Solution(Policy):
+    async def reset(self, *, seed=None):
+        self.positions = None
+
+    async def act(self, observation):
+        if self.positions is None:
+            self.positions = [(0, 0) for _ in observation]
+            self.visited = [{(0, 0)} for _ in observation]
+            self.paths = [[] for _ in observation]
+        directions = [(1, 0, 1), (0, 1, 4), (-1, 0, 3), (0, -1, 2)]
+        actions = np.zeros(len(observation), dtype=np.int64)
+        for i, grid in enumerate(observation.reshape(-1, 11, 11)):
+            x, y = self.positions[i]
+            for dx, dy, action in directions:
+                target = (x + dx, y + dy)
+                if grid[5 + dy, 5 + dx] != 1 and target not in self.visited[i]:
+                    self.paths[i].append((x, y))
+                    self.visited[i].add(target)
+                    self.positions[i] = target
+                    actions[i] = action
+                    break
+            else:
+                if self.paths[i]:
+                    target = self.paths[i].pop()
+                    actions[i] = next(a for dx, dy, a in directions
+                                      if (x + dx, y + dy) == target)
+                    self.positions[i] = target
+        return actions
+"""
