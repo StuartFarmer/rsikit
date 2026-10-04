@@ -125,6 +125,7 @@ class ShinkaEvolve:
         self._round = {}
         self._repairs = {}
         self._proposing = False
+        self._proposal_error = None
         self._seed_panel = None
         self.offspring: dict[str, int] = {}
         self.model_gains: list[list[Decimal]] = [[] for _ in self.models]
@@ -545,9 +546,25 @@ class ShinkaEvolve:
                 row.status, row.error = "failed", diagnostic
                 self._log_candidate(row)
 
-    async def repair(self, policy: type[Policy], diagnostic: str) -> type[Policy] | None:
-        self.evaluation_failed({policy.id: diagnostic})
-        rows = self._pending[policy.id]
+    async def repair(
+        self, policy: type[Policy], diagnostic: str, *, _records=None
+    ) -> type[Policy] | None:
+        rows = list(self._pending[policy.id]) if _records is None else _records
+        for row in rows:
+            row.status, row.error = "failed", diagnostic
+            self._log_candidate(row)
+
+        def detach():
+            remaining = [
+                row
+                for row in self._pending.get(policy.id, [])
+                if not any(row is repaired for repaired in rows)
+            ]
+            if remaining:
+                self._pending[policy.id] = remaining
+            else:
+                self._pending.pop(policy.id, None)
+
         row = max(rows, key=lambda item: item.repairs)
         reference = (
             self._policies[row.parents[0]]._implementation
@@ -560,7 +577,8 @@ class ShinkaEvolve:
             )
             await self.check_novelty(replacement._implementation, self.islands[row.island], row)
         except InvalidPolicy as exc:
-            for item in self._pending.pop(policy.id):
+            detach()
+            for item in rows:
                 item.status, item.error = "discarded", str(exc)
                 self._finish(item)
             logger.warning("Discarded %s: %s", policy.name, exc)
@@ -578,7 +596,7 @@ class ShinkaEvolve:
             )
             for item in rows
         ]
-        self._pending.pop(policy.id)
+        detach()
         self._pending.setdefault(replacement.id, []).extend(replacements)
         self.evaluations.extend(replacements)
         self._policies[replacement.id] = replacement
@@ -591,6 +609,7 @@ class ShinkaEvolve:
     def done(self):
         return (
             not self._proposing
+            and self._proposal_error is None
             and not self._pending
             and not self._round
             and not self._repairs
@@ -600,15 +619,21 @@ class ShinkaEvolve:
     async def propose(self):
         if self._proposing or self._round:
             raise RuntimeError("Previous proposal round is still outstanding")
+        if self._proposal_error is not None:
+            raise self._proposal_error
         self._proposing = True
         try:
             while True:
                 if self._repairs:
                     slots = asyncio.Semaphore(self.config.generation_concurrency)
 
+                    groups = {id: list(self._pending[id]) for id in self._repairs}
+
                     async def repair(id, diagnostic):
                         async with slots:
-                            replacement = await self.repair(self._policies[id], diagnostic)
+                            replacement = await self.repair(
+                                self._policies[id], diagnostic, _records=groups[id]
+                            )
                             self._repairs.pop(id, None)
                             return replacement
 
@@ -636,6 +661,20 @@ class ShinkaEvolve:
                     return list(self._round.values())
                 if self.generations:
                     self.records(complete=True)
+        except BaseException as exc:
+            self._proposal_error = exc
+            ready = {}
+            for row in self.evaluations:
+                if row.status in ("generated", "repaired") and row.policy_id:
+                    pending = self._pending.setdefault(row.policy_id, [])
+                    if not any(saved is row for saved in pending):
+                        pending.append(row)
+                    ready[row.policy_id] = self._policies[row.policy_id]
+            if ready and isinstance(exc, Exception):
+                self._round = ready
+                self.evaluation_started(ready.values())
+                return list(ready.values())
+            raise
         finally:
             self._proposing = False
 
@@ -646,6 +685,7 @@ class ShinkaEvolve:
             raise ValueError("ShinkaEvolve requires per-seed scores")
         self.update_scores({id: statistics.fmean(r.scores.values()) for id, r in accepted.items()})
         for id, result in results.items():
+            self._repairs.pop(id, None)
             if result.failure is not None:
                 self.evaluation_failed({id: result.failure})
                 self._repairs[id] = result.failure
@@ -655,7 +695,7 @@ class ShinkaEvolve:
                     self._finish(row)
         self._seed_panel = panel
         self._round.clear()
-        if not self._pending:
+        if not self._pending and self._proposal_error is None:
             self.generations[-1].complete = True
 
     def update_scores(self, scores: Mapping[str, float]) -> None:

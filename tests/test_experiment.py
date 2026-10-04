@@ -17,6 +17,107 @@ from tests.test_elitesearch import program
 
 
 class ExperimentTests(unittest.IsolatedAsyncioTestCase):
+    async def test_paper_adapter_cleanup_preserves_primary_error_and_template_root(self):
+        from slick import prompts
+
+        from research.alphaevolve import cli, paper
+        from tests.test_alphaevolve import program as alpha_program
+
+        previous_root = prompts.TEMPLATE_ROOT
+        primary = RuntimeError("original infrastructure failure")
+        close = paper.AlphaEvolve.close
+
+        def broken_close(agent):
+            close(agent)
+            raise OSError("checkpoint unavailable")
+
+        async def evaluate(policies):
+            raise primary
+
+        with tempfile.TemporaryDirectory() as directory:
+            with Run.create(name="cleanup", path=Path(directory) / "run") as run:
+                with patch.object(paper.AlphaEvolve, "close", broken_close):
+                    with self.assertRaises(RuntimeError) as raised:
+                        await cli.optimize(
+                            task="task",
+                            provider=ScriptedProvider([alpha_program(0)]),
+                            evaluate=evaluate,
+                            run=run,
+                            seed=0,
+                            options=dict(
+                                proposals=1,
+                                generation=dict(concurrency=1, timeout=120),
+                                videos=dict(top=0),
+                            ),
+                        )
+                self.assertIs(raised.exception, primary)
+                self.assertEqual(prompts.TEMPLATE_ROOT, previous_root)
+
+    async def test_all_adapters_evaluate_admitted_candidates_when_budget_expires(self):
+        from research.providers import BudgetProvider
+        from tests.test_alphaevolve import program as alpha_program
+        from tests.test_lineagesearch import experiments, families
+        from tests.test_lineagesearch import program as lineage_program
+
+        cases = [
+            (
+                "alphaevolve",
+                dict(variant=v, proposals=2, proposal_batch_size=2, islands=1),
+                [alpha_program(0)],
+                1,
+            )
+            for v in ("paper", "original", "improved")
+        ]
+        cases += [
+            (
+                "shinka",
+                dict(generations=1, proposal_batch_size=2, islands=1),
+                [alpha_program(0)],
+                1,
+            ),
+            ("elite", dict(generations=1, population=2, elites=1), [program(0)], 1),
+            (
+                "lineage",
+                dict(families=1, decomposition_k=1, initial_per_family=2, max_attempts=2),
+                [families(), experiments(0, 1), lineage_program(0)],
+                3,
+            ),
+        ]
+        for selector, options, responses, cap in cases:
+            with (
+                self.subTest(selector=selector, options=options),
+                tempfile.TemporaryDirectory() as directory,
+            ):
+                component = load_component(selector, kind="optimizer", base_dir=Path.cwd())
+                provider = BudgetProvider(
+                    ScriptedProvider(responses),
+                    max_calls=cap,
+                    max_input_tokens=65536,
+                    max_output_tokens=16384,
+                )
+                measured = []
+
+                async def evaluate(policies):
+                    measured.extend(policies)
+                    return {p.id: Measurement({0: 5}) for p in policies}
+
+                with Run.create(name="budget", path=Path(directory) / "run") as run:
+                    result = await component.optimize(
+                        task="task",
+                        provider=provider,
+                        evaluate=evaluate,
+                        run=run,
+                        seed=0,
+                        options={
+                            **options,
+                            "generation": dict(concurrency=1, timeout=120),
+                            "videos": dict(top=0),
+                        },
+                    )
+                    self.assertEqual(len(result), 1)
+                    self.assertEqual([p.id for p in result], [p.id for p in measured])
+                    self.assertEqual(provider.calls, cap)
+
     async def test_all_builtin_adapters_delegate_and_rank_finalists(self):
         from research.providers import BudgetProvider
         from rsikit import Measurement, search

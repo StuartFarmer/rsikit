@@ -63,6 +63,83 @@ class OptimizerContractTests(unittest.IsolatedAsyncioTestCase):
             self.addCleanup(agent.close)
         return agent, provider
 
+    async def test_interrupted_generation_is_not_completion(self):
+        from slick.providers import ProviderError
+
+        for kind in ("original", "improved", "paper", "shinka"):
+            with self.subTest(optimizer=kind):
+                agent, provider = self.optimizer(kind)
+                provider.responses = iter([program(0), ProviderError("offline")])
+
+                async def evaluate(policies):
+                    return {p.id: Measurement({0: 5}) for p in policies}
+
+                with self.assertRaisesRegex(ProviderError, "offline"):
+                    await search(agent, evaluate)
+                self.assertFalse(agent.done)
+                if kind == "shinka":
+                    self.assertFalse(agent.generations[-1].complete)
+
+    async def test_repairs_colliding_with_pending_ids_keep_attempts_separate(self):
+        from dataclasses import replace
+
+        for kind in ("original", "improved", "paper", "shinka"):
+            for concurrency in (1, 2):
+                with self.subTest(optimizer=kind, concurrency=concurrency):
+                    agent, provider = self.optimizer(kind)
+                    agent.config = replace(agent.config, generation_concurrency=concurrency)
+                    provider.responses = iter([program(0), program(1), program(1), program(2)])
+                    first, second = await agent.propose()
+                    agent.update({p.id: Measurement(failure="broken") for p in (first, second)})
+                    replacements = await agent.propose()
+                    self.assertEqual(len(replacements), 2)
+                    self.assertIn(second.id, {p.id for p in replacements})
+                    agent.update({p.id: Measurement({0: 7}) for p in replacements})
+                    self.assertEqual(agent.completed, 2)
+                    self.assertTrue(agent.done)
+
+    async def test_repair_collision_clears_superseded_failure_when_sibling_call_fails(self):
+        from dataclasses import replace
+
+        from slick.providers import ProviderError
+
+        for kind in ("original", "improved", "paper", "shinka"):
+            with self.subTest(optimizer=kind):
+                agent, provider = self.optimizer(kind)
+                agent.config = replace(agent.config, generation_concurrency=1)
+                provider.responses = iter(
+                    [program(0), program(1), program(1), ProviderError("offline")]
+                )
+                policies = await agent.propose()
+                agent.update({p.id: Measurement(failure="broken") for p in policies})
+
+                async def evaluate(policies):
+                    return {p.id: Measurement({0: 5}) for p in policies}
+
+                with self.assertRaises(ProviderError):
+                    await search(agent, evaluate)
+                self.assertEqual(agent.completed, 2)
+                self.assertEqual(agent._pending, {})
+                self.assertEqual(agent._repairs, {})
+
+    async def test_legacy_wrapper_checkpoint_preserves_primary_error(self):
+        for kind in ("elite", "lineage"):
+            with self.subTest(optimizer=kind):
+                agent, _ = self.optimizer(kind)
+                primary = RuntimeError("original infrastructure failure")
+
+                def broken_checkpoint(agent):
+                    raise OSError("checkpoint unavailable")
+
+                async def evaluate(policies):
+                    agent.on_checkpoint = broken_checkpoint
+                    raise primary
+
+                agent.evaluate = evaluate
+                with self.assertLogs(level="ERROR"), self.assertRaises(RuntimeError) as raised:
+                    await agent.run()
+                self.assertIs(raised.exception, primary)
+
     async def test_six_optimizers_conform_to_one_runner_and_feedback_contract(self):
         for kind in ("original", "improved", "paper", "shinka", "elite", "lineage"):
             for outcome in ("success", "screened", "repaired", "exhausted"):

@@ -216,7 +216,9 @@ context, and scored prompt ideas. The CLI also saves attempt/revision history an
 island member IDs to `run.sqlite`. Round checkpoints preserve original attempts,
 pending policy definitions, seed panels, and queued repairs. Reopening reissues
 pending evaluation and continues repairs without allocating another original
-attempt. It cannot replay an in-flight remote model call or guarantee identical
+attempt. Unfinished original generation attempts are retried with their saved
+IDs, parents, inspirations, and repair allowance; previous interruption evidence
+is retained. Retrying cannot replay an in-flight remote call or guarantee identical
 remote output. Keep the same evaluator and seeds. Legacy completed archives are
 accepted; incomplete legacy streaming checkpoints are rejected before generation.
 `Run.open` alone opens evaluation storage and does not restore an optimizer.

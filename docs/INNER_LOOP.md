@@ -234,6 +234,13 @@ The shared runner also validates batches and invokes optional `on_checkpoint`
 after proposals, after updates, and on exceptional exit. Algorithms keep any
 additional checkpoints needed during generation. Cancellation, infrastructure
 errors, and provider budget exhaustion propagate; they are interrupted outcomes.
+On ordinary generation errors, built-ins retain already generated siblings and
+return them for external evaluation before surfacing the saved error on the next
+proposal. This lets budget-limited runs keep candidates they already paid to
+generate. No new model calls are admitted while that error is pending.
+Cancellation propagates immediately. An interrupted optimizer does not report
+completion; paper AlphaEvolve can reopen its checkpoint and retry unfinished
+original attempts with their IDs, parents, and repair budgets intact.
 
 ### Scheduling and migration
 

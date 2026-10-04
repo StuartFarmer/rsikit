@@ -600,9 +600,12 @@ class EliteSearch:
             if self.generations and self.generations[-1].status != "completed":
                 self.generations[-1].status = self.reason
                 self.generations[-1].error = f"{type(exc).__name__}: {exc}"
+            try:
+                self._checkpoint()
+            except BaseException:
+                logger.exception("Checkpoint failed while handling search error")
             raise
         finally:
-            self._checkpoint()
             logger.info(
                 "Search %s",
                 self.reason,

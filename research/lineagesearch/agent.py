@@ -123,6 +123,7 @@ class LineageSearch:
         self._round = {}
         self._expansions = []
         self._proposing = False
+        self._proposal_error = None
         self._phase = "discover"
         self._bonus_remaining = 0
 
@@ -780,6 +781,8 @@ class LineageSearch:
             self.study.reason = "completed" if self.families and not active else "budget_exhausted"
 
     def _settle_expansions(self):
+        if self._proposal_error is not None:
+            return
         if any(
             row.status == "execution_failed" and row.repairs < self.config.max_repairs
             for _, rows, _, _, _ in self._expansions
@@ -819,6 +822,8 @@ class LineageSearch:
             raise RuntimeError("Previous proposal round is still outstanding")
         if self.done:
             return []
+        if self._proposal_error is not None:
+            raise self._proposal_error
         self._proposing = True
         try:
             if self._phase == "discover":
@@ -874,6 +879,18 @@ class LineageSearch:
                         self._log_candidate(row)
                     return [self._policies[row.id] for row in self._round.values()]
                 self._settle_expansions()
+        except BaseException as exc:
+            self._proposal_error = exc
+            if isinstance(exc, Exception):
+                self._round = {
+                    row.policy_id: row for row in self.trials if row.status == "generated"
+                }
+                if self._round:
+                    for row in self._round.values():
+                        row.status = "evaluating"
+                        self._log_candidate(row)
+                    return [self._policies[row.id] for row in self._round.values()]
+            raise
         finally:
             self._proposing = False
 
@@ -919,9 +936,12 @@ class LineageSearch:
         except BaseException as exc:
             self.study.reason = "cancelled" if isinstance(exc, asyncio.CancelledError) else "error"
             self.study.error = f"{type(exc).__name__}: {exc}"
+            try:
+                self._checkpoint()
+            except BaseException:
+                logger.exception("Checkpoint failed while handling search error")
             raise
         finally:
-            self._checkpoint()
             logger.info(
                 "Search %s",
                 self.study.reason,

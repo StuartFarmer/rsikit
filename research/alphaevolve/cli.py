@@ -1,5 +1,7 @@
 """AlphaEvolve options and adapter for the common experiment runner."""
 
+import logging
+import sys
 from pathlib import Path
 from typing import Literal
 
@@ -130,6 +132,16 @@ async def optimize(*, task, provider, evaluate, run, options, seed):
         )
         return list({r["policy"].id: r["policy"] for r in ranked}.values())
     finally:
-        if options.variant == "paper" and agent is not None:
-            agent.close()
-        prompts.TEMPLATE_ROOT = previous_root
+        primary_error = sys.exc_info()[0] is not None
+        try:
+            if options.variant == "paper" and agent is not None:
+                try:
+                    agent.close()
+                except BaseException:
+                    if not primary_error:
+                        raise
+                    logging.getLogger(__name__).exception(
+                        "Cleanup failed while handling search error"
+                    )
+        finally:
+            prompts.TEMPLATE_ROOT = previous_root

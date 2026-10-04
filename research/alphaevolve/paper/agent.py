@@ -16,6 +16,17 @@ from .database import Candidate, Database
 from .evaluation import EvaluationResult
 
 
+def _saved_candidate(candidate):
+    return {**asdict(candidate), "policy": candidate.policy.to_text()}
+
+
+def _restored_candidate(saved):
+    values = dict(saved)
+    values["policy"] = Policy.from_text(values["policy"])
+    values["seed_scores"] = {int(k): v for k, v in values["seed_scores"].items()}
+    return Candidate(**values)
+
+
 @dataclass(frozen=True)
 class Config(BaselineConfig):
     objective: str = "reward"
@@ -91,12 +102,10 @@ class AlphaEvolve(Baseline):
                     if row.get("policy") is not None:
                         row["policy"] = Policy.from_text(row["policy"])
                     if row.get("parent") is not None:
-                        parent = dict(row["parent"])
-                        parent["policy"] = Policy.from_text(parent["policy"])
-                        parent["seed_scores"] = {
-                            int(k): v for k, v in parent["seed_scores"].items()
-                        }
-                        row["parent"] = Candidate(**parent)
+                        row["parent"] = _restored_candidate(row["parent"])
+                    row["inspirations"] = [
+                        _restored_candidate(c) for c in row.get("inspirations", [])
+                    ]
                     if row.get("idea") is not None:
                         row["idea"] = self.prompt_ideas[row["idea"]]
                     self.attempts.append(row)
@@ -107,6 +116,8 @@ class AlphaEvolve(Baseline):
                         "evaluating",
                     ):
                         self._pending.setdefault(row["policy"].id, []).append(row)
+                    elif row["status"] not in ("evaluated", "discarded"):
+                        self._retry.append(row)
             elif state["attempts"] != state["completed"]:
                 self.database.close()
                 raise ValueError(
@@ -128,7 +139,8 @@ class AlphaEvolve(Baseline):
             if row.get("policy") is not None:
                 row["policy"] = row["policy"].to_text()
             if row.get("parent") is not None:
-                row["parent"] = {**asdict(row["parent"]), "policy": row["parent"].policy.to_text()}
+                row["parent"] = _saved_candidate(row["parent"])
+            row["inspirations"] = [_saved_candidate(c) for c in row.get("inspirations", [])]
             if row.get("idea") is not None:
                 row["idea"] = next(
                     i for i, idea in enumerate(self.prompt_ideas) if idea is row["idea"]
@@ -167,8 +179,10 @@ class AlphaEvolve(Baseline):
         )
 
     def close(self):
-        self.checkpoint()
-        self.database.close()
+        try:
+            self.checkpoint()
+        finally:
+            self.database.close()
 
     def sample(self):
         return self.database.sample(self.rng, inspirations=self.config.inspirations)
