@@ -18,8 +18,9 @@ from slick import parse, render
 from slick.providers import Provider
 
 from research.rewards import Measurement
-from rsikit import Policy
+from rsikit import Policy, search
 from rsikit.generation import WORKER_LIBRARIES
+from rsikit.optimization import validate_results
 from rsikit.policy import InvalidPolicy, validate_policy
 
 from .generation import (
@@ -120,7 +121,8 @@ class EliteSearch:
         self,
         task: str,
         provider: Provider,
-        evaluate: Callable[[Sequence[type[Policy]]], Awaitable[dict[str, Measurement]]],
+        evaluate: Callable[[Sequence[type[Policy]]], Awaitable[dict[str, Measurement]]]
+        | None = None,
         *,
         context: str = "",
         config: Config = Config(),
@@ -137,6 +139,8 @@ class EliteSearch:
         self.organisms: list[Organism] = []
         self.generations: list[Generation] = []
         self.reason = "ready"
+        self._round = {}
+        self._proposing = False
         self._policies: dict[int, type[Policy]] = {}
         self._sources: set[str] = set()
         self._seed_panel: set[int] | None = None
@@ -398,56 +402,7 @@ class EliteSearch:
                 row.error = f"{type(exc).__name__}: {exc}"
                 raise
 
-    async def _measure(self, rows):
-        while rows:
-            for row in rows:
-                row.status = "evaluating"
-                self._log_candidate(row)
-            self._checkpoint()
-            results = await self.evaluate([self._policies[row.id] for row in rows])
-            if set(results) != {row.policy_id for row in rows}:
-                raise ValueError("Evaluator must return exactly the requested policy IDs")
-            panel = self._seed_panel
-            for result in results.values():
-                if not result.accepted:
-                    continue
-                if not result.scores or any(not math.isfinite(v) for v in result.scores.values()):
-                    raise ValueError("Measurements must contain finite per-seed scores")
-                if panel is not None and set(result.scores) != panel:
-                    raise ValueError("All candidates must use the same seed panel")
-                panel = set(result.scores)
-            self._seed_panel = panel
-            failed = []
-            for row in rows:
-                result = results[row.policy_id]
-                if result.failure is not None:
-                    row.status, row.error = "execution_failed", result.failure
-                    failed.append(row)
-                elif not result.accepted:
-                    row.status, row.error = "discarded", result.feedback or "Evaluation rejected"
-                else:
-                    row.score = fmean(result.scores.values())
-                    row.seed_scores = {str(seed): value for seed, value in result.scores.items()}
-                    row.status = "evaluated"
-                self._log_candidate(row)
-            self._checkpoint()
-            if not failed:
-                return
-            logger.info(
-                "Repairing %s failed organisms",
-                len(failed),
-                extra={"event": "generation_started", "total": len(failed)},
-            )
-            tasks = [asyncio.create_task(self._generate(row, repairing=True)) for row in failed]
-            try:
-                repaired = await asyncio.gather(*tasks)
-            finally:
-                for task in tasks:
-                    task.cancel()
-                await asyncio.gather(*tasks, return_exceptions=True)
-            rows = [row for row in repaired if row.status == "generated"]
-
-    async def _experiment(self, rows):
+    async def _prepare(self, rows):
         logger.info(
             "Generating population of %s",
             len(rows),
@@ -467,8 +422,6 @@ class EliteSearch:
                         row.implementation = row.revisions[-1]["implementation"]
                         row.error = row.revisions[-1]["error"]
                 await self._generate(row, repairing=repairing)
-            if row.status == "generated":
-                await self._measure([row])
 
         tasks = [asyncio.create_task(produce(row)) for row in rows]
         try:
@@ -504,8 +457,121 @@ class EliteSearch:
             self.elites[0].score if self.elites else "unfilled",
         )
 
-    async def run(self) -> list[Organism]:
+    @property
+    def done(self):
+        if self._round or self._proposing:
+            return False
+        if self.generations and self.generations[-1].status != "completed":
+            return False
+        return (
+            len(self.generations) >= self.config.generations
+            or self.config.target_score is not None
+            and bool(self.elites)
+            and self.elites[0].score >= self.config.target_score
+        )
+
+    def _settle_generation(self):
+        generation = self.generations[-1]
+        rows = [row for row in self.organisms if row.generation == generation.number]
+        if generation.status == "completed" or any(
+            row.status not in ("evaluated", "discarded") for row in rows
+        ):
+            return
+        self._promote(generation, rows)
+        self._log_leaderboard()
+        logger.info(
+            "Finished generation %s",
+            generation.number,
+            extra={
+                "progress": dict(
+                    kind="batch_finished", batch_id=str(generation.number), status="completed"
+                )
+            },
+        )
+        self.reason = (
+            "target_reached"
+            if self.config.target_score is not None
+            and self.elites
+            and self.elites[0].score >= self.config.target_score
+            else "completed"
+            if len(self.generations) >= self.config.generations
+            else "running"
+        )
+        self._checkpoint()
+
+    async def propose(self):
+        if self._proposing or self._round:
+            raise RuntimeError("Previous proposal round is still outstanding")
+        if self.done:
+            return []
+        self._proposing = True
         self.reason = "running"
+        try:
+            while True:
+                if not self.generations or self.generations[-1].status == "completed":
+                    if (
+                        len(self.generations) >= self.config.generations
+                        or self.config.target_score is not None
+                        and self.elites
+                        and self.elites[0].score >= self.config.target_score
+                    ):
+                        return []
+                    generation = Generation(
+                        number=len(self.generations) + 1, elite_ids=[row.id for row in self.elites]
+                    )
+                    self.generations.append(generation)
+                    self._population(generation)
+                generation = self.generations[-1]
+                generation.status, generation.error = "running", None
+                rows = [row for row in self.organisms if row.generation == generation.number]
+                logger.info(
+                    "Generation %s",
+                    generation.number,
+                    extra={
+                        "progress": dict(
+                            kind="batch_started",
+                            batch_id=str(generation.number),
+                            label=f"Generation {generation.number}",
+                            total_candidates=len(rows),
+                        )
+                    },
+                )
+                self._checkpoint()
+                await self._prepare(rows)
+                self._round = {row.policy_id: row for row in rows if row.status == "generated"}
+                if self._round:
+                    for row in self._round.values():
+                        row.status = "evaluating"
+                        self._log_candidate(row)
+                    return [self._policies[row.id] for row in self._round.values()]
+                self._settle_generation()
+        finally:
+            self._proposing = False
+
+    def update(self, results):
+        panel = validate_results(results, self._round, seed_panel=self._seed_panel)
+        if any(r.accepted and not r.scores for r in results.values()):
+            raise ValueError("EliteSearch requires per-seed scores")
+        for id, result in results.items():
+            row = self._round[id]
+            if result.failure is not None:
+                row.status, row.error = "execution_failed", result.failure
+            elif not result.accepted:
+                row.status, row.error = "discarded", result.feedback or "Evaluation rejected"
+            else:
+                row.score = fmean(result.scores.values())
+                row.seed_scores = {str(seed): value for seed, value in result.scores.items()}
+                row.status, row.error = "evaluated", None
+            self._log_candidate(row)
+        self._round.clear()
+        self._seed_panel = panel
+        self._checkpoint()
+        self._settle_generation()
+
+    async def run(self) -> list[Organism]:
+        """Compatibility wrapper; new callers pass this optimizer to rsikit.search."""
+        if self.evaluate is None:
+            raise ValueError("Pass an evaluator to rsikit.search(optimizer, evaluate)")
         logger.info(
             "Starting %s",
             self.optimizer_name,
@@ -521,104 +587,17 @@ class EliteSearch:
                 )
             },
         )
-        for generation in self.generations:
-            logger.info(
-                "Restoring generation %s",
-                generation.number,
-                extra={
-                    "progress": dict(
-                        kind="batch_started",
-                        batch_id=str(generation.number),
-                        label=f"Generation {generation.number}",
-                        total_candidates=self.config.population_size,
-                    )
-                },
-            )
-            for row in self.organisms:
-                if row.generation == generation.number:
-                    self._log_candidate(row, restored=True)
-            if generation.status == "completed":
-                logger.info(
-                    "Restored generation %s",
-                    generation.number,
-                    extra={
-                        "progress": dict(
-                            kind="batch_finished",
-                            batch_id=str(generation.number),
-                            status="completed",
-                            restored=True,
-                        )
-                    },
-                )
+        for row in self.organisms:
+            self._log_candidate(row, restored=True)
         self._log_leaderboard()
         try:
-            pending = self.generations and self.generations[-1].status != "completed"
-            if (
-                not pending
-                and self.config.target_score is not None
-                and self.elites
-                and self.elites[0].score >= self.config.target_score
-            ):
-                self.reason = "target_reached"
-                return self.elites
-            start = len(self.generations) if pending else len(self.generations) + 1
-            for number in range(start, self.config.generations + 1):
-                if pending and number == start:
-                    generation = self.generations[-1]
-                    generation.status, generation.error = "running", None
-                    rows = [row for row in self.organisms if row.generation == number]
-                else:
-                    generation = Generation(
-                        number=number, elite_ids=[row.id for row in self.elites]
-                    )
-                    self.generations.append(generation)
-                    rows = self._population(generation)
-                logger.info(
-                    "Generation %s",
-                    number,
-                    extra={
-                        "progress": dict(
-                            kind="batch_started",
-                            batch_id=str(number),
-                            label=f"Generation {number}",
-                            total_candidates=len(rows),
-                        )
-                    },
-                )
-                for row in rows:
-                    self._log_candidate(row, restored=bool(pending))
-                self._checkpoint()
-                await self._experiment(rows)
-                self._promote(generation, rows)
-                self._log_leaderboard()
-                logger.info(
-                    "Finished generation %s",
-                    number,
-                    extra={
-                        "progress": dict(
-                            kind="batch_finished", batch_id=str(number), status="completed"
-                        )
-                    },
-                )
-                self._checkpoint()
-                if (
-                    self.config.target_score is not None
-                    and self.elites
-                    and self.elites[0].score >= self.config.target_score
-                ):
-                    self.reason = "target_reached"
-                    logger.info(
-                        "Stopping after generation %s: best=%g reached target=%g",
-                        number,
-                        self.elites[0].score,
-                        self.config.target_score,
-                    )
-                    return self.elites
-            self.reason = "completed"
+            await search(self, self.evaluate, on_checkpoint=lambda agent: agent._checkpoint())
+            if self.reason in ("ready", "running"):
+                self.reason = "completed"
             return self.elites
         except BaseException as exc:
             self.reason = "cancelled" if isinstance(exc, asyncio.CancelledError) else "error"
-            if self.generations:
+            if self.generations and self.generations[-1].status != "completed":
                 self.generations[-1].status = self.reason
                 self.generations[-1].error = f"{type(exc).__name__}: {exc}"
             raise

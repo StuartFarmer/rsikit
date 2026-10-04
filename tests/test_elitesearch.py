@@ -1,4 +1,4 @@
-"""Elite retention, reproduction, repair, and overlapping isolated evaluations."""
+"""Elite retention, reproduction, repair, and complete-round isolated evaluations."""
 
 import asyncio
 import io
@@ -215,36 +215,22 @@ class EliteSearchTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(failed.policy_id)
         self.assertEqual(json.loads(failed.calls[-1]["raw"]), response)
 
-    async def test_generation_overlaps_evaluation_and_cancels_on_failure(self):
-        provider = ScriptedProvider([program(0), program(1)])
-        evaluating, generating, cancelled = asyncio.Event(), asyncio.Event(), asyncio.Event()
-        original = provider.acall
-
-        async def respond(context, **kwargs):
-            result = await original(context, **kwargs)
-            if result[0] == program(1):
-                await evaluating.wait()
-                generating.set()
-                try:
-                    await asyncio.Event().wait()
-                finally:
-                    cancelled.set()
-            return result
-
+    async def test_evaluation_failure_retains_generated_round_without_promotion(self):
         async def evaluate(policies):
-            evaluating.set()
-            await generating.wait()
+            self.assertEqual(len(policies), 2)
             raise RuntimeError("worker offline")
 
         agent = EliteSearch(
-            "Score", provider, evaluate, config=Config(population_size=2, generations=1)
+            "Score",
+            ScriptedProvider([program(0), program(1)]),
+            evaluate,
+            config=Config(population_size=2, generations=1),
         )
-        with patch.object(provider, "acall", side_effect=respond):
-            with self.assertRaisesRegex(RuntimeError, "worker offline"):
-                await asyncio.wait_for(agent.run(), 2)
-        self.assertTrue(cancelled.is_set())
+        with self.assertRaisesRegex(RuntimeError, "worker offline"):
+            await agent.run()
         self.assertEqual(agent.reason, "error")
         self.assertEqual(agent.elites, [])
+        self.assertEqual(len(agent._round), 2)
 
     async def test_invalid_scores_never_enter_leaderboard(self):
         for scores in ({}, {0: float("nan")}, {0: float("inf")}):
@@ -259,7 +245,7 @@ class EliteSearchTests(unittest.IsolatedAsyncioTestCase):
                     evaluate,
                     config=Config(population_size=1, generations=1),
                 )
-                with self.assertRaisesRegex(ValueError, "finite per-seed"):
+                with self.assertRaises(ValueError):
                     await agent.run()
                 self.assertEqual(agent.elites, [])
                 self.assertEqual(agent.reason, "error")
@@ -284,30 +270,18 @@ class EliteSearchTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(agent.organisms[0].repairs, 0)
         self.assertEqual(len(provider.calls), 2)
 
-    async def test_arriving_candidate_evaluates_while_previous_candidate_is_running(self):
+    async def test_whole_generation_is_proposed_before_evaluation(self):
         provider = ScriptedProvider([program(0), program(1)])
-        first_started, second_started = asyncio.Event(), asyncio.Event()
-        original = provider.acall
-
-        async def respond(context, **kwargs):
-            result = await original(context, **kwargs)
-            if result[0] == program(1):
-                await first_started.wait()
-            return result
 
         async def evaluate(policies):
-            if policies[0].name == "Policy 0":
-                first_started.set()
-                await asyncio.wait_for(second_started.wait(), 1)
-            else:
-                second_started.set()
+            self.assertEqual(len(provider.calls), 2)
+            self.assertEqual([p.name for p in policies], ["Policy 0", "Policy 1"])
             return {p.id: Measurement({0: 7}) for p in policies}
 
         agent = EliteSearch(
             "Score", provider, evaluate, config=Config(population_size=2, generations=1)
         )
-        with patch.object(provider, "acall", side_effect=respond):
-            await agent.run()
+        await agent.run()
         self.assertTrue(all(row.status == "evaluated" for row in agent.organisms))
 
     async def test_duplicate_and_failed_populations_preserve_existing_elites(self):
@@ -335,31 +309,32 @@ class EliteSearchTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual([g.elite_ids for g in agent.generations], [[1], [1], [1]])
         self.assertEqual(agent.reason, "completed")
 
-    async def test_provider_failure_cancels_inflight_evaluation(self):
-        provider = ScriptedProvider([program(0), program(1)])
-        evaluating, cancelled = asyncio.Event(), asyncio.Event()
-        original = provider.acall
+    async def test_provider_failure_cancels_sibling_generation_before_evaluation(self):
+        provider = ScriptedProvider([])
+        started, cancelled = asyncio.Event(), asyncio.Event()
+        calls = 0
 
         async def respond(context, **kwargs):
-            result = await original(context, **kwargs)
-            if result[0] == program(1):
-                await evaluating.wait()
+            nonlocal calls
+            calls += 1
+            if calls == 1:
+                await started.wait()
                 raise ProviderError("offline")
-            return result
-
-        async def evaluate(policies):
-            evaluating.set()
+            started.set()
             try:
                 await asyncio.Event().wait()
             finally:
                 cancelled.set()
+
+        async def evaluate(policies):
+            self.fail("evaluation started before generation finished")
 
         agent = EliteSearch(
             "Score", provider, evaluate, config=Config(population_size=2, generations=1)
         )
         with patch.object(provider, "acall", side_effect=respond):
             with self.assertRaisesRegex(ProviderError, "offline"):
-                await asyncio.wait_for(agent.run(), 0.5)
+                await asyncio.wait_for(agent.run(), 2)
         self.assertTrue(cancelled.is_set())
         self.assertEqual(agent.reason, "error")
 

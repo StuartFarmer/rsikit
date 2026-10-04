@@ -140,3 +140,33 @@ class OptimizerContractTests(unittest.IsolatedAsyncioTestCase):
             self.assertIn("Try steady control", provider.calls[-1])
             agent.update({second.id: Measurement({0: 2})})
             self.assertTrue(agent.done)
+
+    async def test_elite_rounds_settle_repairs_before_promotion(self):
+        from research import elitesearch
+        from research.elitesearch import Config, EliteSearch
+        from tests.test_elitesearch import program as elite_program
+
+        with patch.object(prompts, "TEMPLATE_ROOT", Path(elitesearch.__file__).parent / "prompts"):
+            agent = EliteSearch(
+                "task",
+                ScriptedProvider([elite_program(i) for i in range(3)]),
+                config=Config(population_size=2, elite_size=1, generations=1, max_repairs=1),
+            )
+            first, second = await agent.propose()
+            with self.assertRaises(RuntimeError):
+                await agent.propose()
+            with self.assertRaises(ValueError):
+                agent.update({first.id: Measurement({0: 3}), second.id: Measurement({1: 4})})
+            self.assertIsNone(agent.organisms[0].score)
+            agent.update({first.id: Measurement({0: 3}), second.id: Measurement(failure="broken")})
+            self.assertEqual(agent.elites, [])
+            (replacement,) = await agent.propose()
+            agent.update({replacement.id: Measurement({0: 7})})
+            self.assertTrue(agent.done)
+            self.assertEqual(agent.best.id, replacement.id)
+            self.assertEqual(len(agent.generations), 1)
+            self.assertEqual(len(agent.organisms), 2)
+            self.assertEqual(agent.organisms[1].repairs, 1)
+            with self.assertRaises(ValueError):
+                agent.update({replacement.id: Measurement({0: 7})})
+

@@ -305,7 +305,7 @@ class ExperimentTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(summary["status"], "budget_exhausted", summary)
             self.assertEqual(Policy.from_file(root / "run/winner.py").name, "Policy 1")
             self.assertEqual(
-                (root / "run/panels.txt").read_text().splitlines(), ["[7]", "[7]", "[100]", "[200]"]
+                (root / "run/panels.txt").read_text().splitlines(), ["[7]", "[100]", "[200]"]
             )
 
     async def test_selection_failure_ties_and_empty_panels(self):
