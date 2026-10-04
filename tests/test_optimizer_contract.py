@@ -80,3 +80,63 @@ class OptimizerContractTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(len(agent.attempts), 2)
                 self.assertEqual(agent.completed, 2)
                 self.assertEqual(agent.repair_calls, 1)
+
+    async def test_shinka_rounds_repair_without_an_extra_generation(self):
+        from research import shinkaevolve
+        from research.shinkaevolve import Config, ShinkaEvolve
+
+        with patch.object(prompts, "TEMPLATE_ROOT", Path(shinkaevolve.__file__).parent / "prompts"):
+            agent = ShinkaEvolve(
+                "task",
+                ScriptedProvider([program(0), program(1), program(2)]),
+                config=Config(
+                    islands=1, generations=1, batch_size=2, max_repairs=1, meta_interval=0
+                ),
+            )
+            first, second = await agent.propose()
+            with self.assertRaises(RuntimeError):
+                await agent.propose()
+            with self.assertRaises(ValueError):
+                agent.update({first.id: Measurement({0: 1})})
+            agent.update(
+                {first.id: Measurement({0: 3, 1: 7}), second.id: Measurement(failure="broken")}
+            )
+            self.assertFalse(agent.done)
+            (repaired,) = await agent.propose()
+            agent.update({repaired.id: Measurement({0: 8, 1: 8})})
+            self.assertTrue(agent.done)
+            self.assertEqual(len(agent.generations), 1)
+            self.assertEqual(agent.completed, 2)
+            self.assertEqual(sum(map(len, agent.model_gains)), 2)
+            self.assertTrue(agent.generations[0].complete)
+            self.assertEqual(agent.best.id, repaired.id)
+            with self.assertRaises(ValueError):
+                agent.update({repaired.id: Measurement({0: 8, 1: 8})})
+
+    async def test_shinka_reflection_runs_before_next_proposal(self):
+        from research import shinkaevolve
+        from research.shinkaevolve import Config, ShinkaEvolve
+
+        with patch.object(prompts, "TEMPLATE_ROOT", Path(shinkaevolve.__file__).parent / "prompts"):
+            provider = ScriptedProvider(
+                [program(0), '{"recommendations": ["Try steady control"]}', program(1)]
+            )
+            agent = ShinkaEvolve(
+                "task",
+                provider,
+                config=Config(
+                    islands=1,
+                    batch_size=1,
+                    generations=2,
+                    meta_interval=1,
+                    patch_types=(("full", 1.0),),
+                ),
+            )
+            (first,) = await agent.propose()
+            agent.update({first.id: Measurement({0: 1})})
+            self.assertEqual(agent.meta_calls, 0)
+            (second,) = await agent.propose()
+            self.assertEqual(agent.meta_calls, 1)
+            self.assertIn("Try steady control", provider.calls[-1])
+            agent.update({second.id: Measurement({0: 2})})
+            self.assertTrue(agent.done)

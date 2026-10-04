@@ -114,7 +114,7 @@ class ShinkaTests(unittest.IsolatedAsyncioTestCase):
                     ),
                 )
                 parents = await agent.generate(n=2, concurrency=1)
-                agent.update({p.id: float(i) for i, p in enumerate(parents)})
+                agent.update_scores({p.id: float(i) for i, p in enumerate(parents)})
                 (policy,) = await agent.generate()
                 self.assertIn("return 2", policy._implementation)
                 row = agent.evaluations[-1]
@@ -123,14 +123,14 @@ class ShinkaTests(unittest.IsolatedAsyncioTestCase):
                 self.assertIn("Policy 0", provider.calls[-1])
                 self.assertIn("preserved", provider.calls[-1])
                 with self.assertRaises(ValueError):
-                    agent.update({policy.id: math.nan})
+                    agent.update_scores({policy.id: math.nan})
                 self.assertIsNone(row.score)
-                agent.update({policy.id: 2})
+                agent.update_scores({policy.id: 2})
                 self.assertEqual(agent.best, policy)
                 self.assertEqual(row.model_gain, "1")
                 self.assertEqual(sum(agent.offspring.values()), 1)
                 with self.assertRaises(KeyError):
-                    agent.update({policy.id: 2})
+                    agent.update_scores({policy.id: 2})
         for path in ROOT.glob("*.j2"):
             self.assertEqual(
                 list(Environment().parse(path.read_text()).find_all((nodes.If, nodes.CondExpr))), []
@@ -154,7 +154,7 @@ class ShinkaTests(unittest.IsolatedAsyncioTestCase):
         )
         for score in (-1e308, 1e308, 0):
             (policy,) = await agent.generate()
-            agent.update({policy.id: score})
+            agent.update_scores({policy.id: score})
         self.assertEqual([row.model for row in agent.evaluations[:2]], [0, 1])
         self.assertEqual(agent.best.name, "Policy 1")
         self.assertTrue(all(math.isfinite(weight) for weight in agent.model_weights()))
@@ -198,7 +198,7 @@ class ShinkaTests(unittest.IsolatedAsyncioTestCase):
             config=Config(islands=1, meta_interval=0, patch_types=(("full", 1),)),
         )
         (initial,) = await agent.generate()
-        agent.update({initial.id: 1})
+        agent.update_scores({initial.id: 1})
         (child,) = await agent.generate()
         self.assertEqual(child.name, "Policy 2")
         self.assertEqual(agent.evaluations[-1].proposals, 2)
@@ -207,7 +207,7 @@ class ShinkaTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(all("from rsikit import Policy" not in code for code in embedded))
         self.assertIn("Only a rename", provider.calls[-1])
         self.assertEqual(agent.completed, 1)
-        agent.update({child.id: 2})
+        agent.update_scores({child.id: 2})
         self.assertEqual(agent.completed, 2)
 
     async def test_meta_guidance_retains_last_valid_scratchpad(self):
@@ -221,7 +221,7 @@ class ShinkaTests(unittest.IsolatedAsyncioTestCase):
         )
         for score in (1, 2, 3):
             (policy,) = await agent.generate()
-            agent.update({policy.id: score})
+            agent.update_scores({policy.id: score})
         self.assertEqual(agent.scratchpad, ["Reuse successful ideas"])
         self.assertEqual(agent.meta_calls, 2)
         self.assertIn("Reuse successful ideas", provider.calls[-1])

@@ -22,6 +22,7 @@ from sqlmodel import SQLModel
 
 from rsikit import Policy
 from rsikit.generation import WORKER_LIBRARIES
+from rsikit.optimization import validate_results
 from rsikit.policy import InvalidPolicy, validate_policy
 
 from .generation import (
@@ -40,6 +41,9 @@ logger = logging.getLogger(__name__)
 
 @dataclass(frozen=True)
 class Config:
+    batch_size: int = 25
+    generations: int = 10
+    generation_concurrency: int = 4
     islands: int = 2
     archive_size: int = 40
     elite_ratio: float = 0.3
@@ -58,6 +62,11 @@ class Config:
     migration_interval: int = 10
     migration_rate: float = 0.1
     generation_timeout: float | None = None
+
+    def __post_init__(self):
+        for name, minimum in (("batch_size", 1), ("generations", 0), ("generation_concurrency", 1)):
+            if type(getattr(self, name)) is not int or getattr(self, name) < minimum:
+                raise ValueError(f"{name} must be an integer >= {minimum}")
 
 
 class Novelty(BaseModel, extra="forbid"):
@@ -113,6 +122,10 @@ class ShinkaEvolve:
         self._archive: dict[str, _Candidate] = {}
         self._policies: dict[str, type[Policy]] = {}
         self._pending: dict[str, list[Evaluation]] = {}
+        self._round = {}
+        self._repairs = {}
+        self._proposing = False
+        self._seed_panel = None
         self.offspring: dict[str, int] = {}
         self.model_gains: list[list[Decimal]] = [[] for _ in self.models]
         self.embeddings: dict[str, tuple[float, ...]] = {}
@@ -574,7 +587,78 @@ class ShinkaEvolve:
         logger.info("Repaired %s → %s — %s", policy.name, replacement.name, replacement.description)
         return replacement
 
-    def update(self, scores: Mapping[str, float]) -> None:
+    @property
+    def done(self):
+        return (
+            not self._proposing
+            and not self._pending
+            and not self._round
+            and not self._repairs
+            and len(self.generations) >= self.config.generations
+        )
+
+    async def propose(self):
+        if self._proposing or self._round:
+            raise RuntimeError("Previous proposal round is still outstanding")
+        self._proposing = True
+        try:
+            while True:
+                if self._repairs:
+                    slots = asyncio.Semaphore(self.config.generation_concurrency)
+
+                    async def repair(id, diagnostic):
+                        async with slots:
+                            replacement = await self.repair(self._policies[id], diagnostic)
+                            self._repairs.pop(id, None)
+                            return replacement
+
+                    tasks = [
+                        asyncio.create_task(repair(id, diagnostic))
+                        for id, diagnostic in list(self._repairs.items())
+                    ]
+                    try:
+                        policies = [p for p in await asyncio.gather(*tasks) if p is not None]
+                    finally:
+                        for task in tasks:
+                            task.cancel()
+                        await asyncio.gather(*tasks, return_exceptions=True)
+                elif self._pending:
+                    policies = [self._policies[id] for id in self._pending]
+                else:
+                    if len(self.generations) >= self.config.generations:
+                        return []
+                    policies = await self.generate(
+                        self.config.batch_size, concurrency=self.config.generation_concurrency
+                    )
+                if policies:
+                    self._round = {p.id: p for p in policies}
+                    self.evaluation_started(self._round.values())
+                    return list(self._round.values())
+                if self.generations:
+                    self.records(complete=True)
+        finally:
+            self._proposing = False
+
+    def update(self, results):
+        panel = validate_results(results, self._round, seed_panel=self._seed_panel)
+        accepted = {id: result for id, result in results.items() if result.accepted}
+        if any(not r.scores for r in accepted.values()):
+            raise ValueError("ShinkaEvolve requires per-seed scores")
+        self.update_scores({id: statistics.fmean(r.scores.values()) for id, r in accepted.items()})
+        for id, result in results.items():
+            if result.failure is not None:
+                self.evaluation_failed({id: result.failure})
+                self._repairs[id] = result.failure
+            elif not result.accepted:
+                for row in self._pending.pop(id):
+                    row.status, row.error = "discarded", result.feedback or "Evaluation rejected"
+                    self._finish(row)
+        self._seed_panel = panel
+        self._round.clear()
+        if not self._pending:
+            self.generations[-1].complete = True
+
+    def update_scores(self, scores: Mapping[str, float]) -> None:
         """Rank by finite mean rewards; provider/infrastructure errors are not bad fitness."""
         for policy_id, score in scores.items():
             self._pending[policy_id]
