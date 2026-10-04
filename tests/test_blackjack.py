@@ -9,7 +9,6 @@ from gymnasium.error import InvalidAction
 from gymnasium.utils.env_checker import check_env
 
 from rsikit import envs
-from rsikit.evaluation import PolicyError
 from rsikit.policy import Policy
 from tests.helpers import run_episode
 
@@ -260,8 +259,10 @@ class BlackjackTests(unittest.TestCase):
             async def act(self, observation):
                 return 3  # Bet eight units, then incorrectly split every hand.
 
-        with self.assertRaisesRegex(PolicyError, "legal-action mask"):
-            asyncio.run(run_episode(envs.BlackjackEnv, InvalidPlayer, env_seed=0))
+        from rsikit.evaluation import _run_episode
+
+        episode = asyncio.run(_run_episode(envs.BlackjackEnv, InvalidPlayer, env_seed=0))
+        self.assertIn("legal-action mask", episode.error)
 
     def test_optimizer_environment_factory(self):
         import cloudpickle

@@ -11,7 +11,9 @@ import yaml
 
 from research.cli import load_component, parse_config
 from research.experiment import EvaluationConfig
-from rsikit import Measurement, Policy, Run
+from research.rewards import episode_scores
+from rsikit import Policy, Run
+from tests.helpers import episodes
 from tests.providers import ScriptedProvider
 from tests.test_elitesearch import program
 
@@ -99,7 +101,7 @@ class ExperimentTests(unittest.IsolatedAsyncioTestCase):
 
                 async def evaluate(policies):
                     measured.extend(policies)
-                    return {p.id: Measurement({0: 5}) for p in policies}
+                    return {p.id: episodes({0: 5}) for p in policies}
 
                 with Run.create(name="budget", path=Path(directory) / "run") as run:
                     result = await component.optimize(
@@ -120,7 +122,7 @@ class ExperimentTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_all_builtin_adapters_delegate_and_rank_finalists(self):
         from research.providers import BudgetProvider
-        from rsikit import Measurement, search
+        from rsikit import search
         from tests.test_alphaevolve import program as alpha_program
         from tests.test_lineagesearch import experiments, families
         from tests.test_lineagesearch import program as lineage_program
@@ -172,7 +174,7 @@ class ExperimentTests(unittest.IsolatedAsyncioTestCase):
                 )
 
                 async def evaluate(policies):
-                    return {p.id: Measurement({0: i + 1}) for i, p in enumerate(policies)}
+                    return {p.id: episodes({0: i + 1}) for i, p in enumerate(policies)}
 
                 with Run.create(name="adapter", path=Path(d) / "run") as run:
                     with patch.object(component, "search", wraps=search) as shared:
@@ -335,9 +337,17 @@ class ExperimentTests(unittest.IsolatedAsyncioTestCase):
                         options=options, evaluation=evaluation, run=run
                     ) as evaluate:
                         result = await evaluate([policy], [7])
-                        self.assertIs(type(result[policy.id]), Measurement)
-                        self.assertEqual(result[policy.id].scores, {7: direct.total_reward})
-                        self.assertEqual(await evaluate([policy], [7]), result)
+                        self.assertIs(type(result[policy.id]), dict)
+                        self.assertEqual(
+                            episode_scores(result[policy.id]), {7: direct.total_reward}
+                        )
+                        cached = await evaluate([policy], [7])
+                        from rsikit.episode import encode_episode
+
+                        self.assertEqual(
+                            encode_episode(cached[policy.id][7]),
+                            encode_episode(result[policy.id][7]),
+                        )
                         self.assertIsNotNone(run.load_episode(policy, 7))
 
     async def test_ocean_session_matches_upstream_rollout(self):
@@ -366,8 +376,10 @@ class ExperimentTests(unittest.IsolatedAsyncioTestCase):
                         options=definition.Options(), evaluation=evaluation, run=run
                     ) as evaluate:
                         result = await evaluate([policy], [7])
-                    self.assertIs(type(result[policy.id]), Measurement)
-                    self.assertEqual(result[policy.id].scores[7], direct["results"][0]["score"])
+                    self.assertIs(type(result[policy.id]), dict)
+                    self.assertEqual(
+                        episode_scores(result[policy.id])[7], direct["results"][0]["score"]
+                    )
                     events = [
                         json.loads(s)
                         for s in (run.path / "panels/evaluations.jsonl").read_text().splitlines()
@@ -466,7 +478,7 @@ class ExperimentTests(unittest.IsolatedAsyncioTestCase):
 
         environment_source = """from contextlib import asynccontextmanager
 +from research.experiment import EnvironmentDefinition, Options
-+from research.rewards import Measurement
++from tests.helpers import episodes
 +@asynccontextmanager
 +async def open_evaluator(*, options, evaluation, run):
 +    async def evaluate(policies, seeds):
@@ -474,7 +486,7 @@ class ExperimentTests(unittest.IsolatedAsyncioTestCase):
 +            f.write(str(list(seeds)) + "\\n")
 +        if 200 in seeds:
 +            assert (run.path / "winner.py").exists()
-+        return {p.id: Measurement({s: (10 if p.name == "Policy 1" and s == 100 else 1) for s in seeds}) for p in policies}
++        return {p.id: episodes({s: (10 if p.name == "Policy 1" and s == 100 else 1) for s in seeds}) for p in policies}
 +    yield evaluate
 +environment = EnvironmentDefinition(Options, lambda p: None, lambda o, e: "Test scoring", open_evaluator)
 +""".replace("\n+", "\n")
@@ -535,7 +547,6 @@ class ExperimentTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_selection_failure_ties_and_empty_panels(self):
         from research.experiment import select_winner
-        from research.rewards import Measurement
 
         policies = [
             Policy.from_text(json.loads(program(i))["implementation"], name=f"Policy {i}")
@@ -551,8 +562,8 @@ class ExperimentTests(unittest.IsolatedAsyncioTestCase):
                 panels.append((phase, [p.id for p in ps]))
                 if phase == "test":
                     self.assertTrue((run.path / "winner.py").exists())
-                    return {p.id: Measurement(failure="test failure") for p in ps}
-                return {p.id: Measurement({s: 1 for s in seeds}) for p in ps}
+                    return {p.id: episodes(failure="test failure") for p in ps}
+                return {p.id: episodes({s: 1 for s in seeds}) for p in ps}
 
             options = dict(finalists=2, validation_seeds=[100], test_seeds=[200])
             result = await select_winner(policies, evaluate, run, options)
@@ -754,7 +765,7 @@ async def optimize(*, task, provider, evaluate, run, options, seed):
 
         entered = asyncio.Event()
 
-        async def panel(*args):
+        async def panel(*args, **kwargs):
             entered.set()
             await asyncio.Event().wait()
 

@@ -21,6 +21,7 @@ import gymnasium as gym
 import numpy as np
 import yaml
 
+from rsikit.evaluation import PolicyError
 from rsikit import Executor
 from rsikit.envs import BitcoinEnv, BlackjackEnv, PriceSeriesEnv
 from rsikit.envs.bitcoin import TRAIN_DATA, load_prices
@@ -376,6 +377,8 @@ async def export(
         ) as executor:
             completed = 0
             async for pid, seed, result in executor.evaluate(jobs, env):
+                if result.error is not None:
+                    raise PolicyError(result.error)
                 expected = json.loads(unique[pid]["seed_scores"]).get(str(seed))
                 if (
                     verify_search

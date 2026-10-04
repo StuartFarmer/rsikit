@@ -14,6 +14,7 @@ from slick.providers import OpenRouterAPI
 
 from research import lineagesearch
 from research.lineagesearch import Config, LineageSearch
+from research.rewards import episode_error, episode_scores
 from research.rewards import measure_rewards as measure
 from research.rollouts import Rollouts
 from rsikit import Executor, Run
@@ -65,7 +66,9 @@ async def run_search(agent, run, rollouts, *, seeds, heldout_seeds):
         if agent.best is not None:
             logger.info("Evaluating final incumbent on held-out seeds")
             heldout = (await measure(rollouts, [agent.best], heldout_seeds))[agent.best.id]
-            summary["heldout"] = dict(scores=heldout.scores, failure=heldout.failure)
+            summary["heldout"] = dict(
+                scores=episode_scores(heldout), failure=episode_error(heldout)
+            )
             destination.write_text(json.dumps(summary, indent=2) + "\n", encoding="utf-8")
         logger.info(
             "Stopped: %s; %s attempts, %s model calls, %s policy repairs",

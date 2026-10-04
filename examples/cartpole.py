@@ -2,6 +2,7 @@
 
 import asyncio
 
+from rsikit.evaluation import PolicyError
 from rsikit.policy import Policy
 
 
@@ -25,6 +26,8 @@ async def main():
             episode = await Evaluator(env, policy, max_steps=50).run(observation, info=info)
         finally:
             await policy.close()
+    if episode.error is not None:
+        raise PolicyError(episode.error)
     print(
         f"reward={episode.total_reward} steps={len(episode)} "
         f"terminated={episode.terminations[-1]} truncated={episode.truncations[-1]}"

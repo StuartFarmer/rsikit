@@ -8,7 +8,7 @@ import json
 import logging
 import os
 import platform
-from dataclasses import asdict, dataclass, field
+from dataclasses import dataclass, field
 from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
 from statistics import fmean
@@ -18,6 +18,7 @@ from uuid import uuid4
 import yaml
 from pydantic import BaseModel, ConfigDict, Field
 
+from research.rewards import episode_error, episode_scores
 from rsikit import Policy, Run
 
 
@@ -87,8 +88,19 @@ def _new_counts():
     )
 
 
+def _evidence(episodes):
+    """Compact reporting only; optimizers receive the original episodes."""
+    return dict(
+        scores=episode_scores(episodes),
+        failure=episode_error(episodes),
+        accepted=bool(episodes) and episode_error(episodes) is None,
+    )
+
+
 def _complete(measurement, seeds):
-    return measurement.accepted and set(measurement.scores) == set(seeds)
+    return (
+        bool(measurement) and episode_error(measurement) is None and set(measurement) == set(seeds)
+    )
 
 
 def _generation_summary(provider):
@@ -123,25 +135,27 @@ async def select_winner(candidates, evaluate, run, selection):
         return dict(
             status="no_valid_candidate",
             winner=None,
-            validation={k: asdict(v) for k, v in validation.items()},
+            validation={k: _evidence(v) for k, v in validation.items()},
             test=None,
         )
     winner = (
-        max(valid, key=lambda p: fmean(validation[p.id].scores.values())) if seeds else valid[0]
+        max(valid, key=lambda p: fmean(episode_scores(validation[p.id]).values()))
+        if seeds
+        else valid[0]
     )
     winner.to_file(run.path / "winner.py")
     result = dict(
         winner=winner.id,
-        validation={k: asdict(v) for k, v in validation.items()} if seeds else "not evaluated",
+        validation={k: _evidence(v) for k, v in validation.items()} if seeds else "not evaluated",
         test="not evaluated",
     )
     save_json(run.path / "selection.json", result)
     seeds = selection["test_seeds"]
     if seeds:
         measured = (await evaluate([winner], seeds, "test"))[winner.id]
-        result["test"] = asdict(measured)
+        result["test"] = _evidence(measured)
         result["test_mean"] = (
-            fmean(measured.scores.values()) if _complete(measured, seeds) else None
+            fmean(episode_scores(measured).values()) if _complete(measured, seeds) else None
         )
         if not _complete(measured, seeds):
             result["status"] = "evaluation_failed"
@@ -276,12 +290,14 @@ async def _experiment(config, *, resume=False):
                             )
                         for p in policies:
                             result = results[p.id]
-                            if result.accepted and not _complete(result, seeds):
+                            if (bool(result) and episode_error(result) is None) and not _complete(
+                                result, seeds
+                            ):
                                 raise ValueError(
                                     "Evaluator returned an incomplete accepted seed panel"
                                 )
-                            if result.accepted:
-                                run.save_policy(p, scores=result.scores)
+                            if bool(result) and episode_error(result) is None:
+                                run.save_policy(p, scores=episode_scores(result))
                             else:
                                 tally["failures"] += 1
                         with (run.path / "measurements.jsonl").open("a") as stream:
@@ -290,7 +306,7 @@ async def _experiment(config, *, resume=False):
                                     dict(
                                         phase=phase,
                                         seeds=seeds,
-                                        results={k: asdict(v) for k, v in results.items()},
+                                        results={k: _evidence(v) for k, v in results.items()},
                                     ),
                                     allow_nan=False,
                                 )
@@ -351,9 +367,9 @@ async def _experiment(config, *, resume=False):
                     results = await measured(policies, evaluation.seeds, "evaluation")
                     summary.update(
                         status="completed"
-                        if all(r.accepted for r in results.values())
+                        if all((bool(r) and episode_error(r) is None) for r in results.values())
                         else "evaluation_failed",
-                        measurements={k: asdict(v) for k, v in results.items()},
+                        measurements={k: _evidence(v) for k, v in results.items()},
                     )
         except asyncio.CancelledError:
             summary["status"] = "cancelled"

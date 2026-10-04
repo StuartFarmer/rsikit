@@ -11,8 +11,8 @@ from unittest.mock import AsyncMock, patch
 from slick import prompts
 
 from research.elitesearch import Config
-from research.rewards import Measurement
 from rsikit import Policy, Run
+from tests.helpers import episodes
 from tests.providers import ScriptedProvider
 from tests.test_elitesearch import program
 
@@ -172,7 +172,7 @@ class OceanSearchTests(unittest.IsolatedAsyncioTestCase):
 
             async def evaluate(self, policies, seeds):
                 panels.append(tuple(seeds))
-                return {p.id: Measurement({s: 1.0 for s in seeds}) for p in policies}
+                return {p.id: episodes({s: 1.0 for s in seeds}) for p in policies}
 
         with (
             tempfile.TemporaryDirectory() as directory,
@@ -322,7 +322,7 @@ class OceanSearchTests(unittest.IsolatedAsyncioTestCase):
             events = []
 
             async def evaluate(self, policies, seeds):
-                return {p.id: Measurement({s: int(p.name[-1]) for s in seeds}) for p in policies}
+                return {p.id: episodes({s: int(p.name[-1]) for s in seeds}) for p in policies}
 
         with (
             tempfile.TemporaryDirectory() as directory,
@@ -365,7 +365,7 @@ class OceanSearchTests(unittest.IsolatedAsyncioTestCase):
             seeds = tuple(seeds)
             panels.append(([p.id for p in candidates], seeds))
             return {
-                p.id: Measurement({s: (5 if p == policies[1] else 1) for s in seeds})
+                p.id: episodes({s: (5 if p == policies[1] else 1) for s in seeds})
                 for p in candidates
             }
 
@@ -387,7 +387,7 @@ class OceanSearchTests(unittest.IsolatedAsyncioTestCase):
         fallback = Policy.from_text(json.loads(program(1))["implementation"])
 
         async def evaluate(policies, seeds):
-            return {p.id: Measurement({next(iter(seeds)): 999}) for p in policies}
+            return {p.id: episodes({next(iter(seeds)): 999}) for p in policies}
 
         with tempfile.TemporaryDirectory() as directory:
             with Run.create(name="partial", path=Path(directory) / "run") as run:

@@ -8,7 +8,7 @@ For generated policies and durable batch evaluations, see [Run](RUNS.md).
 `rsikit.evaluation.Evaluator` collects the rollout and returns an
 `rsikit.episode.Episode`. Both are also exported directly from `rsikit`.
 Episode execution returns raw trajectories. Search evaluators report neutral
-`Measurement` values; optimizers interpret them. AlphaEvolve constructs its own
+`Episode` objects grouped by policy and seed; optimizers interpret them. AlphaEvolve constructs its own
 `EvaluationResult` inside `update()`.
 
 ```python
@@ -132,22 +132,29 @@ Generated code shares application credentials, network, outputs and scoring stat
 See [application execution](IN_PROCESS_SANDBOX.md).
 
 Caller-provided environment templates use cloudpickle to reach the child; its
-imports must be installed in the application image. Complete `Episode` objects
+imports must be installed in the application image. Attempted `Episode` objects
 return over a multiprocessing connection, with a 64 MiB result ceiling. Saved
 JSON serialization lives with `Episode` and retains the existing representation.
 
 ## Failures
 
-Actions outside `action_space` raise `PolicyError` before `env.step()`.
-Environments should raise `gymnasium.error.InvalidAction` for state-dependent
-illegal actions; the evaluator converts this to `PolicyError`. Other environment
-and trusted-policy exceptions retain their types. Cancellation propagates.
-Failed execution returns no normal `Episode`.
+Candidate errors are recorded in `Episode.error`. Invalid actions, constructor/reset
+errors, and crashes during `act()` return the completed trajectory so far. An attempt
+that fails before reset can have empty tracks; one that fails on its first action
+has the initial observation but no transitions. A normal episode has `error=None`.
+The numerical `total_reward` remains the sum of recorded rewards; always check
+`error` before treating that sum as fitness.
 
-The caller must clean up after `Evaluator.run()`, including on failure. The
-execution helpers perform their own cleanup and log secondary cleanup
-failures without replacing the original exception. Child execution failures raise
-`PolicyError`, `PolicyTimeout`, or `InfrastructureError` from `rsikit.evaluation`.
+Environments should raise `gymnasium.error.InvalidAction` for state-dependent
+illegal actions. Other environment errors, infrastructure errors, and cancellation
+propagate as exceptions. A process deadline returns an error episode without a
+trajectory because the terminated worker cannot return its memory.
+
+The caller owns cleanup after `Evaluator.run()`. Execution helpers clean up their
+instances and preserve the original candidate diagnostic if cleanup also fails.
+Successful and failed episodes use the same persistence API. Legacy successful
+saved episodes remain readable; failed cached episodes are retried on the next
+explicit evaluation request.
 
 Termination does not imply success: rewards and task-specific info define that.
 Search and cross-episode aggregation remain outside the evaluator. `Run` persists
@@ -160,11 +167,11 @@ implement the structural `rsikit.Optimizer` protocol:
 
 ```python
 from collections.abc import Mapping
-from rsikit import Measurement, Policy
+from rsikit import Episode, Policy
 
 
 async def propose() -> list[type[Policy]]: ...
-def update(results: Mapping[str, Measurement]) -> None: ...
+def update(results: Mapping[str, Mapping[int, Episode]]) -> None: ...
 
 
 # Read-only properties: done: bool; best: type[Policy] | None
@@ -174,7 +181,7 @@ Configure an optimizer using its algorithm's `Config`, then pass the same evalua
 function and runner to any implementation:
 
 ```python
-from rsikit import Measurement, search
+from rsikit import Episode, search
 from research.rewards import measure_rewards
 
 
@@ -191,29 +198,31 @@ No evaluator superclass is required. `search` returns the optimizer's best polic
 definition, or `None`; histories and domain records remain on the optimizer and Run.
 The caller owns environment, provider, evaluator, and database cleanup.
 
-`Measurement({0: 0, 1: 10})` retains the individual seed scores. It is different
-from `Measurement({0: 5, 1: 5})`: both means are five, but their variability differs.
-Scores must be finite numbers, with integer seed keys. Use one fixed search panel;
-keep validation and test panels out of optimizer feedback. All objectives maximize.
-Named `metrics` and `features` carry independently measured evidence; their
-aggregation and interpretation belong to the optimizer. Accepted feedback needs
-scores or metrics, plus the evidence required by the chosen algorithm.
+The evaluator returns the raw episodes for each seed. The optimizer derives scores
+from their cumulative rewards, retaining seed identity for paired comparisons and
+uncertainty estimates. Use one fixed search panel and keep validation/test episodes
+out of optimizer feedback. No `Measurement` class is required.
 
-Return exactly one measurement per proposed policy ID, including failures:
+Return exactly one seed mapping per proposed policy ID, including failures:
 
 ```python
 results = {
-    good.id: Measurement({0: 3, 1: 7}, feedback="Completed both episodes"),
-    broken.id: Measurement(failure="Invalid action"),
-    screened.id: Measurement(accepted=False, feedback="Below screening threshold"),
+    good.id: {0: first_episode, 1: second_episode},
+    broken.id: {0: Episode(error="Invalid action")},
+    screened.id: {},  # Explicitly screened out; no full evaluation panel.
 }
 optimizer.update(results)
 ```
 
+An empty seed mapping rejects a candidate without repair. Screening adapters keep
+any preliminary episodes in Run; they do not pass a partial successful panel as a
+full evaluation. Missing policy IDs remain an error. For ordinary evaluation,
+return an episode for every requested seed, with `error` set on failed attempts.
+
 A failure queues bounded repair; a screening rejection does not. The next
 `propose()` generates replacements only for failed candidates. Repairs retain
 original attempt identities and do not consume a new population generation.
-Duplicate internal attempts may share a measurement, but returned proposal IDs
+Duplicate internal attempts may share episode evidence, but returned proposal IDs
 are unique. Missing, extra, repeated, or incompatible feedback raises before
 selection changes. Calling `propose()` while feedback is outstanding raises.
 
@@ -252,8 +261,8 @@ cross-stage overlap. It can change throughput and search trajectories; there is
 no claim of benchmark equivalence.
 
 Replace `propose(n)` with a configured batch size and `propose()`. Replace
-policy–Episode pairs or scalar-score mappings with policy-ID–`Measurement`
-mappings. `research.rewards.Measurement` re-exports the same core class.
+policy–Episode pairs or scalar-score mappings with nested policy-ID → seed →
+`Episode` mappings. The old `Measurement` class and its re-exports have been removed.
 EliteSearch/LineageSearch `run()` and historical application entry points remain
 thin compatibility wrappers over `rsikit.search`; they retain their legacy
 return shapes. No `fit()` method or alternate optimization loop is needed.

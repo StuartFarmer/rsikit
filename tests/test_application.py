@@ -13,7 +13,7 @@ from gymnasium import spaces
 from research.rewards import mean_rewards
 from rsikit import run_program
 from rsikit.episode import decode, encode
-from rsikit.evaluation import InfrastructureError, PolicyError, PolicyTimeout
+from rsikit.evaluation import InfrastructureError, PolicyError
 from rsikit.policy import Policy
 from tests.helpers import fake_executor, finish_pending, recorded_run, run_episode
 
@@ -86,14 +86,14 @@ class CodecSmoke(unittest.TestCase):
 
 
 class ApplicationEpisodeTests(unittest.IsolatedAsyncioTestCase):
-    async def run_source(self, source, *, timeout=3):
+    async def run_source(self, source, *, timeout=3, raw=False):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "solution.py"
             path.write_text(source, encoding="utf-8")
             episode = await run_program(
                 path, CounterEnv, env_seed=1, policy_seed=2, max_steps=5, episode_timeout=timeout
             )
-            return episode.final_step
+            return episode if raw else episode.final_step
 
     async def test_state_instructions_and_examples(self):
         local = await run_episode(CounterEnv, CounterPolicy, env_seed=1, policy_seed=2, max_steps=5)
@@ -556,14 +556,14 @@ class ApplicationEpisodeTests(unittest.IsolatedAsyncioTestCase):
                 self.assertGreater(videos[0].stat().st_size, 100)
 
     async def test_failure_deadline_and_cleanup(self):
-        for body in ("raise RuntimeError('candidate failure')", "return object()", "os._exit(3)"):
-            with self.assertRaises(
-                InfrastructureError if body.startswith("os._exit") else PolicyError
-            ):
-                await self.run_source(COUNTER_SOURCE.replace("return action", body))
+        for body in ("raise RuntimeError('candidate failure')", "return object()"):
+            episode = await self.run_source(COUNTER_SOURCE.replace("return action", body), raw=True)
+            self.assertIsNotNone(episode.error)
+        with self.assertRaises(InfrastructureError):
+            await self.run_source(COUNTER_SOURCE.replace("return action", "os._exit(3)"))
         timeout_source = COUNTER_SOURCE.replace("return action", "while True: pass")
-        with self.assertRaises(PolicyTimeout):
-            await self.run_source(timeout_source, timeout=0.5)
+        episode = await self.run_source(timeout_source, timeout=0.5, raw=True)
+        self.assertIn("exceeded", episode.error)
 
 
 if __name__ == "__main__":

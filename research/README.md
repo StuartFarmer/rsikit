@@ -39,11 +39,11 @@ Shared modules available to every algorithm and runner:
 
 - `rsikit.policy.validate_policy`: explicit source checks after policy generation.
 - `rsikit.Evaluator` and `rsikit.Episode`: rollout execution and raw trajectories.
-- `rsikit.Optimizer`, `Measurement`, and `search`: one external propose/evaluate/update loop
+- `rsikit.Optimizer`, `Episode`, and `search`: one external propose/evaluate/update loop
   across all six implementations. See [the contract](../docs/INNER_LOOP.md#one-optimization-loop).
 - `research.rollouts.Rollouts`: execution, episode persistence, and experiment-local reuse.
 - `research.rewards`: cumulative-reward fitness callbacks and per-seed measurements.
-  `Measurement` is re-exported from core. AlphaEvolve builds its richer
+  Evaluators return raw episodes by policy and seed. AlphaEvolve builds its richer
   `EvaluationResult` in update; screening stays in evaluator composition.
 - `rsikit.Policy.from_text` / `from_file` and `to_text` / `to_file`: canonical solution
   loading and saving, preserving source and identity without host execution.

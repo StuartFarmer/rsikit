@@ -20,6 +20,7 @@ from slick import parse, render
 from slick.providers import Provider, ProviderError
 from sqlmodel import SQLModel
 
+from research.rewards import episode_error, episode_scores
 from rsikit import Policy
 from rsikit.generation import WORKER_LIBRARIES
 from rsikit.optimization import validate_results
@@ -680,18 +681,22 @@ class ShinkaEvolve:
 
     def update(self, results):
         panel = validate_results(results, self._round, seed_panel=self._seed_panel)
-        accepted = {id: result for id, result in results.items() if result.accepted}
-        if any(not r.scores for r in accepted.values()):
-            raise ValueError("ShinkaEvolve requires per-seed scores")
-        self.update_scores({id: statistics.fmean(r.scores.values()) for id, r in accepted.items()})
+        score_panels = {id: episode_scores(r) for id, r in results.items()}
+        accepted = {
+            id: result
+            for id, result in results.items()
+            if (result and episode_error(result) is None)
+        }
+        self.update_scores({id: statistics.fmean(score_panels[id].values()) for id in accepted})
         for id, result in results.items():
+            error = episode_error(result)
             self._repairs.pop(id, None)
-            if result.failure is not None:
-                self.evaluation_failed({id: result.failure})
-                self._repairs[id] = result.failure
-            elif not result.accepted:
+            if error is not None:
+                self.evaluation_failed({id: error})
+                self._repairs[id] = error
+            elif not result:
                 for row in self._pending.pop(id):
-                    row.status, row.error = "discarded", result.feedback or "Evaluation rejected"
+                    row.status, row.error = "discarded", "Evaluation rejected"
                     self._finish(row)
         self._seed_panel = panel
         self._round.clear()

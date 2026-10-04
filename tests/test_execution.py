@@ -11,7 +11,7 @@ from unittest.mock import Mock, patch
 import gymnasium as gym
 
 from rsikit import Executor, run_program
-from rsikit.evaluation import InfrastructureError, PolicyError, PolicyTimeout
+from rsikit.evaluation import InfrastructureError, PolicyError
 
 
 class ProcessEnv(gym.Env):
@@ -108,9 +108,8 @@ class ExecutionTests(unittest.IsolatedAsyncioTestCase):
             ) as run,
         ):
             async with Executor(episode_timeout=10) as executor:
-                with self.assertRaises(PolicyError) as caught:
-                    await self.collect(executor, source)
-            diagnostic = str(caught.exception)
+                results = await self.collect(executor, source)
+            diagnostic = results[0][2].error
             self.assertIn("candidate.py", diagnostic)
             self.assertIn("in act", diagnostic)
             self.assertIn("x" * 5000, diagnostic)
@@ -168,20 +167,24 @@ class ExecutionTests(unittest.IsolatedAsyncioTestCase):
                 (SOURCE.replace("return 0", "raise RuntimeError('act failed')"), PolicyError),
                 ("import os; os._exit(17)", InfrastructureError),
             ]:
-                with self.subTest(source=source), self.assertRaises(error):
-                    await self.collect(executor, source)
+                with self.subTest(source=source):
+                    if error is InfrastructureError:
+                        with self.assertRaises(error):
+                            await self.collect(executor, source)
+                    else:
+                        results = await self.collect(executor, source)
+                        self.assertIsNotNone(results[0][2].error)
             good = []
-            with self.assertRaises(PolicyTimeout) as caught:
-                async for result in executor.evaluate(
-                    [
-                        ("bad", SOURCE.replace("return 0", "while True: pass"), 0),
-                        ("good", SOURCE, 1),
-                    ],
-                    ProcessEnv(),
-                ):
-                    good.append(result)
+            async for result in executor.evaluate(
+                [
+                    ("bad", SOURCE.replace("return 0", "while True: pass"), 0),
+                    ("good", SOURCE, 1),
+                ],
+                ProcessEnv(),
+            ):
+                good.append(result)
             self.assertEqual(good[0][0], "good")
-            self.assertIn("bad", caught.exception.failures)
+            self.assertIn("exceeded", next(ep.error for id, _, ep in good if id == "bad"))
             self.assertEqual(len(await self.collect(executor)), 1)
 
     async def test_invalid_policy_methods_are_repairable(self):
@@ -191,8 +194,9 @@ class ExecutionTests(unittest.IsolatedAsyncioTestCase):
                 SOURCE.replace("act(self, observation)", "act(self)"),
                 SOURCE.replace("reset(self, *, seed=None)", "reset(self)"),
             ):
-                with self.subTest(source=source), self.assertRaises(PolicyError):
-                    await self.collect(executor, source)
+                with self.subTest(source=source):
+                    results = await self.collect(executor, source)
+                    self.assertIsNotNone(results[0][2].error)
 
     async def test_cancel_and_timeout_kill_ordinary_descendants(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -217,8 +221,12 @@ class ExecutionTests(unittest.IsolatedAsyncioTestCase):
                     pids = [int(p) for p in marker.read_text().split()]
                     if cancel:
                         task.cancel()
-                    with self.assertRaises(asyncio.CancelledError if cancel else PolicyTimeout):
-                        await task
+                    if cancel:
+                        with self.assertRaises(asyncio.CancelledError):
+                            await task
+                    else:
+                        results = await task
+                        self.assertIn("exceeded", results[0][2].error)
                     for pid in pids:
                         # Linux init may need a moment to reap an adopted grandchild.
                         for _ in range(100):

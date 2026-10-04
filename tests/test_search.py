@@ -5,34 +5,18 @@ import unittest
 from types import SimpleNamespace
 
 import rsikit
+from tests.test_episode_storage import trajectory
 
 
 class SearchTests(unittest.IsolatedAsyncioTestCase):
-    def setUp(self):
-        self.assertTrue(hasattr(rsikit, "Measurement"), "core owns Measurement")
-        self.assertTrue(hasattr(rsikit, "search"), "core owns search")
+    def test_episode_panels_validate_before_update(self):
+        from rsikit.optimization import validate_results
+        from tests.test_episode_storage import trajectory
 
-    def test_measurement_preserves_evidence_and_rejects_invalid_values(self):
-        from research.rewards import Measurement
-
-        self.assertIs(Measurement, rsikit.Measurement)
-        result = Measurement({0: 0, 1: 10}, "ok", metrics={"cost": -3}, features={"size": 2})
-        self.assertEqual(result.scores, {0: 0, 1: 10})
-        self.assertEqual(result.features, {"size": 2})
-        self.assertFalse(Measurement(failure="broken").accepted)
-        for values in (
-            {},
-            {"scores": {0: True}},
-            {"scores": {"0": 1}},
-            {"metrics": {"": 1}},
-            {"metrics": {"x": float("nan")}},
-            {"features": {"x": float("inf")}},
-            {"scores": {0: 1}, "feedback": 3},
-            {"scores": {0: 1}, "accepted": 1},
-            {"failure": ""},
-        ):
-            with self.subTest(values=values), self.assertRaises(ValueError):
-                Measurement(**values)
+        self.assertEqual(validate_results({"p": {0: trajectory(3)}}, ["p"]), {0})
+        for result in ({True: trajectory()}, {0: 3}, {0: trajectory(float("nan"))}):
+            with self.subTest(result=result), self.assertRaises(ValueError):
+                validate_results({"p": result}, ["p"])
 
     async def test_round_order_and_best(self):
         events = []
@@ -44,7 +28,7 @@ class SearchTests(unittest.IsolatedAsyncioTestCase):
 
         async def evaluate(policies):
             events.append("evaluate")
-            return {p.id: rsikit.Measurement({0: 3}) for p in policies}
+            return {p.id: {0: trajectory(3)} for p in policies}
 
         def update(results):
             events.append("update")
@@ -61,7 +45,7 @@ class SearchTests(unittest.IsolatedAsyncioTestCase):
         policy = SimpleNamespace(id="p")
         for proposals, results in (
             ([policy], {}),
-            ([policy], {"other": rsikit.Measurement({0: 1})}),
+            ([policy], {"other": {0: trajectory(1)}}),
             ([policy], {"p": 1}),
             ([policy, policy], {}),
             ([], {}),

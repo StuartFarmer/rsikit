@@ -71,7 +71,50 @@ class Solution(Policy):
                 measurement = (await evaluator.evaluate([policies()[0]], seeds=[7]))[
                     policies()[0].id
                 ]
-                self.assertEqual(set(measurement.scores), {7})
+                self.assertEqual(set(measurement), {7})
+
+    async def test_episode_feedback_retains_trajectory_before_candidate_crash(self):
+        from research.ocean.evaluator import PanelEvaluator
+        from rsikit.episode import decode_episode, encode_episode
+
+        policy = Policy.from_text("""
+import numpy as np
+from rsikit import Policy
+class Solution(Policy):
+    async def reset(self, *, seed=None):
+        await super().reset(seed=seed)
+        self.calls = 0
+    async def act(self, observation):
+        if self.calls:
+            raise ValueError("second action failed")
+        self.calls += 1
+        return np.zeros(len(observation), dtype=np.int32)
+""")
+        with tempfile.TemporaryDirectory() as directory:
+            async with PanelEvaluator(directory, max_steps=3, timeout=10) as evaluator:
+                result = await evaluator.evaluate([policy], seeds=[0, 1])
+        for episode in result[policy.id].values():
+            self.assertEqual(len(episode), 1)
+            self.assertEqual(len(episode.observations), 2)
+            self.assertIn("second action failed", episode.error)
+            self.assertEqual(decode_episode(encode_episode(episode)).error, episode.error)
+
+    async def test_backend_failure_propagates_instead_of_becoming_an_episode_error(self):
+        from unittest.mock import AsyncMock, patch
+
+        from research.ocean.evaluator import PanelEvaluator
+
+        policy = Policy.from_text(
+            "from rsikit import Policy\nclass Solution(Policy):\n    async def act(self, observation): return 0\n"
+        )
+        with (
+            tempfile.TemporaryDirectory() as directory,
+            patch("research.ocean.evaluator.metadata", return_value={"protocol": "test"}),
+        ):
+            async with PanelEvaluator(directory) as evaluator:
+                evaluator._panel = AsyncMock(side_effect=RuntimeError("backend unavailable"))
+                with self.assertRaisesRegex(RuntimeError, "backend unavailable"):
+                    await evaluator.evaluate([policy], seeds=[0])
 
     async def test_invalid_inputs_and_cancellation_release_capacity(self):
         from research.ocean.baselines import policies

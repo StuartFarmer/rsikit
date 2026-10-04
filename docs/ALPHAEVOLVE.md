@@ -134,7 +134,7 @@ All three variants implement [the common optimizer contract](INNER_LOOP.md#one-o
 Batch size and original-attempt limits belong to `Config`:
 
 ```python
-from rsikit import Measurement, search
+from rsikit import search
 from research.alphaevolve.paper import AlphaEvolve, Config
 
 optimizer = AlphaEvolve(
@@ -149,15 +149,8 @@ optimizer = AlphaEvolve(
 
 
 async def evaluate(policies):
-    measured = await evaluate_policies(policies)  # Caller-owned isolated evaluation.
-    return {
-        p.id: Measurement(
-            scores=measured[p.id].seed_scores,
-            features={"forward_distance": measured[p.id].distance},
-            feedback=measured[p.id].diagnostic,
-        )
-        for p in policies
-    }
+    # The evaluator records distance in episode.infos[-1]["features"]["forward_distance"].
+    return await evaluate_policies(policies)  # {policy.id: {seed: episode}}
 
 
 try:
@@ -167,16 +160,18 @@ finally:
 ```
 
 `propose()` returns unique policy definitions. `update()` consumes exactly those
-IDs mapped to neutral measurements; raw Episode pairs and scalar mappings are no
+IDs mapped to seed-keyed Episodes; bare Episode pairs and scalar mappings are no
 longer its public feedback format. Seed identity survives evaluation. Original
 and Improved maximize mean seed scores. Paper builds its private `EvaluationResult`
 in update, deriving `reward` (mean), `worst_reward` (minimum), `stability` (negative
 population standard deviation), and configured `mean_reward`/`reward_std`
-descriptors. Explicit measured metrics and features override derived values.
+descriptors. Custom metrics and features come from the final episode info dictionaries;
+the paper optimizer averages each named value across the seed panel and validates
+that every seed provides the same metric/feature names.
 Required objective/descriptor evidence is checked before any archive mutation.
 
-Screening and grading stay in the evaluator. A rejected measurement does not
-trigger repair; `Measurement(failure="diagnostic")` queues repair for the next
+Screening and grading stay in the evaluator. An empty seed mapping does not
+trigger repair; an episode with `error` set queues repair for the next
 proposal round. Repairs preserve original attempt counts and successful siblings.
 Per-seed variation is retained even when means are equal. With one seed, observed
 standard deviation is zero; it does not estimate unseen-seed variability.
@@ -184,7 +179,7 @@ standard deviation is zero; it does not estimate unseen-seed variability.
 `register_initial(policy, result)` remains an AlphaEvolve-specific archive helper
 using its own result type, with `island=` selecting one island. The historical
 `research.alphaevolve.paper.search(..., proposals=...)` entry point is a thin
-wrapper around `rsikit.search`; its evaluator now returns `Measurement`, and its
+wrapper around `rsikit.search`; its evaluator now returns seed-keyed Episodes, and its
 legacy return remains `None`. New integrations should use the core runner, which
 returns the best policy or `None`.
 
@@ -383,7 +378,7 @@ to the evaluator. Names/descriptions are generated, while environment instructio
 remain caller-supplied. Generated policies inherit the constructor and initialize
 state in `reset()`.
 
-`measure_rewards` returns per-seed `Measurement` values and persists individual
+`measure_rewards` returns per-seed `Episode` values and persists individual
 scores and episodes through Run. Identical returned policy IDs are evaluated once.
 Use the same seed set throughout a search and separate held-out seeds when
 checking generalization. The optimizer constructor's `seed` controls parent/model
@@ -463,7 +458,7 @@ from research.rewards import measure_rewards
 best = await search(generator, lambda ps: measure_rewards(rollouts, ps, seeds=(0, 1)))
 ```
 
-The evaluator supplies failed measurements; update queues repairs; the next
+The evaluator supplies episodes with errors; update queues repairs; the next
 proposal round generates replacements. Successful siblings are retained and are
 not resubmitted. Failed versions keep their evidence and no low score is invented.
 Only accepted, measured versions enter the archive. Discarded attempts consume

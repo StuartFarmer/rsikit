@@ -8,7 +8,8 @@ from slick import prompts
 
 from research import alphaevolve
 from research.alphaevolve import improved, original, paper
-from rsikit import Measurement, search
+from rsikit import search
+from tests.helpers import episodes
 from tests.providers import ScriptedProvider
 from tests.test_alphaevolve import program
 
@@ -63,6 +64,27 @@ class OptimizerContractTests(unittest.IsolatedAsyncioTestCase):
             self.addCleanup(agent.close)
         return agent, provider
 
+    async def test_partial_rewards_from_failed_episodes_never_enter_selection(self):
+        from rsikit import Episode
+        from tests.test_episode_storage import trajectory
+
+        for kind in ("original", "improved", "paper", "shinka", "elite", "lineage"):
+            with self.subTest(optimizer=kind):
+                agent, _ = self.optimizer(kind)
+                first, second = await agent.propose()
+                agent.update(
+                    {
+                        first.id: {0: trajectory(1000), 1: Episode(error="candidate crashed")},
+                        second.id: {0: trajectory(1), 1: trajectory(1)},
+                    }
+                )
+                if agent.best is not None:
+                    self.assertEqual(agent.best.id, second.id)
+                replacements = await agent.propose()
+                self.assertEqual(len(replacements), 1)
+                agent.update({p.id: {0: trajectory(2), 1: trajectory(2)} for p in replacements})
+                self.assertEqual(agent.best.id, replacements[0].id)
+
     async def test_interrupted_generation_is_not_completion(self):
         from slick.providers import ProviderError
 
@@ -72,7 +94,7 @@ class OptimizerContractTests(unittest.IsolatedAsyncioTestCase):
                 provider.responses = iter([program(0), ProviderError("offline")])
 
                 async def evaluate(policies):
-                    return {p.id: Measurement({0: 5}) for p in policies}
+                    return {p.id: episodes({0: 5}) for p in policies}
 
                 with self.assertRaisesRegex(ProviderError, "offline"):
                     await search(agent, evaluate)
@@ -90,11 +112,11 @@ class OptimizerContractTests(unittest.IsolatedAsyncioTestCase):
                     agent.config = replace(agent.config, generation_concurrency=concurrency)
                     provider.responses = iter([program(0), program(1), program(1), program(2)])
                     first, second = await agent.propose()
-                    agent.update({p.id: Measurement(failure="broken") for p in (first, second)})
+                    agent.update({p.id: episodes(failure="broken") for p in (first, second)})
                     replacements = await agent.propose()
                     self.assertEqual(len(replacements), 2)
                     self.assertIn(second.id, {p.id for p in replacements})
-                    agent.update({p.id: Measurement({0: 7}) for p in replacements})
+                    agent.update({p.id: episodes({0: 7}) for p in replacements})
                     self.assertEqual(agent.completed, 2)
                     self.assertTrue(agent.done)
 
@@ -111,10 +133,10 @@ class OptimizerContractTests(unittest.IsolatedAsyncioTestCase):
                     [program(0), program(1), program(1), ProviderError("offline")]
                 )
                 policies = await agent.propose()
-                agent.update({p.id: Measurement(failure="broken") for p in policies})
+                agent.update({p.id: episodes(failure="broken") for p in policies})
 
                 async def evaluate(policies):
-                    return {p.id: Measurement({0: 5}) for p in policies}
+                    return {p.id: episodes({0: 5}) for p in policies}
 
                 with self.assertRaises(ProviderError):
                     await search(agent, evaluate)
@@ -152,10 +174,10 @@ class OptimizerContractTests(unittest.IsolatedAsyncioTestCase):
                         with self.assertRaises(RuntimeError):
                             await agent.propose()
                         calls = len(provider.calls)
-                        good = {p.id: Measurement({0: 3, 1: 7}) for p in policies}
+                        good = {p.id: episodes({0: 3, 1: 7}) for p in policies}
                         for invalid in (
                             {},
-                            {**good, "unknown": Measurement({0: 1, 1: 1})},
+                            {**good, "unknown": episodes({0: 1, 1: 1})},
                             {p.id: 3.0 for p in policies},
                         ):
                             with self.assertRaises(ValueError):
@@ -164,18 +186,18 @@ class OptimizerContractTests(unittest.IsolatedAsyncioTestCase):
                         if not panels:
                             first, second = policies
                             if outcome == "screened":
-                                good[second.id] = Measurement(
+                                good[second.id] = episodes(
                                     accepted=False, feedback="Below screening threshold"
                                 )
                             elif outcome in ("repaired", "exhausted"):
-                                good[second.id] = Measurement(failure="broken")
+                                good[second.id] = episodes(failure="broken")
                         else:
                             self.assertEqual(len(policies), 1)
                             self.assertNotIn(policies[0].id, panels[0])
                             good[policies[0].id] = (
-                                Measurement({0: 8, 1: 10})
+                                episodes({0: 8, 1: 10})
                                 if outcome == "repaired"
-                                else Measurement(failure="still broken")
+                                else episodes(failure="still broken")
                             )
                         panels.append([p.id for p in policies])
                         measurements.append(good)
@@ -204,7 +226,7 @@ class OptimizerContractTests(unittest.IsolatedAsyncioTestCase):
                         self.addCleanup(agent.close)
 
                     async def evaluate(policies):
-                        return {p.id: Measurement({0: 3, 1: 7}) for p in policies}
+                        return {p.id: episodes({0: 3, 1: 7}) for p in policies}
 
                     best = await search(agent, evaluate)
                     self.assertEqual(agent.islands[0].score, 5)
@@ -213,7 +235,7 @@ class OptimizerContractTests(unittest.IsolatedAsyncioTestCase):
                     self.assertEqual(await agent.propose(), [])
                     self.assertEqual(agent.completed, 1)
                     with self.assertRaises(ValueError):
-                        agent.update({best.id: Measurement({0: 3, 1: 7})})
+                        agent.update({best.id: episodes({0: 3, 1: 7})})
 
     async def test_alpha_round_validation_and_duplicate_attempts(self):
         with patch.object(prompts, "TEMPLATE_ROOT", Path(alphaevolve.__file__).parent):
@@ -231,7 +253,7 @@ class OptimizerContractTests(unittest.IsolatedAsyncioTestCase):
                 with self.assertRaises(ValueError):
                     agent.update({})
                 self.assertEqual(agent.completed, 0)
-                agent.update({policy.id: Measurement({0: 4})})
+                agent.update({policy.id: episodes({0: 4})})
                 self.assertEqual(agent.completed, 2)
                 self.assertTrue(agent.done)
 
@@ -246,13 +268,11 @@ class OptimizerContractTests(unittest.IsolatedAsyncioTestCase):
                 if hasattr(agent, "close"):
                     self.addCleanup(agent.close)
                 first, second = await agent.propose()
-                agent.update(
-                    {first.id: Measurement({0: 3}), second.id: Measurement(failure="broken")}
-                )
+                agent.update({first.id: episodes({0: 3}), second.id: episodes(failure="broken")})
                 self.assertFalse(agent.done)
                 (replacement,) = await agent.propose()
                 self.assertNotIn(replacement.id, (first.id, second.id))
-                agent.update({replacement.id: Measurement({0: 7})})
+                agent.update({replacement.id: episodes({0: 7})})
                 self.assertTrue(agent.done)
                 self.assertEqual(len(agent.attempts), 2)
                 self.assertEqual(agent.completed, 2)
@@ -274,13 +294,11 @@ class OptimizerContractTests(unittest.IsolatedAsyncioTestCase):
             with self.assertRaises(RuntimeError):
                 await agent.propose()
             with self.assertRaises(ValueError):
-                agent.update({first.id: Measurement({0: 1})})
-            agent.update(
-                {first.id: Measurement({0: 3, 1: 7}), second.id: Measurement(failure="broken")}
-            )
+                agent.update({first.id: episodes({0: 1})})
+            agent.update({first.id: episodes({0: 3, 1: 7}), second.id: episodes(failure="broken")})
             self.assertFalse(agent.done)
             (repaired,) = await agent.propose()
-            agent.update({repaired.id: Measurement({0: 8, 1: 8})})
+            agent.update({repaired.id: episodes({0: 8, 1: 8})})
             self.assertTrue(agent.done)
             self.assertEqual(len(agent.generations), 1)
             self.assertEqual(agent.completed, 2)
@@ -288,7 +306,7 @@ class OptimizerContractTests(unittest.IsolatedAsyncioTestCase):
             self.assertTrue(agent.generations[0].complete)
             self.assertEqual(agent.best.id, repaired.id)
             with self.assertRaises(ValueError):
-                agent.update({repaired.id: Measurement({0: 8, 1: 8})})
+                agent.update({repaired.id: episodes({0: 8, 1: 8})})
 
     async def test_shinka_reflection_runs_before_next_proposal(self):
         from research import shinkaevolve
@@ -310,12 +328,12 @@ class OptimizerContractTests(unittest.IsolatedAsyncioTestCase):
                 ),
             )
             (first,) = await agent.propose()
-            agent.update({first.id: Measurement({0: 1})})
+            agent.update({first.id: episodes({0: 1})})
             self.assertEqual(agent.meta_calls, 0)
             (second,) = await agent.propose()
             self.assertEqual(agent.meta_calls, 1)
             self.assertIn("Try steady control", provider.calls[-1])
-            agent.update({second.id: Measurement({0: 2})})
+            agent.update({second.id: episodes({0: 2})})
             self.assertTrue(agent.done)
 
     async def test_elite_rounds_settle_repairs_before_promotion(self):
@@ -333,19 +351,19 @@ class OptimizerContractTests(unittest.IsolatedAsyncioTestCase):
             with self.assertRaises(RuntimeError):
                 await agent.propose()
             with self.assertRaises(ValueError):
-                agent.update({first.id: Measurement({0: 3}), second.id: Measurement({1: 4})})
+                agent.update({first.id: episodes({0: 3}), second.id: episodes({1: 4})})
             self.assertIsNone(agent.organisms[0].score)
-            agent.update({first.id: Measurement({0: 3}), second.id: Measurement(failure="broken")})
+            agent.update({first.id: episodes({0: 3}), second.id: episodes(failure="broken")})
             self.assertEqual(agent.elites, [])
             (replacement,) = await agent.propose()
-            agent.update({replacement.id: Measurement({0: 7})})
+            agent.update({replacement.id: episodes({0: 7})})
             self.assertTrue(agent.done)
             self.assertEqual(agent.best.id, replacement.id)
             self.assertEqual(len(agent.generations), 1)
             self.assertEqual(len(agent.organisms), 2)
             self.assertEqual(agent.organisms[1].repairs, 1)
             with self.assertRaises(ValueError):
-                agent.update({replacement.id: Measurement({0: 7})})
+                agent.update({replacement.id: episodes({0: 7})})
 
     async def test_lineage_rounds_preserve_family_update_and_repair_boundaries(self):
         from research import lineagesearch
@@ -380,15 +398,15 @@ class OptimizerContractTests(unittest.IsolatedAsyncioTestCase):
             with self.assertRaises(RuntimeError):
                 await agent.propose()
             with self.assertRaises(ValueError):
-                agent.update({first.id: Measurement({0: 3}), second.id: Measurement({1: 4})})
+                agent.update({first.id: episodes({0: 3}), second.id: episodes({1: 4})})
             self.assertIsNone(agent.trials[0].score)
-            agent.update({first.id: Measurement({0: 3}), second.id: Measurement(failure="broken")})
+            agent.update({first.id: episodes({0: 3}), second.id: episodes(failure="broken")})
             self.assertEqual(agent.families[0].batches, 0)
             (repaired,) = await agent.propose()
-            agent.update({repaired.id: Measurement({0: 7})})
+            agent.update({repaired.id: episodes({0: 7})})
             self.assertTrue(agent.done)
             self.assertEqual(agent.best.id, repaired.id)
             self.assertEqual(agent.study.attempts, 2)
             self.assertEqual(agent.families[0].batches, 1)
             with self.assertRaises(ValueError):
-                agent.update({repaired.id: Measurement({0: 7})})
+                agent.update({repaired.id: episodes({0: 7})})

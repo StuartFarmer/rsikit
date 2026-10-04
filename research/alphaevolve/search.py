@@ -11,7 +11,7 @@ from sqlmodel import func, select
 from research.alphaevolve import paper
 from research.alphaevolve.history import Evaluation, Generation, history_records
 from research.alphaevolve.paper.evaluation import assess
-from research.rewards import measure_rewards
+from research.rewards import episode_error, measure_rewards
 from rsikit import search
 from rsikit.policy import Policy, validate_policy
 
@@ -227,7 +227,7 @@ async def run_search(
             policy = Policy.from_file(initial_policy)
             validate_policy(policy)
             measurement = (await evaluate([policy]))[policy.id]
-            if not measurement.accepted:
+            if not measurement or episode_error(measurement) is not None:
                 raise ValueError("Initial policy failed screening; it was not registered")
             generator.register_initial(policy, generator._evaluation_result(measurement))
         await search(generator, evaluate, on_checkpoint=checkpoint)

@@ -1,5 +1,9 @@
 # Unified Optimizer Contract Implementation Plan
 
+> The later episode-feedback revision replaces `Measurement` with seed-keyed
+> `Episode` objects carrying candidate errors. See [the current contract](../../INNER_LOOP.md#one-optimization-loop).
+
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [x]`) syntax for tracking.
 
 **Goal:** Make every existing search algorithm a compliant example of the same externally managed propose → evaluate → update interface.

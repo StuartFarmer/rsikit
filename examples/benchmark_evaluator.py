@@ -19,6 +19,7 @@ from research.rewards import mean_rewards
 from research.rollouts import Rollouts
 from rsikit import Episode, Executor, Run
 from rsikit.envs import BitcoinEnv, BlackjackEnv, CirclePackingEnv
+from rsikit.evaluation import PolicyError
 from rsikit.policy import Policy
 
 PACKING = """
@@ -214,6 +215,8 @@ async def main(samples, output):
                 ]
                 elapsed = perf_counter() - start
                 result = results[0]
+                if result.error is not None:
+                    raise PolicyError(result.error)
                 env_time = json.loads(result.artifacts["environment-timing.json"])
                 policy_time = json.loads(result.artifacts["policy-timing.json"])
                 assert env_time["steps"] == policy_time["steps"] > 0

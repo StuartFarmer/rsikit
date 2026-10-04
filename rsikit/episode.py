@@ -10,7 +10,11 @@ import numpy as np
 
 @dataclass
 class Episode:
-    """Copied trajectory: T actions/rewards/flags, T+1 observations/infos.
+    """An attempted rollout, including its partial trajectory and candidate error.
+
+    Recorded transitions have T actions/rewards/flags and T+1 observations/infos.
+    Initialization failures may have no initial observation. An error means the
+    accumulated rewards are partial evidence, not a successful fitness score.
 
     Transition t is observations[t], actions[t], rewards[t], observations[t+1],
     terminations[t], truncations[t], infos[t+1]. Index 0 of infos is reset info.
@@ -23,6 +27,7 @@ class Episode:
     truncations: list[bool] = field(default_factory=list)
     infos: list[dict[str, Any]] = field(default_factory=list)
     artifacts: dict[str, bytes] = field(default_factory=dict)
+    error: str | None = None
 
     def __len__(self) -> int:
         return len(self.rewards)
@@ -129,7 +134,11 @@ def encode_episode(episode):
     if not isinstance(episode, Episode):
         raise ValueError("Expected an Episode")
     _validate_episode(vars(episode))
-    return {name: encode(value) for name, value in vars(episode).items()}
+    return {
+        name: encode(value)
+        for name, value in vars(episode).items()
+        if name != "error" or value is not None
+    }
 
 
 def decode_episode(data):
@@ -142,29 +151,36 @@ def decode_episode(data):
         "infos",
         "artifacts",
     }
-    if not isinstance(data, dict) or set(data) != fields:
+    if not isinstance(data, dict) or set(data) not in (fields, fields | {"error"}):
         raise ValueError("Malformed episode fields")
     values = {name: decode(value) for name, value in data.items()}
+    values.setdefault("error", None)
     _validate_episode(values)
     return Episode(**values)
 
 
 def _validate_episode(values):
-    if any(not isinstance(values[name], list) for name in set(values) - {"artifacts"}):
+    if any(not isinstance(values[name], list) for name in set(values) - {"artifacts", "error"}):
         raise ValueError("Episode tracks must be lists")
+    error = values.get("error")
+    if error is not None and (not isinstance(error, str) or not error.strip()):
+        raise ValueError("Episode error must be nonempty text")
     length = len(values["rewards"])
-    if not length or any(
+    if (not length and error is None) or any(
         len(values[name]) != length for name in ("actions", "terminations", "truncations")
     ):
         raise ValueError("Episode transitions are not aligned")
-    if any(len(values[name]) != length + 1 for name in ("observations", "infos")):
+    initial = len(values["observations"])
+    if initial != len(values["infos"]) or (
+        initial != length + 1 and not (error is not None and length == initial == 0)
+    ):
         raise ValueError("Episode must include its initial observation and info")
     if any(type(r) not in (int, float) or not math.isfinite(r) for r in values["rewards"]):
         raise ValueError("Episode rewards must be finite numbers")
     ends = list(zip(values["terminations"], values["truncations"]))
     if any(type(flag) is not bool for pair in ends for flag in pair):
         raise ValueError("Episode end flags must be boolean")
-    if any(a or b for a, b in ends[:-1]) or not any(ends[-1]):
+    if any(a or b for a, b in ends[:-1]) or (error is None and not any(ends[-1])):
         raise ValueError("Episode must end exactly at its last transition")
     if any(not isinstance(info, dict) for info in values["infos"]):
         raise ValueError("Episode infos must be dictionaries")

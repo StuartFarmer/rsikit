@@ -19,9 +19,10 @@ from uuid import uuid4
 
 import numpy as np
 
-from research.rewards import Measurement
-from rsikit.evaluation import InfrastructureError, PolicyError, PolicyTimeout
-from rsikit.policy import load_policy, validate_policy
+from rsikit import Episode
+from rsikit.episode import decode_episode, encode_episode
+from rsikit.evaluation import InfrastructureError, PolicyError, PolicyTimeout, _policy_boundary
+from rsikit.policy import InvalidPolicy, load_policy, validate_policy
 
 from .environment import factory, metadata
 
@@ -49,6 +50,7 @@ async def rollout(
     trace=False,
     diagnostics=False,
     *,
+    record=False,
     env_name="g2048",
     score_key="merge_score",
     env_kwargs=None,
@@ -70,18 +72,24 @@ async def rollout(
         start = perf_counter() if diagnostics else 0
         env = constructor(num_envs=width, seed=0, log_interval=max_steps + 1, **kwargs)
         policy = None
+        episodes = {seed: Episode() for seed in panel}
         try:
             observation, _ = env.reset(seed=list(panel))
+            if record:
+                for lane, seed in enumerate(panel):
+                    episodes[seed].observations.append(observation[lane].copy())
+                    episodes[seed].infos.append({})
             if env.num_agents != width:
                 raise ValueError("This evaluator requires one agent per environment")
-            policy = _policy_factory(
-                source,
-                env.observation_space,
-                env.action_space,
-                "Independent rows of upstream Ocean observations; one action per row.",
-            )
-            # Deterministic row-independent policies; episode memory resets per batch.
-            await policy.reset(seed=0)
+            with _policy_boundary():
+                policy = _policy_factory(
+                    source,
+                    env.observation_space,
+                    env.action_space,
+                    "Independent rows of upstream Ocean observations; one action per row.",
+                )
+                # Deterministic row-independent policies; episode memory resets per batch.
+                await policy.reset(seed=0)
             if diagnostics:
                 timing["reset"] += perf_counter() - start
             actions = [[] for _ in panel] if trace else None
@@ -90,9 +98,10 @@ async def rollout(
             # ponytail: frozen lanes keep fixed buffers; compact only if inference dominates.
             active = np.ones(width, dtype=bool)
             terminated = np.zeros(width, dtype=bool)
-            for _ in range(max_steps):
+            for step in range(max_steps):
                 start = perf_counter() if diagnostics else 0
-                action = np.asarray(await policy.act(observation.copy()))
+                with _policy_boundary():
+                    action = np.asarray(await policy.act(observation.copy()))
                 if diagnostics:
                     timing["policy"] += perf_counter() - start
                 start = perf_counter() if diagnostics else 0
@@ -107,6 +116,15 @@ async def rollout(
                         actions[lane].append(action[lane].tolist())
                 start = perf_counter() if diagnostics else 0
                 observation, reward, done, truncated, _ = env.step(action)
+                if record:
+                    for lane in np.flatnonzero(active):
+                        episode = episodes[panel[lane]]
+                        episode.actions.append(action[lane].copy())
+                        episode.rewards.append(float(reward[lane]))
+                        episode.observations.append(observation[lane].copy())
+                        episode.terminations.append(bool(done[lane]))
+                        episode.truncations.append(bool(truncated[lane] or step == max_steps - 1))
+                        episode.infos.append({})
                 returns[active] += reward[active]
                 steps[active] += 1
                 terminated |= active & done
@@ -133,7 +151,30 @@ async def rollout(
                 row["return"] = float(returns[lane])
                 if trace:
                     row["actions"] = actions[lane]
+                if record:
+                    episode = episodes[panel[lane]]
+                    episode.infos[-1].update(metrics=metrics, fitness=row["score"])
+                    row["episode"] = encode_episode(episode)
                 results.append(row)
+        except PolicyError as exc:
+            if not record:
+                raise
+            statistics = env.episode_stats()
+            for lane, (seed, episode) in enumerate(episodes.items()):
+                if episode.rewards and (episode.terminations[-1] or episode.truncations[-1]):
+                    metrics = statistics[lane]
+                    score = (
+                        episode.total_reward if score_key == "return" else float(metrics[score_key])
+                    )
+                    episode.infos[-1].update(metrics=metrics, fitness=score)
+                else:
+                    episode.error = str(exc)
+                    score = None
+                results.append(
+                    dict(
+                        seed=seed, score=score, steps=len(episode), episode=encode_episode(episode)
+                    )
+                )
         finally:
             try:
                 if policy is not None:
@@ -165,8 +206,13 @@ def _child(channel, directory, source, seeds, batch_size, max_steps, diagnostics
             data = json.dumps(result, allow_nan=False).encode()
             if len(data) > MAX_RESULT:
                 raise ValueError("Panel result exceeds 64 MiB")
-        except BaseException:
-            data = json.dumps({"error": traceback.format_exc()[-8000:]}).encode()
+        except BaseException as exc:
+            data = json.dumps(
+                {
+                    "error": traceback.format_exc()[-8000:],
+                    "kind": "policy" if isinstance(exc, PolicyError) else "infrastructure",
+                }
+            ).encode()
         channel.send_bytes(data)
 
 
@@ -224,7 +270,7 @@ class PanelEvaluator:
             task.cancel()
         await asyncio.gather(*tasks, return_exceptions=True)
 
-    async def _panel(self, source, seeds):
+    async def _panel(self, source, seeds, *, record=False):
         with TemporaryDirectory(prefix="ocean-panel-") as directory:
             reader, writer = self._context.Pipe(duplex=False)
             process = self._context.Process(
@@ -237,7 +283,7 @@ class PanelEvaluator:
                     self.batch_size,
                     self.max_steps,
                     self.diagnostics,
-                    self.options,
+                    {**self.options, "record": record},
                 ),
             )
             reading = None
@@ -253,7 +299,8 @@ class PanelEvaluator:
                 except (EOFError, OSError, ValueError) as exc:
                     raise InfrastructureError("Ocean worker exited without a valid result") from exc
                 if "error" in result:
-                    raise PolicyError(result["error"])
+                    error = PolicyError if result.get("kind") == "policy" else InfrastructureError
+                    raise error(result["error"])
                 return result
             finally:
                 if process.pid is not None:
@@ -277,15 +324,15 @@ class PanelEvaluator:
                     await asyncio.gather(reading, return_exceptions=True)
                 reader.close()
 
-    async def _reference(self, source, seeds):
+    async def _reference(self, source, seeds, *, record=False):
         # Same episodes, but a fresh process for each seed.
         rows = []
         for seed in seeds:
-            result = await self._panel(source, [seed])
+            result = await self._panel(source, [seed], record=record)
             rows.extend(result["results"])
         return dict(results=rows, steps=sum(row["steps"] for row in rows))
 
-    async def submit(self, policy, seeds=range(32), job_id=None):
+    async def submit(self, policy, seeds=range(32), job_id=None, *, record=False):
         if self._closed:
             raise RuntimeError("Evaluator is closed")
         seeds = _inputs(seeds, self.batch_size, self.max_steps)
@@ -341,20 +388,24 @@ class PanelEvaluator:
                     policy.to_file(source_path)
                 operation = self._reference if self.mode == "reference" else self._panel
                 result = await asyncio.wait_for(
-                    operation(policy._implementation, seeds), self.timeout * len(seeds)
+                    operation(policy._implementation, seeds, record=record),
+                    self.timeout * len(seeds),
                 )
                 rows = result["results"]
                 if [row["seed"] for row in rows] != list(seeds) or any(
-                    not math.isfinite(row["score"]) for row in rows
+                    row.get("episode", {}).get("error") is None and not math.isfinite(row["score"])
+                    for row in rows
                 ):
                     raise PolicyError("Incomplete or nonfinite candidate panel")
                 event.update(result, status="ok")
+                if any(row.get("episode", {}).get("error") for row in rows):
+                    event.update(status="failed", error="Candidate episode failed")
             except asyncio.TimeoutError:
                 event["error"] = f"Candidate panel exceeded {self.timeout * len(seeds):g}s"
             except (InfrastructureError, OSError) as exc:
                 event["error"] = f"{type(exc).__name__}: {exc}"
                 raise InfrastructureError(str(exc)) from exc
-            except Exception as exc:
+            except (PolicyError, InvalidPolicy) as exc:
                 event["error"] = f"{type(exc).__name__}: {exc}"
             return event
         except asyncio.CancelledError:
@@ -387,11 +438,16 @@ class PanelEvaluator:
         seeds = _inputs(seeds, self.batch_size, self.max_steps)
         if len({p.id for p in policies}) != len(policies):
             raise ValueError("Duplicate policies in evaluation request")
-        results = await asyncio.gather(*(self.submit(policy, seeds) for policy in policies))
-        return {
-            result["policy_id"]: Measurement(
-                scores={row["seed"]: row["score"] for row in result["results"]},
-                failure=result["error"],
-            )
-            for result in results
-        }
+        results = await asyncio.gather(
+            *(self.submit(policy, seeds, record=True) for policy in policies)
+        )
+        return {result["policy_id"]: episode_panel(result, seeds) for result in results}
+
+
+def episode_panel(event, seeds):
+    """Decode recorded trajectories; process failures have no recoverable trajectory."""
+    episodes = {row["seed"]: decode_episode(row["episode"]) for row in event["results"]}
+    for seed in seeds:
+        if seed not in episodes:
+            episodes[seed] = Episode(error=event["error"] or "Episode did not return")
+    return episodes

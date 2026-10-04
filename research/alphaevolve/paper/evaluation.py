@@ -2,13 +2,13 @@
 
 import math
 from collections.abc import Awaitable, Callable, Sequence
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, field
 from numbers import Real
 from statistics import fmean
 from typing import Any
 
-from research.rewards import measure_rewards
-from rsikit import Measurement
+from research.rewards import episode_error, episode_scores, measure_rewards
+from rsikit import Episode
 
 
 def _numbers(values, *, seeds=False):
@@ -24,14 +24,14 @@ def _numbers(values, *, seeds=False):
             raise ValueError("Evaluation names must be nonempty strings; seed IDs must be integers")
         if isinstance(value, bool) or not isinstance(value, Real) or not math.isfinite(value):
             raise ValueError(
-                "Measurements must contain finite per-seed scores"
+                "EvaluationResults must contain finite per-seed scores"
                 if seeds
                 else "Evaluation values must be finite numbers"
             )
     return dict(values)
 
 
-@dataclass(frozen=True)
+@dataclass
 class EvaluationResult:
     """Measured evidence, screening rejection, or candidate execution failure.
 
@@ -49,9 +49,9 @@ class EvaluationResult:
     failure: str | None = None
 
     def __post_init__(self):
-        object.__setattr__(self, "metrics", _numbers(self.metrics))
-        object.__setattr__(self, "features", _numbers(self.features))
-        object.__setattr__(self, "seed_scores", _numbers(self.seed_scores, seeds=True))
+        self.metrics = _numbers(self.metrics)
+        self.features = _numbers(self.features)
+        self.seed_scores = _numbers(self.seed_scores, seeds=True)
         if not isinstance(self.feedback, str):
             raise ValueError("Evaluation feedback must be text")
         if not isinstance(self.accepted, bool):
@@ -59,30 +59,29 @@ class EvaluationResult:
         if self.failure is not None:
             if not isinstance(self.failure, str) or not self.failure.strip():
                 raise ValueError("Evaluation failure must be nonempty text")
-            object.__setattr__(self, "accepted", False)
+            self.accepted = False
 
 
-@dataclass(frozen=True)
+@dataclass
 class EvaluationStage:
     """Run evaluate(policy); each named objective must meet its lower bound."""
 
-    evaluate: Callable[[Any], Awaitable[Measurement]]
+    evaluate: Callable[[Any], Awaitable[EvaluationResult]]
     thresholds: dict[str, float] = field(default_factory=dict)
 
     def __post_init__(self):
         if not callable(self.evaluate):
             raise ValueError("Evaluation stage requires a callable evaluator")
-        object.__setattr__(
-            self, "thresholds", Measurement(metrics=self.thresholds, accepted=False).metrics
-        )
+        self.thresholds = _numbers(self.thresholds)
 
 
 async def evaluate_cascade(
     policy,
     stages: Sequence[EvaluationStage],
     *,
-    feedback_evaluator: Callable[[Any, Measurement], Awaitable[Measurement]] | None = None,
-) -> Measurement:
+    feedback_evaluator: Callable[[Any, EvaluationResult], Awaitable[EvaluationResult]]
+    | None = None,
+) -> EvaluationResult:
     """Prune after cheap checks, then optionally grade (policy, combined_result).
 
     Later measurements overwrite earlier estimates. Feedback is concatenated;
@@ -94,20 +93,20 @@ async def evaluate_cascade(
         raise ValueError("A cascade requires at least one valid EvaluationStage")
     if feedback_evaluator is not None and not callable(feedback_evaluator):
         raise ValueError("Feedback evaluator must be callable")
-    result = Measurement(accepted=False)
+    result = EvaluationResult(accepted=False)
 
     def combine(next_result, thresholds):
-        if not isinstance(next_result, Measurement):
-            raise ValueError("Evaluators must return Measurement")
+        if not isinstance(next_result, EvaluationResult):
+            raise ValueError("Evaluators must return EvaluationResult")
         metrics = {**result.metrics, **next_result.metrics}
         missing = thresholds.keys() - metrics.keys()
         if missing and next_result.failure is None:
             raise ValueError(f"Threshold metrics missing from evaluation: {sorted(missing)}")
-        return Measurement(
+        return EvaluationResult(
             metrics=metrics,
             features={**result.features, **next_result.features},
             feedback="\n".join(text for text in (result.feedback, next_result.feedback) if text),
-            scores={**result.scores, **next_result.scores},
+            seed_scores={**result.seed_scores, **next_result.seed_scores},
             failure=next_result.failure,
             accepted=next_result.accepted
             and all(metrics[key] >= value for key, value in thresholds.items()),
@@ -124,7 +123,7 @@ async def evaluate_cascade(
 
 async def assess(
     rollouts, policies, seeds=(0,), *, features=(), screening_seeds=(), screening_min_reward=None
-) -> dict[str, Measurement]:
+) -> dict[str, dict[int, Episode]]:
     """Return per-seed evidence; the optimizer derives objectives and descriptors.
 
     The features argument validates the requested reward-derived descriptors.
@@ -158,14 +157,10 @@ async def assess(
     results = {}
     if screening_seeds:
         for policy_id, result in (await measure(policies, screening_seeds)).items():
-            if result.failure is not None:
+            if episode_error(result) is not None:
                 results[policy_id] = result
-            elif fmean(result.scores.values()) < screening_min_reward:
-                results[policy_id] = replace(
-                    result,
-                    accepted=False,
-                    feedback=f"Screening reward below {screening_min_reward}",
-                )
+            elif fmean(episode_scores(result).values()) < screening_min_reward:
+                results[policy_id] = {}
         policies = [policy for policy in policies if policy.id not in results]
     results.update(await measure(policies, seeds))
     return results

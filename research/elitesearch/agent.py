@@ -17,8 +17,8 @@ from rich.table import Column
 from slick import parse, render
 from slick.providers import Provider
 
-from research.rewards import Measurement
-from rsikit import Policy, search
+from research.rewards import episode_error, episode_scores
+from rsikit import Episode, Policy, search
 from rsikit.generation import WORKER_LIBRARIES
 from rsikit.optimization import validate_results
 from rsikit.policy import InvalidPolicy, validate_policy
@@ -121,7 +121,7 @@ class EliteSearch:
         self,
         task: str,
         provider: Provider,
-        evaluate: Callable[[Sequence[type[Policy]]], Awaitable[dict[str, Measurement]]]
+        evaluate: Callable[[Sequence[type[Policy]]], Awaitable[dict[str, dict[int, Episode]]]]
         | None = None,
         *,
         context: str = "",
@@ -550,17 +550,17 @@ class EliteSearch:
 
     def update(self, results):
         panel = validate_results(results, self._round, seed_panel=self._seed_panel)
-        if any(r.accepted and not r.scores for r in results.values()):
-            raise ValueError("EliteSearch requires per-seed scores")
+        score_panels = {id: episode_scores(r) for id, r in results.items()}
         for id, result in results.items():
+            error = episode_error(result)
             row = self._round[id]
-            if result.failure is not None:
-                row.status, row.error = "execution_failed", result.failure
-            elif not result.accepted:
-                row.status, row.error = "discarded", result.feedback or "Evaluation rejected"
+            if error is not None:
+                row.status, row.error = "execution_failed", error
+            elif not result:
+                row.status, row.error = "discarded", "Evaluation rejected"
             else:
-                row.score = fmean(result.scores.values())
-                row.seed_scores = {str(seed): value for seed, value in result.scores.items()}
+                row.score = fmean(score_panels[id].values())
+                row.seed_scores = {str(seed): value for seed, value in score_panels[id].items()}
                 row.status, row.error = "evaluated", None
             self._log_candidate(row)
         self._round.clear()

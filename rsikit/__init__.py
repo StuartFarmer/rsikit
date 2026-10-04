@@ -1,7 +1,7 @@
 """Generate policies and evaluate them in durable local Gymnasium runs."""
 
 from .episode import Episode
-from .evaluation import Evaluator, Measurement
+from .evaluation import Evaluator
 from .execution import Executor, run_program
 from .generation import generate
 from .optimization import Optimizer, search
@@ -12,7 +12,6 @@ __all__ = [
     "Episode",
     "Evaluator",
     "Executor",
-    "Measurement",
     "Optimizer",
     "Policy",
     "Run",

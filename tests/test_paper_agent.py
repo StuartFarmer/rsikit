@@ -12,8 +12,8 @@ from research import alphaevolve
 from research.alphaevolve import paper
 from research.alphaevolve.generation import Mutation
 from research.alphaevolve.original.agent import Guidance
-from rsikit import Measurement
 from rsikit.policy import Policy
+from tests.helpers import episodes
 from tests.providers import ScriptedProvider
 from tests.test_alphaevolve import program
 
@@ -42,7 +42,7 @@ class PaperAgentTests(unittest.IsolatedAsyncioTestCase):
             )
 
             async def first_evaluate(policies):
-                return {p.id: Measurement({0: 5}) for p in policies}
+                return {p.id: episodes({0: 5}) for p in policies}
 
             with self.assertRaises(ProviderError):
                 await search(agent, first_evaluate)
@@ -55,7 +55,7 @@ class PaperAgentTests(unittest.IsolatedAsyncioTestCase):
 
             async def evaluate(policies):
                 measured.extend(p.name for p in policies)
-                return {p.id: Measurement({0: 5}) for p in policies}
+                return {p.id: episodes({0: 5}) for p in policies}
 
             await search(agent, evaluate)
             self.assertEqual(measured, ["Policy 1"])
@@ -82,15 +82,13 @@ class PaperAgentTests(unittest.IsolatedAsyncioTestCase):
             agent = paper.AlphaEvolve("task", provider, config=config, database_path=path)
             self.assertEqual([p.id for p in await agent.propose()], [first.id, second.id])
             self.assertEqual(provider.calls, [])
-            agent.update(
-                {first.id: Measurement({0: 1, 1: 3}), second.id: Measurement(failure="broken")}
-            )
+            agent.update({first.id: episodes({0: 1, 1: 3}), second.id: episodes(failure="broken")})
             agent.close()
             agent = paper.AlphaEvolve(
                 "task", ScriptedProvider([program(2)]), config=config, database_path=path
             )
             (repaired,) = await agent.propose()
-            agent.update({repaired.id: Measurement({0: 4, 1: 6})})
+            agent.update({repaired.id: episodes({0: 4, 1: 6})})
             self.assertTrue(agent.done)
             self.assertEqual(len(agent.attempts), 2)
             self.assertEqual(agent.completed, 2)
@@ -114,7 +112,7 @@ class PaperAgentTests(unittest.IsolatedAsyncioTestCase):
                 )
                 (policy,) = await agent.propose()
                 if complete:
-                    agent.update({policy.id: Measurement({0: 3})})
+                    agent.update({policy.id: episodes({0: 3})})
                 agent.checkpoint()
                 state = agent.database.load_state("optimizer")
                 state.pop("round_state")
@@ -168,7 +166,7 @@ class PaperAgentTests(unittest.IsolatedAsyncioTestCase):
         self.addCleanup(agent.close)
         first, second = await agent.propose()
         restored = Policy.from_text(first.to_text())
-        agent.update({restored.id: Measurement({0: 3, 1: 7}), second.id: Measurement({0: 8, 1: 8})})
+        agent.update({restored.id: episodes({0: 3, 1: 7}), second.id: episodes({0: 8, 1: 8})})
         candidates = {c.policy.id: c for c in agent.database.all()}
         self.assertEqual(
             candidates[first.id].metrics, {"reward": 5, "worst_reward": 3, "stability": -2}
@@ -189,8 +187,9 @@ class PaperAgentTests(unittest.IsolatedAsyncioTestCase):
         self.addCleanup(agent.close)
         first, second = await agent.propose()
         for results in (
-            {first.id: Measurement({0: 3})},
-            {first.id: Measurement({0: 3}, features={"speed": 2}), second.id: Measurement({0: 7})},
+            {first.id: episodes({0: 3})},
+            {first.id: episodes({0: 3}, features={"speed": 2}), second.id: episodes({0: 7})},
+            {p.id: episodes({0: 3}, features={"speed": True}) for p in (first, second)},
         ):
             with self.assertRaises(ValueError):
                 agent.update(results)
@@ -198,7 +197,7 @@ class PaperAgentTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(agent.database.all(), [])
         agent.update(
             {
-                p.id: Measurement({0: 3}, metrics={"reward": 9}, features={"speed": 2})
+                p.id: episodes({0: 3}, metrics={"reward": 9}, features={"speed": 2})
                 for p in (first, second)
             }
         )
@@ -220,14 +219,14 @@ class PaperAgentTests(unittest.IsolatedAsyncioTestCase):
                 "task", ScriptedProvider([program(2)]), config=config, database_path=path
             )
             self.assertEqual([p.id for p in await agent.propose()], [first.id, second.id])
-            agent.update({first.id: Measurement({0: 4}), second.id: Measurement(failure="broken")})
+            agent.update({first.id: episodes({0: 4}), second.id: episodes(failure="broken")})
             agent.close()
             agent = paper.AlphaEvolve(
                 "task", ScriptedProvider([program(2)]), config=config, database_path=path
             )
             self.addCleanup(agent.close)
             (repaired,) = await agent.propose()
-            agent.update({repaired.id: Measurement({0: 8})})
+            agent.update({repaired.id: episodes({0: 8})})
             self.assertTrue(agent.done)
             self.assertEqual((agent.completed, agent.repair_calls), (2, 1))
 
@@ -254,8 +253,8 @@ class PaperAgentTests(unittest.IsolatedAsyncioTestCase):
         async def evaluate(policies):
             evaluated.extend(policies)
             if len(evaluated) == 1:
-                return {policies[0].id: Measurement(failure=diagnostic)}
-            return {p.id: Measurement({0: 1}) for p in policies}
+                return {policies[0].id: episodes(failure=diagnostic)}
+            return {p.id: episodes({0: 1}) for p in policies}
 
         await paper.search(agent, evaluate, proposals=1, evaluation_batch_size=1)
 

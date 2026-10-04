@@ -4,7 +4,7 @@ import logging
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from typing import Protocol
 
-from .evaluation import Measurement
+from .episode import Episode, _validate_episode
 from .policy import Policy
 
 
@@ -19,7 +19,7 @@ class Optimizer(Protocol):
         """Create policy definitions; execution creates fresh instances per episode."""
         ...
 
-    def update(self, results: Mapping[str, Measurement]) -> None:
+    def update(self, results: Mapping[str, Mapping[int, Episode]]) -> None:
         """Consume exactly one complete round, including rejected and failed candidates."""
         ...
 
@@ -29,19 +29,23 @@ def validate_results(results, pending, *, seed_panel=None):
     if not pending or not isinstance(results, Mapping) or set(results) != set(pending):
         raise ValueError("Feedback must contain exactly the outstanding policy IDs")
     panel = seed_panel
-    for result in results.values():
-        if not isinstance(result, Measurement):
-            raise ValueError("Evaluator must return Measurement values")
-        if result.accepted and result.scores:
-            if panel is not None and set(result.scores) != panel:
+    for episodes in results.values():
+        if not isinstance(episodes, Mapping):
+            raise ValueError("Evaluator must return episodes keyed by seed")
+        for seed, episode in episodes.items():
+            if type(seed) is not int or not isinstance(episode, Episode):
+                raise ValueError("Expected integer seeds and Episode values")
+            _validate_episode(vars(episode))
+        if episodes and all(episode.error is None for episode in episodes.values()):
+            if panel is not None and set(episodes) != panel:
                 raise ValueError("All candidates must use the same seed panel")
-            panel = set(result.scores)
+            panel = set(episodes)
     return panel
 
 
 async def search(
     optimizer: Optimizer,
-    evaluate: Callable[[Sequence[type[Policy]]], Awaitable[Mapping[str, Measurement]]],
+    evaluate: Callable[[Sequence[type[Policy]]], Awaitable[Mapping[str, Mapping[int, Episode]]]],
     *,
     on_checkpoint: Callable[[Optimizer], None] | None = None,
 ) -> type[Policy] | None:

@@ -6,6 +6,7 @@ from pathlib import Path
 
 from rsikit import run_program
 from rsikit.envs import CirclePackingEnv
+from rsikit.evaluation import PolicyError
 
 
 async def main():
@@ -21,6 +22,8 @@ async def main():
         policy_seed=2,
         max_steps=1,
     )
+    if episode.error is not None:
+        raise PolicyError(episode.error)
     info = episode.infos[-1]
     print(info)
 

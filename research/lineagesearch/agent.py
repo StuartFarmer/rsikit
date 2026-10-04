@@ -23,8 +23,8 @@ from slick import parse, render
 from slick.providers import Provider
 from sqlmodel import SQLModel
 
-from research.rewards import Measurement
-from rsikit import Policy, search
+from research.rewards import episode_error, episode_scores
+from rsikit import Episode, Policy, search
 from rsikit.generation import WORKER_LIBRARIES
 from rsikit.optimization import validate_results
 from rsikit.policy import InvalidPolicy, validate_policy
@@ -101,7 +101,7 @@ class LineageSearch:
         self,
         task: str,
         provider: Provider,
-        evaluate: Callable[[Sequence[type[Policy]]], Awaitable[dict[str, Measurement]]]
+        evaluate: Callable[[Sequence[type[Policy]]], Awaitable[dict[str, dict[int, Episode]]]]
         | None = None,
         *,
         context: str = "",
@@ -896,18 +896,18 @@ class LineageSearch:
 
     def update(self, results):
         panel = validate_results(results, self._round, seed_panel=self._seed_panel)
-        if any(r.accepted and not r.scores for r in results.values()):
-            raise ValueError("LineageSearch requires per-seed scores")
+        score_panels = {id: episode_scores(r) for id, r in results.items()}
         for id, result in results.items():
+            error = episode_error(result)
             row = self._round[id]
-            row.feedback = result.feedback
-            if result.failure is not None:
-                row.status, row.error = "execution_failed", result.failure
-            elif not result.accepted:
-                row.status, row.error = "rejected", result.feedback or "Evaluation rejected"
+            row.feedback = ""
+            if error is not None:
+                row.status, row.error = "execution_failed", error
+            elif not result:
+                row.status, row.error = "rejected", "Evaluation rejected"
             else:
-                row.seed_scores = {str(seed): score for seed, score in result.scores.items()}
-                row.score, row.status = fmean(result.scores.values()), "evaluated"
+                row.seed_scores = {str(seed): score for seed, score in score_panels[id].items()}
+                row.score, row.status = fmean(score_panels[id].values()), "evaluated"
             self._log_candidate(row)
         self._seed_panel = panel
         self._round.clear()

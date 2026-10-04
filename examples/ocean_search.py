@@ -23,8 +23,10 @@ from slick import prompts
 from research import elitesearch
 from research.elitesearch import Config
 from research.elitesearch.cli import Search
+from research.experiment import _evidence
 from research.ocean.environment import BREAKOUT_CONTEXT, CONTEXT
 from research.providers import BudgetExceeded, BudgetProvider, UsageOpenRouter
+from research.rewards import episode_error, episode_scores
 from rsikit import Policy, Run
 
 
@@ -64,10 +66,13 @@ async def select_winner(candidates, fallback, evaluate, run):
     valid = [
         p
         for p in candidates
-        if validation[p.id].accepted and set(validation[p.id].scores) == set(range(1000, 1128))
+        if (bool(validation[p.id]) and episode_error(validation[p.id]) is None)
+        and set(episode_scores(validation[p.id])) == set(range(1000, 1128))
     ]
     winner = (
-        max(valid, key=lambda p: fmean(validation[p.id].scores.values())) if valid else fallback
+        max(valid, key=lambda p: fmean(episode_scores(validation[p.id]).values()))
+        if valid
+        else fallback
     )
     # Persist the frozen choice before opening the test panel. No repairs after search.
     winner.to_file(run.path / "winner.py")
@@ -76,18 +81,19 @@ async def select_winner(candidates, fallback, evaluate, run):
         dict(
             winner=winner.id,
             fallback=not valid,
-            validation={k: asdict(v) for k, v in validation.items()},
+            validation={k: _evidence(v) for k, v in validation.items()},
         ),
     )
     test = (await evaluate([winner], range(2000, 2512)))[winner.id]
     return dict(
         winner=winner.id,
         fallback=not valid,
-        validation={k: asdict(v) for k, v in validation.items()},
-        test=asdict(test),
+        validation={k: _evidence(v) for k, v in validation.items()},
+        test=_evidence(test),
         test_mean=(
-            fmean(test.scores.values())
-            if test.accepted and set(test.scores) == set(range(2000, 2512))
+            fmean(episode_scores(test).values())
+            if (bool(test) and episode_error(test) is None)
+            and set(episode_scores(test)) == set(range(2000, 2512))
             else None
         ),
     )
@@ -139,7 +145,12 @@ async def run_search(agent, provider, evaluator, run, *, manifest=None):
         measured = await evaluator.evaluate(policies, seeds)
         for policy in policies:
             result = measured[policy.id]
-            run.save_policy(policy, scores=result.scores if result.accepted else {})
+            run.save_policy(
+                policy,
+                scores=episode_scores(result)
+                if (bool(result) and episode_error(result) is None)
+                else {},
+            )
             row = next((r for r in trace_rows if r["policy_id"] == policy.id), None)
             if row is not None:
                 row["persisted"] = time.monotonic()
@@ -148,7 +159,7 @@ async def run_search(agent, provider, evaluator, run, *, manifest=None):
                 )
                 if job is not None:
                     row["job_id"] = job["job_id"]
-                log(dict(row, event="score_persisted", failure=result.failure))
+                log(dict(row, event="score_persisted", failure=episode_error(result)))
         return measured
 
     async def search_evaluate(policies):

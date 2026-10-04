@@ -21,7 +21,7 @@ from research.alphaevolve.generation import Mutation, _PolicyResponse
 from research.alphaevolve.history import Evaluation, Generation
 from research.alphaevolve.original.agent import Guidance
 from research.alphaevolve.paper.evaluation import assess
-from research.rewards import mean_rewards
+from research.rewards import episode_scores, mean_rewards
 from rsikit.evaluation import PolicyError
 from rsikit.policy import Policy
 from rsikit.progress import show_scores
@@ -337,11 +337,11 @@ class VariantTests(unittest.IsolatedAsyncioTestCase):
                     screening_seeds=(0,),
                     screening_min_reward=5,
                 )
-                self.assertFalse(results[policies[0].id].accepted)
-                self.assertTrue(results[policies[1].id].accepted)
+                self.assertFalse(results[policies[0].id])
+                self.assertTrue(results[policies[1].id])
                 self.assertEqual(
-                    sum(results[policies[1].id].scores.values())
-                    / len(results[policies[1].id].scores),
+                    sum(episode_scores(results[policies[1].id]).values())
+                    / len(episode_scores(results[policies[1].id])),
                     11,
                 )
                 self.assertEqual(evaluation.evaluate.await_count, 3)
@@ -374,8 +374,8 @@ class VariantTests(unittest.IsolatedAsyncioTestCase):
                 output = io.StringIO()
                 show_scores(policies, run, Console(file=output), seeds=(0, 1))
                 self.assertEqual(
-                    sum(results[policies[0].id].scores.values())
-                    / len(results[policies[0].id].scores),
+                    sum(episode_scores(results[policies[0].id]).values())
+                    / len(episode_scores(results[policies[0].id])),
                     0.5,
                 )
                 self.assertIn("0.5", output.getvalue())

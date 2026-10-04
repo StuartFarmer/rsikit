@@ -6,6 +6,7 @@ from statistics import fmean, pstdev
 
 from slick import parse, render
 
+from research.rewards import episode_scores
 from rsikit.policy import Policy, validate_policy
 
 from ..generation import Mutation, _PolicyResponse, apply_edits, evolution_regions
@@ -13,7 +14,7 @@ from ..improved.agent import AlphaEvolve as Baseline
 from ..original.agent import Config as BaselineConfig
 from ..original.agent import Guidance, PromptIdea
 from .database import Candidate, Database
-from .evaluation import EvaluationResult
+from .evaluation import EvaluationResult, _numbers
 
 
 def _saved_candidate(candidate):
@@ -266,28 +267,28 @@ class AlphaEvolve(Baseline):
         self._log_leaderboard()
         self.checkpoint()
 
-    def _evaluation_result(self, measurement):
-        metrics, features = {}, {}
-        if measurement.scores:
-            values = list(measurement.scores.values())
-            mean, std = fmean(values), pstdev(values)
-            metrics = {"reward": mean, "worst_reward": min(values), "stability": -std}
-            features = {"mean_reward": mean, "reward_std": std}
-        metrics.update(measurement.metrics)
-        features.update(measurement.features)
+    def _evaluation_result(self, episodes):
+        scores = episode_scores(episodes)
+        values = list(scores.values())
+        mean, std = fmean(values), pstdev(values)
+        metrics = {"reward": mean, "worst_reward": min(values), "stability": -std}
+        features = {"mean_reward": mean, "reward_std": std}
+        for name, target in (("metrics", metrics), ("features", features)):
+            measured = [_numbers(ep.infos[-1].get(name, {})) for ep in episodes.values()]
+            names = set().union(*(values.keys() for values in measured))
+            if any(set(values) != names for values in measured):
+                raise ValueError(f"All seeds must report the same {name}")
+            target.update({key: fmean(values[key] for values in measured) for key in names})
         missing = self.config.features.keys() - features.keys()
-        if measurement.accepted and missing:
+        if missing:
             raise ValueError(f"Missing measured descriptors: {sorted(missing)}")
         return EvaluationResult(
             metrics=metrics,
-            features={name: features[name] for name in self.config.features if name in features},
-            seed_scores=measurement.scores,
-            feedback=measurement.feedback,
-            accepted=measurement.accepted,
-            failure=measurement.failure,
+            features={name: features[name] for name in self.config.features},
+            seed_scores=scores,
         )
 
-    def _accept_measurements(self, results):
+    def _accept_episodes(self, results):
         self.update_results({id: self._evaluation_result(r) for id, r in results.items()})
 
     def update(self, results):

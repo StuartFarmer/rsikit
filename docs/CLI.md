@@ -60,7 +60,7 @@ fees, and starting cash are configurable; see [PriceSeries](PRICE_SERIES.md).
 | `elite` | `--generations`, `--population`, `--elites` |
 | `lineage` | `--max-attempts`, `--families`, `--initial-per-family`, `--proposal-batch-size`, `--patience` |
 
-All four use the same `rsikit.search` runner, neutral `Measurement` feedback,
+All four use the same `rsikit.search` runner, per-seed `Episode` feedback,
 search seed panel, budget provider, and validation/test selection. Options belong
 to the selected algorithm; switching selectors with incompatible saved options
 raises during validation. Use that selector's `--help` for the full list.
@@ -183,7 +183,7 @@ async def optimize(*, task, provider, evaluate, run, options, seed):
     return []
 ```
 
-The `options` dictionary contains validated public options plus reserved `generation` and `videos` dictionaries. Do not use those names for public optimizer options. Generation settings include concurrency, timeout, and token limits; the custom optimizer owns scheduling/deadlines for its calls. All paid calls must go through the supplied provider for usage logging and any explicitly configured budget limits. Budgets are optional for custom optimizers too. Each measurement is `rsikit.Measurement` (also re-exported from `research.rewards`), keyed by policy ID, with per-seed scores and explicit failure status. The runner persists measurements and policy definitions; custom optimizers own their algorithm-specific checkpoints.
+The `options` dictionary contains validated public options plus reserved `generation` and `videos` dictionaries. Do not use those names for public optimizer options. Generation settings include concurrency, timeout, and token limits; the custom optimizer owns scheduling/deadlines for its calls. All paid calls must go through the supplied provider for usage logging and any explicitly configured budget limits. Budgets are optional for custom optimizers too. Evaluation returns `{policy.id: {seed: episode}}`; candidate failures are stored in `episode.error`. The runner persists measurements and policy definitions; custom optimizers own their algorithm-specific checkpoints.
 
 An environment file exports `environment`, an instance of `research.experiment.EnvironmentDefinition`. Its fields are:
 
@@ -194,7 +194,7 @@ An environment file exports `environment`, an instance of `research.experiment.E
 - `evaluation_defaults`, `supported_evaluation_fields`, `score_keys`, and `protocol`: describe the workload and supported settings.
 - `provenance()`: optional metadata function, called before generation.
 
-The evaluator owns setup, cleanup, and concurrent execution. It returns exactly the requested policy IDs, complete finite seed scores for accepted candidates, and rejected Measurements for policy failures. Infrastructure errors propagate. Use `research.experiment.record_execution(policy_id, seed_runs=..., steps=...)` to report actual work; otherwise custom execution counts are unknown. See `research/environments.py` and `research/ocean/environment.py` for working examples. The optimizer API is identical for both.
+The evaluator owns setup, cleanup, and concurrent execution. It returns exactly the requested policy IDs, one Episode per requested seed, including episodes with `error` set for candidate failures. Infrastructure errors propagate. Use `research.experiment.record_execution(policy_id, seed_runs=..., steps=...)` to report actual work; otherwise custom execution counts are unknown. See `research/environments.py` and `research/ocean/environment.py` for working examples. The optimizer API is identical for both.
 
 ## Docker paths and migration
 

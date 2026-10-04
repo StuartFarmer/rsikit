@@ -76,6 +76,59 @@ class EvaluatorTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(episode.observations[-1].tolist(), [2])
         self.assertEqual(episode.actions[-1].tolist(), [2])
 
+    async def test_failed_attempt_preserves_completed_steps_and_zero_step_errors(self):
+        from rsikit.episode import decode_episode, encode_episode
+        from tests.test_inner_loop import CounterEnv, CounterPolicy
+
+        for steps in (0, 1):
+
+            class Broken(CounterPolicy):
+                async def act(self, observation):
+                    if self.calls == steps:
+                        raise ValueError("candidate broke")
+                    return await super().act(observation)
+
+            env = CounterEnv()
+            observation, info = env.reset()
+            policy = Broken(env.observation_space, env.action_space)
+            await policy.reset()
+            episode = await Evaluator(env, policy).run(observation, info=info)
+            self.assertEqual(len(episode), steps)
+            self.assertEqual(len(episode.observations), steps + 1)
+            self.assertIn("candidate broke", episode.error)
+            restored = decode_episode(encode_episode(episode))
+            self.assertEqual(restored.error, episode.error)
+            self.assertEqual(restored.rewards, episode.rewards)
+
+    async def test_initialization_failure_is_an_empty_episode(self):
+        from rsikit.evaluation import _run_episode
+        from tests.test_inner_loop import CounterEnv, CounterPolicy
+
+        class Broken(CounterPolicy):
+            def __init__(self, *args, **kwargs):
+                raise ValueError("construction failed")
+
+        env = CounterEnv()
+        episode = await _run_episode(lambda: env, Broken)
+        self.assertIn("construction failed", episode.error)
+        self.assertEqual(episode.rewards, [])
+        from rsikit.episode import decode_episode, encode_episode
+
+        self.assertEqual(decode_episode(encode_episode(episode)).error, episode.error)
+        self.assertTrue(env.closed)
+
+    async def test_candidate_cleanup_failure_preserves_its_trajectory(self):
+        from rsikit.evaluation import _run_episode
+        from tests.test_inner_loop import CounterEnv, CounterPolicy
+
+        class BrokenClose(CounterPolicy):
+            async def close(self):
+                raise ValueError("close failed")
+
+        episode = await _run_episode(CounterEnv, BrokenClose)
+        self.assertEqual(episode.rewards, [1.0, 2.0])
+        self.assertIn("close failed", episode.error)
+
     async def test_step_cap_and_validation(self):
         from tests.test_inner_loop import CounterEnv, CounterPolicy
 

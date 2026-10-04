@@ -56,3 +56,20 @@ def fake_executor(*, evaluation, **kwargs):
 
     executor._evaluate = evaluate
     return executor
+
+
+def episodes(scores=None, feedback="", failure=None, accepted=True, *, metrics=None, features=None):
+    from rsikit import Episode
+    from tests.test_episode_storage import trajectory
+
+    if failure is not None:
+        result = {seed: trajectory(score) for seed, score in (scores or {}).items()}
+        seed = next((s for s in range(len(result) + 1) if s not in result))
+        result[seed] = Episode(error=failure)
+        return result
+    if not accepted:
+        return {}
+    result = {seed: trajectory(score) for seed, score in (scores or {}).items()}
+    for episode in result.values():
+        episode.infos[-1].update(metrics=metrics or {}, features=features or {}, feedback=feedback)
+    return result

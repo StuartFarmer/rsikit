@@ -22,8 +22,8 @@ This is an experimental release; APIs may change.
 - `rsikit.policy.validate_policy`: explicitly checks generated source without executing it.
 - `Evaluator`: rolls out existing environment and policy instances.
 - `Episode`: records observations, actions, rewards, flags, infos, and artifacts.
-- `Optimizer`: the `propose()` / `update(measurements)` protocol, with `done` and `best`, implemented by all six optimizers.
-- `Measurement` and `search`: neutral per-seed feedback and one external optimization loop.
+- `Optimizer`: the `propose()` / `update(episodes)` protocol, with `done` and `best`, implemented by all six optimizers.
+- `Episode` feedback and `search`: raw per-seed rollout evidence and one external optimization loop.
 - `Run`: persists one optimizer run: configuration, checkpoints, policies, and episodes.
 - `Executor`: runs fresh local episode processes with bounded concurrency and deadlines.
 - `AlphaEvolve`: evolutionary search using Slick and Gymnasium feedback.
@@ -199,8 +199,8 @@ Add `--video` (the worker image includes rendering dependencies):
 ## Shared optimization API
 
 Construct any built-in optimizer, then use `await search(optimizer, evaluate)`.
-The evaluator returns policy-ID–`Measurement` mappings with per-seed scores,
-optional measured metrics/features, and explicit failure or screening status.
+The evaluator returns `{policy.id: {seed: episode}}`. Each episode contains its
+trajectory and an optional candidate `error`; an empty seed mapping means screened out.
 The optimizer owns proposal sizes, repairs, selection, and completion; the
 external runner owns the loop. See [the common contract](docs/INNER_LOOP.md#one-optimization-loop).
 
@@ -223,10 +223,10 @@ The launcher builds the application image automatically. The default `paper`
 variant uses `openai/gpt-oss-120b:nitro`. All variants use complete proposal rounds:
 
 ```python
-from rsikit import Measurement, search
+from rsikit import search
 
 # Configure proposals=250 and batch_size=10 on the optimizer.
-# evaluate_batch returns {policy.id: Measurement(scores=per_seed_scores)}.
+# evaluate_batch returns {policy.id: {seed: episode}}.
 best = await search(generator, evaluate_batch)
 ```
 

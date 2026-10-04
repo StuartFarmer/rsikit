@@ -186,7 +186,7 @@ from pathlib import Path
 from slick import prompts
 from research import lineagesearch
 from research.lineagesearch import Config, LineageSearch
-from rsikit import Measurement, search
+from rsikit import search
 from research.rewards import measure_rewards
 from research.rollouts import Rollouts
 
@@ -214,12 +214,11 @@ study = agent.study
 ```
 
 Use one agent per study. The evaluator returns exactly the requested policy IDs.
-`Measurement(scores, feedback="", failure=None)` carries
-per-seed evidence and optional textual diagnostics. To report a broken candidate
-without aborting siblings, return `Measurement(failure=diagnostic)`;
-infrastructure errors must raise. Screening rejections use `accepted=False`
-without a failure and do not consume repairs. `measure_rewards` handles executor
-`PolicyError.failures` while preserving successful episodes.
+Each policy ID maps to `{seed: episode}`. A candidate error is carried in
+`episode.error`; successful partial rewards do not make a failed attempt eligible
+for selection. Infrastructure errors raise. An empty seed mapping means the
+candidate was screened out and does not consume repairs. `measure_rewards`
+collects successful and failed episodes without discarding siblings.
 Generated implementations are never executed by the optimizer itself.
 
 Programmatic callers supply valid configuration: positive family, batch, optional frontier,

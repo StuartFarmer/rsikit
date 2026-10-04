@@ -15,9 +15,9 @@ from slick import prompts
 from slick.providers import ProviderError
 from sqlmodel import select
 
-from research.lineagesearch import Config, Family, LineageSearch, Measurement, Study, Trial
+from research.lineagesearch import Config, Family, LineageSearch, Study, Trial
 from rsikit.evaluation import PolicyError
-from tests.helpers import fake_executor, recorded_run
+from tests.helpers import episodes, fake_executor, recorded_run
 from tests.providers import ScriptedProvider
 from tests.test_episode_storage import trajectory
 from tests.test_run import FakeEvaluation
@@ -158,7 +158,7 @@ class LineageTests(unittest.IsolatedAsyncioTestCase):
                 value = scores[policy.name]
                 if isinstance(value, Exception):
                     raise value
-                results[policy.id] = Measurement(
+                results[policy.id] = episodes(
                     value if isinstance(value, dict) else {0: value, 1: value, 2: value}
                 )
             return results
@@ -424,7 +424,7 @@ class LineageTests(unittest.IsolatedAsyncioTestCase):
         async def evaluate(policies):
             self.assertEqual(len(generated), 2)
             evaluated.append([p.name for p in policies])
-            return {p.id: Measurement({0: 7}) for p in policies}
+            return {p.id: episodes({0: 7}) for p in policies}
 
         agent.evaluate = evaluate
         with patch.object(agent.provider, "acall", side_effect=generate):
@@ -527,7 +527,7 @@ class LineageTests(unittest.IsolatedAsyncioTestCase):
             self.assertIsNone(agent.trials[0].score)
 
     async def test_nonfinite_and_changed_seed_panel_fail_before_selection(self):
-        for bad in ({0: float("nan"), 1: 1, 2: 1}, {99: 10}, {}):
+        for bad in ({0: float("nan"), 1: 1, 2: 1}, {99: 10}):
             agent = self.agent([families(), *sequence(0, 1)], {"Policy 0": 1, "Policy 1": bad})
             with self.assertRaises(ValueError):
                 await agent.run()
@@ -535,13 +535,12 @@ class LineageTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(agent.families[0].stale_batches, 0)
 
     async def test_screening_rejection_does_not_promote_or_repair(self):
-        from research.rewards import Measurement
 
         agent = self.agent([families(), *sequence(0)], {}, max_attempts=1)
 
         async def evaluate(policies):
             return {
-                p.id: Measurement(scores={0: 100}, accepted=False, feedback="screened")
+                p.id: episodes(scores={0: 100}, accepted=False, feedback="screened")
                 for p in policies
             }
 
@@ -549,7 +548,7 @@ class LineageTests(unittest.IsolatedAsyncioTestCase):
         await agent.run()
         self.assertIsNone(agent.best)
         self.assertEqual(agent.trials[0].status, "rejected")
-        self.assertEqual(agent.trials[0].feedback, "screened")
+        self.assertEqual(agent.trials[0].feedback, "")
         self.assertEqual(agent.trials[0].repairs, 0)
         self.assertIsNone(agent.trials[0].score)
 
@@ -593,9 +592,9 @@ class LineageTests(unittest.IsolatedAsyncioTestCase):
             evaluated.extend(p.name for p in policies)
             return {
                 p.id: (
-                    Measurement({}, failure="Action outside action_space")
+                    episodes({}, failure="Action outside action_space")
                     if p.name == "Policy 0"
-                    else Measurement({0: 5})
+                    else episodes({0: 5})
                 )
                 for p in policies
             }
@@ -690,9 +689,9 @@ class LineageTests(unittest.IsolatedAsyncioTestCase):
             evaluated.extend(p.name for p in policies)
             return {
                 p.id: (
-                    Measurement({0: 9})
+                    episodes({0: 9})
                     if p.name == "Policy 0"
-                    else Measurement({}, failure="Invalid action")
+                    else episodes({}, failure="Invalid action")
                 )
                 for p in policies
             }
@@ -725,7 +724,7 @@ class LineageTests(unittest.IsolatedAsyncioTestCase):
         )
 
         async def evaluate(policies):
-            return {p.id: Measurement({}, failure="Invalid action") for p in policies}
+            return {p.id: episodes({}, failure="Invalid action") for p in policies}
 
         agent.evaluate = evaluate
         await agent.run()

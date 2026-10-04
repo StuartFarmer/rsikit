@@ -6,8 +6,9 @@ from pydantic import BaseModel, FiniteFloat
 from slick import parse, render
 from slick.providers import Provider
 
-from rsikit import Measurement
 from rsikit.policy import Policy
+
+from .evaluation import EvaluationResult
 
 
 class _Assessment(BaseModel, extra="forbid"):
@@ -29,7 +30,7 @@ class LLMFeedback:
         self.criteria = dict(criteria)
         self.attempts: list[dict] = []
 
-    async def __call__(self, policy: type[Policy], measured: Measurement) -> Measurement:
+    async def __call__(self, policy: type[Policy], measured: EvaluationResult) -> EvaluationResult:
         if self.criteria.keys() & measured.metrics.keys():
             raise ValueError("Grader criteria must not replace measured metrics")
         record = {"policy_id": policy.id}
@@ -37,8 +38,8 @@ class LLMFeedback:
         return await self.assess(policy, measured, provider=self.provider, record=record)
 
     async def assess(
-        self, policy: type[Policy], measured: Measurement, *, provider, record=None
-    ) -> Measurement:
+        self, policy: type[Policy], measured: EvaluationResult, *, provider, record=None
+    ) -> EvaluationResult:
         schema = _Assessment.model_json_schema()
         context = render(
             "paper/prompts/feedback.j2",
@@ -56,6 +57,6 @@ class LLMFeedback:
             raise ValueError("Grader metrics must match exactly the rubric criteria")
         if generated.metrics.keys() & measured.metrics.keys():
             raise ValueError("Grader output must not replace measured metrics")
-        return Measurement(
+        return EvaluationResult(
             metrics=generated.metrics, feedback=generated.feedback, accepted=generated.accepted
         )

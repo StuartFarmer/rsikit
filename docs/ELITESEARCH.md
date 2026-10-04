@@ -78,7 +78,7 @@ Programmatic callers configure Slick's template root to
 `research/elitesearch/prompts`, construct the optimizer, and use the common runner:
 
 ```python
-from rsikit import Measurement, search
+from rsikit import search
 from research.elitesearch import Config, EliteSearch
 
 agent = EliteSearch(
@@ -90,9 +90,8 @@ agent = EliteSearch(
 best = await search(agent, evaluate)
 ```
 
-The async evaluator returns exactly `{policy.id: Measurement(scores=per_seed_scores)}`.
-Failures use `Measurement(failure="diagnostic")`; screening uses `accepted=False`
-without a failure. Infrastructure failures raise. `propose()` chooses the round,
+The async evaluator returns exactly `{policy.id: {seed: episode}}`.
+Failures use `episode.error`; an empty seed mapping means screened out. Infrastructure failures raise. `propose()` chooses the round,
 `update()` validates all feedback before changing state, and promotion waits for
 terminal repair outcomes. The caller owns execution and persistence. The legacy
 constructor evaluator and `run()` wrapper still work; `run()` delegates to core

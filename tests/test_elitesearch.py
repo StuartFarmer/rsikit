@@ -15,9 +15,9 @@ from slick import prompts
 from slick.providers import ProviderError
 from sqlmodel import select
 
-from research.elitesearch import Config, EliteSearch, Generation, Measurement, Organism
+from research.elitesearch import Config, EliteSearch, Generation, Organism
 from rsikit import Policy
-from tests.helpers import fake_executor, recorded_run
+from tests.helpers import episodes, fake_executor, recorded_run
 from tests.providers import ScriptedProvider
 from tests.test_run import FakeEvaluation
 
@@ -65,7 +65,7 @@ class EliteSearchTests(unittest.IsolatedAsyncioTestCase):
             return program(value), []
 
         async def evaluate(policies):
-            return {p.id: Measurement({0: int(p.name.split()[-1])}) for p in policies}
+            return {p.id: episodes({0: int(p.name.split()[-1])}) for p in policies}
 
         agent = EliteSearch(
             "Score policies",
@@ -91,7 +91,7 @@ class EliteSearchTests(unittest.IsolatedAsyncioTestCase):
         scores = iter([10, 9, 8, 9, -10, 8])
 
         async def evaluate(policies):
-            return {p.id: Measurement({0: next(scores)}) for p in policies}
+            return {p.id: episodes({0: next(scores)}) for p in policies}
 
         agent = EliteSearch(
             "Score",
@@ -117,9 +117,9 @@ class EliteSearchTests(unittest.IsolatedAsyncioTestCase):
         async def evaluate(policies):
             evaluated.extend(p.name for p in policies)
             return {
-                p.id: Measurement({}, failure="invalid action")
+                p.id: episodes({}, failure="invalid action")
                 if p.name == "Policy 0"
-                else Measurement({0: 12})
+                else episodes({0: 12})
                 for p in policies
             }
 
@@ -164,7 +164,7 @@ class EliteSearchTests(unittest.IsolatedAsyncioTestCase):
 
         async def evaluate(policies):
             evaluated.extend(policies)
-            return {p.id: Measurement({0: len(evaluated)}) for p in policies}
+            return {p.id: episodes({0: len(evaluated)}) for p in policies}
 
         agent = EliteSearch(
             "Score",
@@ -192,7 +192,7 @@ class EliteSearchTests(unittest.IsolatedAsyncioTestCase):
         provider = ScriptedProvider([program(0), json.dumps(response)])
 
         async def evaluate(policies):
-            return {p.id: Measurement({0: 1}) for p in policies}
+            return {p.id: episodes({0: 1}) for p in policies}
 
         agent = EliteSearch(
             "Score",
@@ -233,11 +233,11 @@ class EliteSearchTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(agent._round), 2)
 
     async def test_invalid_scores_never_enter_leaderboard(self):
-        for scores in ({}, {0: float("nan")}, {0: float("inf")}):
+        for scores in ({0: float("nan")}, {0: float("inf")}):
             with self.subTest(scores=scores):
 
                 async def evaluate(policies):
-                    return {p.id: Measurement(scores) for p in policies}
+                    return {p.id: episodes(scores) for p in policies}
 
                 agent = EliteSearch(
                     "Score",
@@ -253,9 +253,9 @@ class EliteSearchTests(unittest.IsolatedAsyncioTestCase):
     async def test_screening_rejection_does_not_promote_or_repair(self):
         async def evaluate(policies):
             return {
-                p.id: Measurement(scores={99: 100}, accepted=False, feedback="screened")
+                p.id: episodes(scores={99: 100}, accepted=False, feedback="screened")
                 if p.name == "Policy 0"
-                else Measurement(scores={0: 3})
+                else episodes(scores={0: 3})
                 for p in policies
             }
 
@@ -266,7 +266,7 @@ class EliteSearchTests(unittest.IsolatedAsyncioTestCase):
         await agent.run()
         self.assertEqual(agent.best.name, "Policy 1")
         self.assertEqual(agent.organisms[0].status, "discarded")
-        self.assertEqual(agent.organisms[0].error, "screened")
+        self.assertEqual(agent.organisms[0].error, "Evaluation rejected")
         self.assertEqual(agent.organisms[0].repairs, 0)
         self.assertEqual(len(provider.calls), 2)
 
@@ -276,7 +276,7 @@ class EliteSearchTests(unittest.IsolatedAsyncioTestCase):
         async def evaluate(policies):
             self.assertEqual(len(provider.calls), 2)
             self.assertEqual([p.name for p in policies], ["Policy 0", "Policy 1"])
-            return {p.id: Measurement({0: 7}) for p in policies}
+            return {p.id: episodes({0: 7}) for p in policies}
 
         agent = EliteSearch(
             "Score", provider, evaluate, config=Config(population_size=2, generations=1)
@@ -287,9 +287,9 @@ class EliteSearchTests(unittest.IsolatedAsyncioTestCase):
     async def test_duplicate_and_failed_populations_preserve_existing_elites(self):
         async def evaluate(policies):
             return {
-                p.id: Measurement({0: 7})
+                p.id: episodes({0: 7})
                 if p.name == "Policy 0"
-                else Measurement({}, failure="broken policy")
+                else episodes({}, failure="broken policy")
                 for p in policies
             }
 

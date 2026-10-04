@@ -18,7 +18,7 @@ from research import alphaevolve
 from research.alphaevolve.generation import _PolicyResponse
 from research.alphaevolve.improved import AlphaEvolve, Config
 from rsikit.evaluation import PolicyError
-from tests.helpers import fake_executor, recorded_run
+from tests.helpers import episodes, fake_executor, recorded_run
 from tests.providers import ScriptedProvider
 from tests.test_episode_storage import trajectory
 from tests.test_run import RESPONSE, FakeEvaluation
@@ -798,12 +798,12 @@ class RunLoggingTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_native_paper_resume_replays_only_known_completions(self):
         from research.alphaevolve import paper
-        from rsikit import Measurement, Run
+        from rsikit import Run
         from rsikit.progress import _current_run
         from tests.test_elitesearch import program
 
         async def evaluate(policies):
-            return {p.id: Measurement({0: 1}) for p in policies}
+            return {p.id: episodes({0: 1}) for p in policies}
 
         with (
             tempfile.TemporaryDirectory() as directory,
@@ -1036,7 +1036,7 @@ class RunLoggingTests(unittest.IsolatedAsyncioTestCase):
                         agent.close()
 
     async def test_native_optimizer_events_without_example_setup(self):
-        from research.elitesearch import Config, EliteSearch, Measurement
+        from research.elitesearch import Config, EliteSearch
         from research.lineagesearch import Config as LineageConfig
         from research.lineagesearch import LineageSearch
         from rsikit import Run
@@ -1056,7 +1056,7 @@ class RunLoggingTests(unittest.IsolatedAsyncioTestCase):
                 self.assertTrue(
                     any(r["status"] == "evaluating" for r in display.candidates.values())
                 )
-                return {p.id: Measurement({0: 3, 1: 5}) for p in policies}
+                return {p.id: episodes({0: 3, 1: 5}) for p in policies}
 
             with (
                 tempfile.TemporaryDirectory() as directory,

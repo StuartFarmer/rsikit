@@ -15,6 +15,7 @@ from slick.providers import OpenRouterAPI
 from research import elitesearch
 from research.elitesearch import Config, EliteSearch
 from research.elitesearch.videos import generation_videos
+from research.rewards import episode_error, episode_scores
 from research.rewards import measure_rewards as measure
 from research.rollouts import Rollouts
 from rsikit import Executor, Run
@@ -67,7 +68,7 @@ async def run_search(agent, run, rollouts, *, seeds, heldout_seeds, video_top=0,
             agent.best.to_file(run.path / "best.py")
             logger.info("Evaluating best elite on held-out seeds")
             result = (await measure(rollouts, [agent.best], heldout_seeds))[agent.best.id]
-            summary["heldout"] = dict(scores=result.scores, failure=result.failure)
+            summary["heldout"] = dict(scores=episode_scores(result), failure=episode_error(result))
         if video_task is not None:
             video_queue.put_nowait(None)
             logger.info("Waiting for queued generation videos to finish")

@@ -26,9 +26,9 @@ requires a new run. Old scalar scores remain readable, but are not fabricated in
 trajectories: missing episodes are executed again when requested.
 
 `mean_rewards` explicitly selects cumulative reward as fitness and averages the
-requested seeds. `measure_rewards` returns per-seed `Measurement` objects and
+requested seeds. `measure_rewards` returns per-seed `Episode` objects and
 candidate diagnostics. AlphaEvolve's `research.alphaevolve.paper.evaluation.assess`
-returns neutral `Measurement` values and applies screening thresholds. AlphaEvolve
+returns raw episodes and applies screening thresholds. AlphaEvolve
 constructs its richer `EvaluationResult` and derived descriptors during update.
 Infrastructure errors and cancellation propagate; these are not low fitness.
 

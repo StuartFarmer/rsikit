@@ -3,18 +3,20 @@
 import asyncio
 import unittest
 
+from research.alphaevolve.paper import EvaluationResult
 from research.alphaevolve.paper.evaluation import (
     EvaluationStage,
     evaluate_cascade,
 )
 from research.alphaevolve.paper.pipeline import search
-from rsikit.evaluation import InfrastructureError, Measurement
+from rsikit.evaluation import InfrastructureError
+from tests.helpers import episodes
 
 
 class EvaluationTests(unittest.IsolatedAsyncioTestCase):
     async def test_stage_failure_skips_thresholds_and_remaining_stages(self):
         async def broken(policy):
-            return Measurement(failure="invalid action")
+            return EvaluationResult(failure="invalid action")
 
         async def expensive(policy):
             self.fail("failed candidate reached expensive stage")
@@ -30,8 +32,11 @@ class EvaluationTests(unittest.IsolatedAsyncioTestCase):
 
         async def cheap(policy):
             calls.append("cheap")
-            return Measurement(
-                metrics={"reward": 2}, features={"size": 3}, feedback="cheap result", scores={7: 2}
+            return EvaluationResult(
+                metrics={"reward": 2},
+                features={"size": 3},
+                feedback="cheap result",
+                seed_scores={7: 2},
             )
 
         async def expensive(policy):
@@ -43,20 +48,20 @@ class EvaluationTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(result.accepted)
         self.assertEqual(result.metrics, {"reward": 2})
         self.assertEqual(result.features, {"size": 3})
-        self.assertEqual(result.scores, {7: 2})
+        self.assertEqual(result.seed_scores, {7: 2})
         self.assertIn("cheap result", result.feedback)
         self.assertEqual(calls, ["cheap"])
 
     async def test_later_measurement_overwrites_estimate_and_grader_can_reject(self):
         async def cheap(policy):
-            return Measurement(feedback="estimate", metrics={"reward": 2})
+            return EvaluationResult(feedback="estimate", metrics={"reward": 2})
 
         async def full(policy):
-            return Measurement(feedback="measured", metrics={"reward": 4})
+            return EvaluationResult(feedback="measured", metrics={"reward": 4})
 
         async def grade(policy, measured):
             self.assertEqual(measured.metrics["reward"], 4)
-            return Measurement(feedback="grader", accepted=False, metrics={"quality": 0.2})
+            return EvaluationResult(feedback="grader", accepted=False, metrics={"quality": 0.2})
 
         result = await evaluate_cascade(
             object(), [EvaluationStage(cheap), EvaluationStage(full)], feedback_evaluator=grade
@@ -71,12 +76,12 @@ class EvaluationTests(unittest.IsolatedAsyncioTestCase):
             {"metrics": {"": 2}},
             {"metrics": {4: 2}},
             {"metrics": {}, "features": {"x": float("inf")}},
-            {"metrics": {}, "scores": {"one": 2}},
+            {"metrics": {}, "seed_scores": {"one": 2}},
             {"metrics": {}, "feedback": 3},
             {"metrics": {}, "accepted": "yes"},
         ]:
             with self.subTest(kwargs=kwargs), self.assertRaises(ValueError):
-                Measurement(**kwargs)
+                EvaluationResult(**kwargs)
         with self.assertRaises(ValueError):
             await evaluate_cascade(object(), [])
         with self.assertRaises(ValueError):
@@ -124,7 +129,7 @@ class PipelineTests(unittest.IsolatedAsyncioTestCase):
 
         async def evaluate(policies):
             counts.append((agent.generation_calls, agent.completed))
-            return {p.id: Measurement({0: i + 1}) for i, p in enumerate(policies)}
+            return {p.id: episodes({0: i + 1}) for i, p in enumerate(policies)}
 
         await search(agent, evaluate, proposals=4, evaluation_batch_size=2)
         self.assertEqual(counts, [(2, 0), (4, 2)])
@@ -141,11 +146,11 @@ class PipelineTests(unittest.IsolatedAsyncioTestCase):
             panels.append([p.name for p in policies])
             if len(panels) == 1:
                 return {
-                    policies[0].id: Measurement(failure="bad action"),
-                    policies[1].id: Measurement({0: 8}, accepted=False),
-                    policies[2].id: Measurement({0: 3}),
+                    policies[0].id: episodes(failure="bad action"),
+                    policies[1].id: episodes({0: 8}, accepted=False),
+                    policies[2].id: episodes({0: 3}),
                 }
-            return {p.id: Measurement({0: 9}) for p in policies}
+            return {p.id: episodes({0: 9}) for p in policies}
 
         await search(agent, evaluate, proposals=3, evaluation_batch_size=3)
         self.assertEqual([len(p) for p in panels], [3, 1])
@@ -219,7 +224,7 @@ class PipelineTests(unittest.IsolatedAsyncioTestCase):
             nonlocal calls
             calls += 1
             return {
-                p.id: Measurement(failure="broken") if calls == 1 else Measurement({0: 1})
+                p.id: episodes(failure="broken") if calls == 1 else episodes({0: 1})
                 for p in policies
             }
 

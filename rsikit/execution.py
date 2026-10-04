@@ -47,14 +47,11 @@ def _run_child(channel, source, definition, seed, options, directory):
             def make_policy(observation_space, action_space, *, instructions):
                 return load_policy(source, observation_space, action_space, instructions)
 
-            episode = asyncio.run(
-                _run_episode(
-                    lambda: env, make_policy, env_seed=seed, _policy_errors=True, **options
-                )
-            )
+            episode = asyncio.run(_run_episode(lambda: env, make_policy, env_seed=seed, **options))
             sys.stdout.flush()
             sys.stderr.flush()
-            episode.artifacts.update(episode.infos[-1].get("artifacts", {}))
+            if episode.infos:
+                episode.artifacts.update(episode.infos[-1].get("artifacts", {}))
             size = sum(len(data) for data in episode.artifacts.values())
             for path in Path(directory).rglob("*"):
                 if path.is_file() and not path.is_symlink():
@@ -143,6 +140,8 @@ class Executor:
                         tail = stream.read(4096).decode(errors="replace")
                     if tail:
                         exc.args = (f"{exc}\nEpisode log (tail):\n{tail}",)
+                if isinstance(exc, PolicyError):
+                    return Episode(error=str(exc))
                 raise
             finally:
                 if process.pid is not None:
@@ -171,7 +170,7 @@ class Executor:
         jobs: Iterable[tuple[str, str, int]],
         environment: gym.Env,
     ) -> AsyncIterator[tuple[str, int, Episode]]:
-        """Yield complete episodes, retaining successful siblings when a policy fails."""
+        """Yield one attempted episode per job, including candidate errors."""
         jobs = list(jobs)
         if not jobs:
             return
@@ -194,6 +193,18 @@ class Executor:
                         definition,
                         seed,
                     )
+                    if episode.error is not None:
+                        logging.getLogger(__name__).error(
+                            "Policy %s failed (seed=%s): %s",
+                            policy_id[:12],
+                            seed,
+                            episode.error,
+                            extra={
+                                "event": "evaluation_failed",
+                                "policy_id": policy_id,
+                                "seed": seed,
+                            },
+                        )
                     return policy_id, seed, episode
                 except asyncio.CancelledError:
                     raise
@@ -210,7 +221,7 @@ class Executor:
                         },
                     )
                     if isinstance(exc, PolicyError):
-                        return policy_id, seed, exc
+                        return policy_id, seed, Episode(error=str(exc))
                     raise
             finally:
                 self._running -= 1
@@ -236,8 +247,6 @@ class Executor:
 
         tasks = []
         error = None
-        policy_error = None
-        failures = {}
         try:
             tasks = [asyncio.create_task(evaluate(*job)) for job in jobs]
             self._tasks.update(tasks)
@@ -248,20 +257,9 @@ class Executor:
                     if error is None:
                         error = exc
                 else:
-                    policy_id, seed, result = completed
-                    if isinstance(result, PolicyError):
-                        policy_error = policy_error or result
-                        diagnostic = f"seed={seed}: {type(result).__name__}: {result}"
-                        failures[policy_id] = "\n".join(
-                            filter(None, [failures.get(policy_id), diagnostic])
-                        )
-                    else:
-                        yield completed
+                    yield completed
             if error is not None:
                 raise error
-            if policy_error is not None:
-                policy_error.failures = failures
-                raise policy_error
         finally:
             for task in tasks:
                 task.cancel()

@@ -24,7 +24,7 @@ from research.experiment import EvaluationConfig
 from research.ocean.baselines import policies
 from research.ocean.environment import definition, describe
 from research.providers import BudgetExceeded, BudgetProvider, UsageOpenRouter
-from research.rewards import Measurement
+from rsikit import Episode
 from rsikit.evaluation import PolicyError
 from rsikit.policy import InvalidPolicy
 from rsikit.progress import bind_run
@@ -451,16 +451,33 @@ class FixedBaseline(Search):
         return result
 
 
+def _benchmark_episode(score, report, *, error=None):
+    """A meta-optimizer benchmark is one evaluation of a complete search algorithm."""
+    if error is not None:
+        return Episode(error=error)
+    return Episode(
+        observations=[None, None],
+        actions=[None],
+        rewards=[score],
+        terminations=[True],
+        truncations=[False],
+        infos=[{}, {"benchmark": report}],
+    )
+
+
 async def execute_baseline(config, trial, context, slots):
     async def evaluate(candidates):
         async def measure(policy):
             response = await Trial.handle(trial, dict(op="evaluate", value=policy._implementation))
             if "error" in response:
-                return policy.id, Measurement(failure=response["error"])
+                return policy.id, {seed: Episode(error=response["error"]) for seed in trial.seeds}
             if response["score"] > trial.best:
                 trial.best = response["score"]
                 await Trial.handle(trial, dict(op="commit", value=response["id"]))
-            return policy.id, Measurement(dict(zip(trial.seeds, response["scores"])))
+            return policy.id, {
+                seed: _benchmark_episode(score, response)
+                for seed, score in zip(trial.seeds, response["scores"])
+            }
 
         return dict(await asyncio.gather(*(measure(p) for p in candidates)))
 
@@ -821,7 +838,9 @@ async def _campaign(config, path, baselines, *, baseline_root=None):
             )
             scorecards[policy.id] = result
             failure = next((r["error"] for r in result["trials"] if r["error"]), None)
-            return policy.id, Measurement({0: result["selection_score"]}, failure=failure)
+            return policy.id, {
+                0: _benchmark_episode(result["selection_score"], result, error=failure)
+            }
 
         return dict(await asyncio.gather(*(measure(p) for p in candidates)))
 

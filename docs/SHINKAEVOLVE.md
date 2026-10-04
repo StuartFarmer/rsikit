@@ -70,7 +70,7 @@ with make_environment("LunarLander-v3") as env:
 
 Shinka implements [the shared optimizer contract](INNER_LOOP.md#one-optimization-loop).
 `propose()` opens a generation or generates queued repairs. `update()` consumes
-policy-ID–`Measurement` mappings, derives mean fitness, and updates populations
+policy-ID–seed–`Episode` mappings, derives mean fitness, and updates populations
 and model gains once per original attempt. Repairs do not create generations.
 Reflection runs in proposal preparation, never in synchronous update.
 
@@ -78,7 +78,7 @@ The application adapter in `research.shinkaevolve.search` adds history persisten
 and reporting around the same core loop. Failures queue bounded repairs; screening
 rejections skip repair. Provider and infrastructure errors propagate. The scalar
 helper is explicitly named `update_scores`; new code should use `update` with
-neutral measurements. The unified CLI selector is `--optimizer shinka`.
+raw episodes. The unified CLI selector is `--optimizer shinka`.
 
 ## Search behavior
 

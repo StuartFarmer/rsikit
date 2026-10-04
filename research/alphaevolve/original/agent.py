@@ -18,6 +18,7 @@ from rich.table import Column
 from slick import parse, render
 from slick.providers import Provider, ProviderError
 
+from research.rewards import episode_error, episode_scores
 from rsikit.generation import WORKER_LIBRARIES
 from rsikit.optimization import Optimizer, validate_results
 from rsikit.policy import InvalidPolicy, Policy, validate_policy
@@ -529,26 +530,27 @@ class AlphaEvolve(Optimizer):
             record.update(status="discarded", error=reason)
             self._log_candidate(record)
 
-    def _accept_measurements(self, results):
-        scores = {}
-        for policy_id, result in results.items():
-            if not result.scores:
-                raise ValueError("AlphaEvolve reward feedback requires per-seed scores")
-            scores[policy_id] = fmean(result.scores.values())
-        self.update_scores(scores, seed_scores={id: r.scores for id, r in results.items()})
+    def _accept_episodes(self, results):
+        panels = {id: episode_scores(episodes) for id, episodes in results.items()}
+        self.update_scores(
+            {id: fmean(scores.values()) for id, scores in panels.items()}, seed_scores=panels
+        )
 
     def update(self, results) -> None:
         panel = validate_results(results, self._round, seed_panel=self._seed_panel)
-        self._accept_measurements({id: r for id, r in results.items() if r.accepted})
+        self._accept_episodes(
+            {id: r for id, r in results.items() if (r and episode_error(r) is None)}
+        )
         for policy_id, result in results.items():
+            error = episode_error(result)
             self._repairs.pop(policy_id, None)
-            if result.failure is not None:
-                self._repairs[policy_id] = result.failure
+            if error is not None:
+                self._repairs[policy_id] = error
                 for row in self._pending[policy_id]:
-                    row.update(status="execution_failed", error=result.failure)
+                    row.update(status="execution_failed", error=error)
                     self._log_candidate(row)
-            elif not result.accepted:
-                self.discard(self._round[policy_id], result.feedback or "Evaluation rejected")
+            elif not result:
+                self.discard(self._round[policy_id], "Evaluation rejected")
         self._seed_panel = panel
         self._round.clear()
         self._log_leaderboard()

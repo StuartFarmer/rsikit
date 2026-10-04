@@ -1,5 +1,9 @@
 # Unified optimizer contract
 
+> The later episode-feedback revision replaces `Measurement` with seed-keyed
+> `Episode` objects carrying candidate errors. See [the current contract](../../INNER_LOOP.md#one-optimization-loop).
+
+
 Status: implemented architecture. See the linked implementation plan and branch history for validation.
 
 ## Goal

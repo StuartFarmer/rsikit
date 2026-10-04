@@ -246,7 +246,7 @@ async def open_evaluator(name, *, options, evaluation, run):
         import asyncio
 
         from research.experiment import record_execution
-        from research.rewards import Measurement
+        from research.ocean.evaluator import episode_panel
 
         async def evaluate(policies, seeds):
             async def measure(policy):
@@ -255,11 +255,11 @@ async def open_evaluator(name, *, options, evaluation, run):
                 job_id = uuid4().hex
                 event = None
                 try:
-                    event = await evaluator.submit(policy, seeds, job_id=job_id)
-                    return policy.id, Measurement(
-                        {row["seed"]: row["score"] for row in event["results"]},
-                        failure=event["error"],
-                    )
+                    event = await evaluator.submit(policy, seeds, job_id=job_id, record=True)
+                    episodes = episode_panel(event, seeds)
+                    for seed, episode in episodes.items():
+                        run.save_episode(policy, seed, episode)
+                    return policy.id, episodes
                 finally:
                     if event is None:
                         event = next((e for e in evaluator.events if e["job_id"] == job_id), None)

@@ -11,7 +11,7 @@ from gymnasium.utils.env_checker import check_env
 from examples.cartpole import Solution as CartPolePolicy
 from examples.circle_packing.initial import Solution as PackingPolicy
 from rsikit.envs import CirclePackingEnv
-from rsikit.evaluation import InfrastructureError, PolicyError
+from rsikit.evaluation import InfrastructureError, _run_episode
 from rsikit.policy import Policy
 from tests.helpers import run_episode
 
@@ -102,8 +102,8 @@ class InnerLoopTests(unittest.IsolatedAsyncioTestCase):
                 return 50
 
         env = CounterEnv()
-        with self.assertRaisesRegex(PolicyError, "outside action_space"):
-            await run_episode(lambda: env, Invalid)
+        episode = await _run_episode(lambda: env, Invalid)
+        self.assertIn("outside action_space", episode.error)
         self.assertEqual(env.steps, 0)
         self.assertTrue(env.closed)
 
@@ -117,8 +117,9 @@ class InnerLoopTests(unittest.IsolatedAsyncioTestCase):
                 raise RuntimeError("cleanup also failed")
 
         with self.assertLogs("rsikit.evaluation", level="ERROR") as logged:
-            with self.assertRaisesRegex(RuntimeError, "^policy failed$"):
-                await self.run_counter(Broken)
+            episode = await _run_episode(CounterEnv, Broken)
+            self.assertIn("policy failed", episode.error)
+            self.assertEqual(episode.rewards, [1.0])
         self.assertIn("cleanup also failed", logged.output[0])
 
         class BrokenEnv(CounterEnv):
@@ -141,9 +142,8 @@ class InnerLoopTests(unittest.IsolatedAsyncioTestCase):
                 raise gym.error.InvalidAction("Action masked in this state")
 
         env = MaskedEnv()
-        with self.assertRaisesRegex(PolicyError, "Action masked") as caught:
-            await run_episode(lambda: env, CounterPolicy)
-        self.assertIsInstance(caught.exception.__cause__, gym.error.InvalidAction)
+        episode = await _run_episode(lambda: env, CounterPolicy)
+        self.assertIn("Action masked", episode.error)
         self.assertTrue(env.closed)
 
         class BrokenEnv(CounterEnv):
