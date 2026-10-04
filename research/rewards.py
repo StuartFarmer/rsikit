@@ -1,31 +1,13 @@
 """Reward-based fitness conventions shared by the control-policy experiments."""
 
 import logging
-import math
 from contextlib import aclosing
-from dataclasses import dataclass, field
 from statistics import fmean
 
+from rsikit.evaluation import Measurement as Measurement
 from rsikit.evaluation import PolicyError
 
 logger = logging.getLogger(__name__)
-
-
-@dataclass(frozen=True)
-class Measurement:
-    scores: dict[int, float] = field(default_factory=dict)
-    feedback: str = ""
-    failure: str | None = None
-    accepted: bool = True
-
-    def __post_init__(self):
-        if any(
-            type(seed) is not int or type(score) not in (int, float) or not math.isfinite(score)
-            for seed, score in self.scores.items()
-        ):
-            raise ValueError("Measurements must contain finite per-seed scores")
-        if self.failure is not None:
-            object.__setattr__(self, "accepted", False)
 
 
 async def measure_rewards(rollouts, policies, seeds=(0,)):

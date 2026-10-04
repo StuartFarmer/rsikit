@@ -1,10 +1,13 @@
 """Evaluate a policy in a Gymnasium environment and collect its episode."""
 
 import logging
+import math
 import sys
 from collections.abc import Callable
 from contextlib import contextmanager
 from copy import deepcopy
+from dataclasses import dataclass, field
+from numbers import Real
 from typing import Any
 
 import gymnasium as gym
@@ -12,6 +15,43 @@ import numpy as np
 
 from .episode import Episode
 from .policy import Policy
+
+
+@dataclass(frozen=True)
+class Measurement:
+    """Measured evidence; optimizers own its interpretation and selection."""
+
+    scores: dict[int, float] = field(default_factory=dict)
+    feedback: str = ""
+    failure: str | None = None
+    accepted: bool = True
+    metrics: dict[str, float] = field(default_factory=dict)
+    features: dict[str, float] = field(default_factory=dict)
+
+    def __post_init__(self):
+        for name in ("scores", "metrics", "features"):
+            values = getattr(self, name)
+            if not isinstance(values, dict) or any(
+                (
+                    type(key) is not int
+                    if name == "scores"
+                    else not isinstance(key, str) or not key.strip()
+                )
+                or isinstance(value, bool)
+                or not isinstance(value, Real)
+                or not math.isfinite(value)
+                for key, value in values.items()
+            ):
+                raise ValueError(f"Invalid {name}: expected named finite numeric measurements")
+            object.__setattr__(self, name, dict(values))
+        if not isinstance(self.feedback, str) or type(self.accepted) is not bool:
+            raise ValueError("Measurement feedback must be text and accepted must be boolean")
+        if self.failure is not None:
+            if not isinstance(self.failure, str) or not self.failure.strip():
+                raise ValueError("Measurement failure must be nonempty text")
+            object.__setattr__(self, "accepted", False)
+        if self.accepted and not (self.scores or self.metrics):
+            raise ValueError("Accepted measurements require scores or metrics")
 
 
 class InfrastructureError(RuntimeError):
