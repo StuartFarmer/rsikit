@@ -61,7 +61,7 @@ batch score tables, and a final family status table. The same log messages, incl
 RSIKit's per-seed results, are retained in `run.log`.
 The completed model-call counter advances during planning; the executable attempt
 counter starts when implementations are reserved. Generation totals accumulate
-across overlapping batches, and both generation and evaluation bars remain visible.
+across family expansions, and both generation and evaluation bars remain visible.
 Logs identify the family and
 partition being sampled, repaired or elected, even when families overlap.
 
@@ -186,7 +186,8 @@ from pathlib import Path
 from slick import prompts
 from research import lineagesearch
 from research.lineagesearch import Config, LineageSearch
-from research.rewards import Measurement, measure_rewards
+from rsikit import Measurement, search
+from research.rewards import measure_rewards
 from research.rollouts import Rollouts
 
 prompts.TEMPLATE_ROOT = Path(lineagesearch.__file__).parent / "prompts"
@@ -204,13 +205,12 @@ agent = LineageSearch(
     task="Maximize cumulative episode reward.",
     context=environment.instructions,
     provider=provider,
-    evaluate=evaluate,
     config=Config(max_attempts=500, min_delta=1.0),
     seed=0,
     on_checkpoint=lambda current: run.save(*current.records()),
 )
-study = await agent.run()
-best_policy = agent.best  # None when nothing could be measured.
+best_policy = await search(agent, evaluate)  # None when nothing could be measured.
+study = agent.study
 ```
 
 Use one agent per study. The evaluator returns exactly the requested policy IDs.
@@ -263,3 +263,15 @@ early leader, then verifies completion at stagnation. It checks control flow, no
 empirical search superiority. To measure value, compare against flat sampling and
 the existing optimizers on the same tasks, evaluation panels, proposal limits,
 model-call/token budgets, and multiple search seeds. Keep final test cases separate.
+
+Lineage implements [the common optimizer contract](INNER_LOOP.md#one-optimization-loop).
+A round preserves the discovery → founder planning → full exploration sweep →
+global cull → individual bonus expansion sequence. Global culling waits for the
+whole sweep and its bounded repairs. `update()` retains per-seed evidence for
+paired uncertainty comparisons and performs no model calls. The next `propose()`
+plans or repairs; the study's attempt and patience rules determine completion.
+Within-stage generation remains concurrent; cross-stage overlap is removed.
+
+The unified CLI selector is `--optimizer lineage`. The legacy constructor evaluator
+and `run()` wrapper still work and return `Study`, through the same core runner.
+Checkpoint records support inspection; resume is not added for LineageSearch.

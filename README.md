@@ -22,7 +22,8 @@ This is an experimental release; APIs may change.
 - `rsikit.policy.validate_policy`: explicitly checks generated source without executing it.
 - `Evaluator`: rolls out existing environment and policy instances.
 - `Episode`: records observations, actions, rewards, flags, infos, and artifacts.
-- `Optimizer`: the `propose(n)` / `update(policy_episode_pairs)` protocol, implemented by all three AlphaEvolve variants.
+- `Optimizer`: the `propose()` / `update(measurements)` protocol, with `done` and `best`, implemented by all six optimizers.
+- `Measurement` and `search`: neutral per-seed feedback and one external optimization loop.
 - `Run`: persists one optimizer run: configuration, checkpoints, policies, and episodes.
 - `Executor`: runs fresh local episode processes with bounded concurrency and deadlines.
 - `AlphaEvolve`: evolutionary search using Slick and Gymnasium feedback.
@@ -32,7 +33,7 @@ This is an experimental release; APIs may change.
 The shared library lives in `rsikit/`. The four independent search algorithms
 live under [`research/`](research/README.md) and import shared functionality from
 `rsikit`, never from another algorithm. Run research examples from the repository
-root; the library wheel includes only `rsikit`.
+root; the wheel includes both `rsikit` and `research`, including the unified CLI.
 
 ```python
 from pathlib import Path
@@ -195,6 +196,19 @@ Add `--video` (the worker image includes rendering dependencies):
 ./scripts/run examples.inner_loop --video
 ```
 
+## Shared optimization API
+
+Construct any built-in optimizer, then use `await search(optimizer, evaluate)`.
+The evaluator returns policy-ID–`Measurement` mappings with per-seed scores,
+optional measured metrics/features, and explicit failure or screening status.
+The optimizer owns proposal sizes, repairs, selection, and completion; the
+external runner owns the loop. See [the common contract](docs/INNER_LOOP.md#one-optimization-loop).
+
+The unified CLI selects `--optimizer alphaevolve` (paper by default, with
+`--variant original|improved|paper`), `shinka`, `elite`, or `lineage`. All share
+environment evaluation, budget accounting, and held-out winner selection.
+See [CLI options](docs/CLI.md).
+
 ## AlphaEvolve
 
 See the [AlphaEvolve guide](docs/ALPHAEVOLVE.md) for the Python API, search controls,
@@ -206,20 +220,21 @@ and structured generation contracts. Run the CartPole example with an API model:
 ```
 
 The launcher builds the application image automatically. The default `paper`
-variant uses `openai/gpt-oss-120b:nitro` and overlaps generation with evaluation:
+variant uses `openai/gpt-oss-120b:nitro`. All variants use complete proposal rounds:
 
 ```python
-from research.alphaevolve.paper import search
+from rsikit import Measurement, search
 
-# evaluate_batch returns policy.id -> EvaluationResult with metrics and descriptors.
-await search(generator, evaluate_batch, proposals=250, evaluation_batch_size=10)
+# Configure proposals=250 and batch_size=10 on the optimizer.
+# evaluate_batch returns {policy.id: Measurement(scores=per_seed_scores)}.
+best = await search(generator, evaluate_batch)
 ```
 
 Run saves policies, scores, and artifacts during evaluation, and exports Python
 automatically. The optimizer saves its population in `population.sqlite`, with
 metric-specific elites in descriptor bins on each island. Lower primary-score
 candidates remain available when they win another metric or niche. Ten limits the
-evaluation batch size; the retained population is separate. Rich progress shows each policy's
+proposal round size; the retained population is separate. Rich progress shows each policy's
 name and description as it is generated, then scores as evaluations finish.
 A score table follows each evaluation batch; `run.log` keeps messages and error details.
 Self-healing allows two model repairs per policy for malformed generation or episode
@@ -242,7 +257,8 @@ Continue a `paper` run with its saved population and settings:
 ```
 
 This adds 25 batches using the saved batch size. Logs/history stay in the same
-directory. Interrupted proposals are not replayed; older baseline runs have no
+directory. Pending evaluation and repair rounds are restored; interrupted remote
+model calls cannot be replayed. Older baseline runs have no
 optimizer checkpoint. See [resume details](docs/ALPHAEVOLVE.md#resume-a-paper-run).
 See [the comparison setup](docs/ALPHAEVOLVE.md#comparing-the-variants).
 The CLI also saves per-proposal outcomes, ancestry, repair versions, and per-generation
@@ -305,7 +321,7 @@ checks, the Python API, and analysis queries.
 Keep a leaderboard of 10 elites and evaluate 50 new organisms per generation.
 Candidates are new ideas, focused edits of an elite, or remixes combining multiple
 elites. Only measured scores decide promotion; the top 10 from old elites plus
-newcomers survive. Generation and Docker evaluation overlap, with bounded repair
+newcomers survive. Generation and evaluation run in separate concurrent stages, with bounded repair
 and a Rich leaderboard.
 
 ```sh
@@ -357,7 +373,7 @@ The EliteTable manuscripts, experiments, results, and poker work now live in the
 standalone sibling repository [`elitelist_papers`](../elitelist_papers/README.md).
 
 Research algorithms, examples, and tests are included in the source distribution
-and excluded from the library wheel. The core supplies policy generation, explicit
+and included alongside `rsikit` in the wheel. The core supplies policy generation, explicit
 source validation, execution, environments, run storage, and progress display.
 Each optimizer owns its mutation contracts and source-editing rules.
 

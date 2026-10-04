@@ -142,9 +142,12 @@ class AlphaEvolve(Optimizer):
 
     def _log_candidate(self, row, *, status=None, restored=False):
         policy = row.get("policy")
-        state = status or {"repaired": "generated", "rejected": "failed", "error": "failed"}.get(
-            row["status"], row["status"]
-        )
+        state = status or {
+            "repaired": "generated",
+            "rejected": "failed",
+            "error": "failed",
+            "execution_failed": "failed",
+        }.get(row["status"], row["status"])
         logger.info(
             "%s: %s — %s",
             policy.name if policy else f"Attempt {row['id']}",
@@ -458,6 +461,7 @@ class AlphaEvolve(Optimizer):
                     self._round = {p.id: p for p in policies}
                     self.evaluation_started(self._round.values())
                     return list(self._round.values())
+                logger.info("No surviving policies in proposal round")
         finally:
             self._proposing = False
 

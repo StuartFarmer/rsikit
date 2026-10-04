@@ -7,8 +7,9 @@ For generated policies and durable batch evaluations, see [Run](RUNS.md).
 
 `rsikit.evaluation.Evaluator` collects the rollout and returns an
 `rsikit.episode.Episode`. Both are also exported directly from `rsikit`.
-Fitness and screening belong to the research optimizers. AlphaEvolve owns its
-`EvaluationResult`; core execution returns raw episodes.
+Episode execution returns raw trajectories. Search evaluators report neutral
+`Measurement` values; optimizers interpret them. AlphaEvolve constructs its own
+`EvaluationResult` inside `update()`.
 
 ```python
 from copy import deepcopy
@@ -151,3 +152,101 @@ failures without replacing the original exception. Child execution failures rais
 Termination does not imply success: rewards and task-specific info define that.
 Search and cross-episode aggregation remain outside the evaluator. `Run` persists
 supplied scores, checkpoints, and raw episodes through `save_episode`/`load_episode`.
+
+## One optimization loop
+
+All three AlphaEvolve variants, ShinkaEvolve, EliteSearch, and LineageSearch
+implement the structural `rsikit.Optimizer` protocol:
+
+```python
+from collections.abc import Mapping
+from rsikit import Measurement, Policy
+
+
+async def propose() -> list[type[Policy]]: ...
+def update(results: Mapping[str, Measurement]) -> None: ...
+
+
+# Read-only properties: done: bool; best: type[Policy] | None
+```
+
+Configure an optimizer using its algorithm's `Config`, then pass the same evaluator
+function and runner to any implementation:
+
+```python
+from rsikit import Measurement, search
+from research.rewards import measure_rewards
+
+
+# rollouts is a caller-owned Rollouts(environment, executor, run).
+async def evaluate(policies):
+    return await measure_rewards(rollouts, policies, seeds=(0, 1, 2))
+
+
+best = await search(optimizer, evaluate)
+```
+
+An evaluator object's bound method works too: `await search(optimizer, evaluator.evaluate)`.
+No evaluator superclass is required. `search` returns the optimizer's best policy
+definition, or `None`; histories and domain records remain on the optimizer and Run.
+The caller owns environment, provider, evaluator, and database cleanup.
+
+`Measurement({0: 0, 1: 10})` retains the individual seed scores. It is different
+from `Measurement({0: 5, 1: 5})`: both means are five, but their variability differs.
+Scores must be finite numbers, with integer seed keys. Use one fixed search panel;
+keep validation and test panels out of optimizer feedback. All objectives maximize.
+Named `metrics` and `features` carry independently measured evidence; their
+aggregation and interpretation belong to the optimizer. Accepted feedback needs
+scores or metrics, plus the evidence required by the chosen algorithm.
+
+Return exactly one measurement per proposed policy ID, including failures:
+
+```python
+results = {
+    good.id: Measurement({0: 3, 1: 7}, feedback="Completed both episodes"),
+    broken.id: Measurement(failure="Invalid action"),
+    screened.id: Measurement(accepted=False, feedback="Below screening threshold"),
+}
+optimizer.update(results)
+```
+
+A failure queues bounded repair; a screening rejection does not. The next
+`propose()` generates replacements only for failed candidates. Repairs retain
+original attempt identities and do not consume a new population generation.
+Duplicate internal attempts may share a measurement, but returned proposal IDs
+are unique. Missing, extra, repeated, or incompatible feedback raises before
+selection changes. Calling `propose()` while feedback is outstanding raises.
+
+The optimizer chooses round sizes and stopping limits. A round can be a batch,
+a generation, a family sweep, or queued repairs. `update()` is synchronous and
+performs no evaluation or model calls. An empty proposal list means completion;
+`search` raises if an optimizer returns an empty list while `done` is false.
+For manual orchestration, the same contract is:
+
+```python
+while not optimizer.done:
+    policies = await optimizer.propose()
+    if policies:
+        optimizer.update(await evaluate(policies))
+```
+
+The shared runner also validates batches and invokes optional `on_checkpoint`
+after proposals, after updates, and on exceptional exit. Algorithms keep any
+additional checkpoints needed during generation. Cancellation, infrastructure
+errors, and provider budget exhaustion propagate; they are interrupted outcomes.
+
+### Scheduling and migration
+
+New search manifests record `optimization_schedule: round-v1`. Generation
+finishes before evaluation, and evaluation finishes before update. Model calls
+within proposal generation and episodes within evaluation remain concurrent.
+This replaces the previous paper AlphaEvolve streaming pipeline and EliteSearch
+cross-stage overlap. It can change throughput and search trajectories; there is
+no claim of benchmark equivalence.
+
+Replace `propose(n)` with a configured batch size and `propose()`. Replace
+policy–Episode pairs or scalar-score mappings with policy-ID–`Measurement`
+mappings. `research.rewards.Measurement` re-exports the same core class.
+EliteSearch/LineageSearch `run()` and historical application entry points remain
+thin compatibility wrappers over `rsikit.search`; they retain their legacy
+return shapes. No `fit()` method or alternate optimization loop is needed.

@@ -764,7 +764,7 @@ class RunLoggingTests(unittest.IsolatedAsyncioTestCase):
                 if cls is AlphaEvolve:
                     agent.update_scores({policies[0].id: 1})
                 else:
-                    agent.update({policies[0].id: 1})
+                    agent.update_scores({policies[0].id: 1})
                 policies = await agent.generate(1)
                 agent.evaluation_started(policies)
                 display = _current_run.get()["display"]
@@ -798,13 +798,12 @@ class RunLoggingTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_native_paper_resume_replays_only_known_completions(self):
         from research.alphaevolve import paper
-        from research.alphaevolve.paper.evaluation import EvaluationResult
-        from rsikit import Run
+        from rsikit import Measurement, Run
         from rsikit.progress import _current_run
         from tests.test_elitesearch import program
 
         async def evaluate(policies):
-            return {p.id: EvaluationResult({"reward": 1}) for p in policies}
+            return {p.id: Measurement({0: 1}) for p in policies}
 
         with (
             tempfile.TemporaryDirectory() as directory,

@@ -44,9 +44,9 @@ from slick.providers import OpenRouterAPI
 from research import shinkaevolve
 from research.shinkaevolve import Config, ShinkaEvolve
 from rsikit.envs.tasks import make_environment
-from rsikit import Executor, Run
+from rsikit import Executor, Run, search
 from research.rollouts import Rollouts
-from research.rewards import mean_rewards
+from research.rewards import measure_rewards
 
 # Configure Slick once at application startup.
 prompts.TEMPLATE_ROOT = Path(shinkaevolve.__file__).parent / "prompts"
@@ -58,23 +58,27 @@ with make_environment("LunarLander-v3") as env:
         task="Maximize cumulative episode reward.",
         context=env.instructions,
         provider=provider,
-        config=Config(islands=2),
+        config=Config(islands=2, generations=10, batch_size=25),
     )
     async with Executor() as executor, Run.create(name="shinka-lander") as run:
         rollouts = Rollouts(env, executor, run)
-        for _ in range(10):
-            policies = await generator.generate(n=25, concurrency=4)
-            scores = await mean_rewards(rollouts, policies, seeds=[0, 1, 2])
-            generator.update(scores)
-            run.save(*generator.records(seeds=[0, 1, 2], complete=True))
+        best = await search(
+            generator,
+            lambda policies: measure_rewards(rollouts, policies, seeds=(0, 1, 2)),
+        )
 ```
 
-This shows the success path. `examples.shinkaevolve.run_search` adds runtime
-repair, saving incomplete batches, logging, and progress. It calls
-`generator.evaluation_failed(failures)` and `await generator.repair(policy,
-diagnostic)` for policy errors. Repair returns a replacement Policy or
-`None` when that candidate is discarded. Provider and infrastructure errors
-remain run errors rather than being treated as low fitness.
+Shinka implements [the shared optimizer contract](INNER_LOOP.md#one-optimization-loop).
+`propose()` opens a generation or generates queued repairs. `update()` consumes
+policy-ID–`Measurement` mappings, derives mean fitness, and updates populations
+and model gains once per original attempt. Repairs do not create generations.
+Reflection runs in proposal preparation, never in synchronous update.
+
+The application adapter in `research.shinkaevolve.search` adds history persistence
+and reporting around the same core loop. Failures queue bounded repairs; screening
+rejections skip repair. Provider and infrastructure errors propagate. The scalar
+helper is explicitly named `update_scores`; new code should use `update` with
+neutral measurements. The unified CLI selector is `--optimizer shinka`.
 
 ## Search behavior
 

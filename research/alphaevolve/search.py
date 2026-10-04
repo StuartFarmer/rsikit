@@ -207,6 +207,8 @@ async def run_search(
                     )
                 )
                 if complete:
+                    if agent.best is not None:
+                        logger.info("Best so far: %s", agent.best.name)
                     saved_batches.add(batch)
                     logger.info(
                         "Finished generation",

@@ -1,6 +1,6 @@
 # Unified Optimizer Contract Implementation Plan
 
-> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [x]`) syntax for tracking.
 
 **Goal:** Make every existing search algorithm a compliant example of the same externally managed propose → evaluate → update interface.
 
@@ -19,7 +19,7 @@
 - The new schedule is complete-round `round-v1`; generation/evaluation overlap is deliberately deferred. Do not claim identical trajectories or performance.
 - No new `fit()` loop, universal AlphaEvolve result type, stateful optimizer base class, or algorithm-specific branches in the shared runner.
 - Use `rtk` for shell commands as required by the repository's supplied instructions.
-- This is a plan-only change. Implementation, tests, and commits below are future work; do not mark them completed without execution.
+- Implemented on `unify-envs`; the full Docker suite passes. Repository formatting retains two pre-existing historical-plan code-fence failures; changed files pass.
 
 ## Review Focus
 
@@ -49,11 +49,11 @@ Implement Task 1 first, then AlphaEvolve, ShinkaEvolve, EliteSearch, and Lineage
 
 **Interfaces:** publish the exact `Measurement`, `Optimizer`, and `search` signatures in the spec. `research.rewards.Measurement is rsikit.Measurement` must be true. `search` takes a bound evaluator function, not an evaluator subclass.
 
-- [ ] Add `test_measurement_preserves_evidence_and_rejects_invalid_values`: `{0: 0, 1: 10}` remains intact; named metrics/features survive; positional `Measurement({0: 3}, "ok")` still works; failure forces rejection; reject NaN/Inf, boolean scores, noninteger seed keys, invalid field types, and empty accepted evidence.
-- [ ] Add runner tests with a tiny two-round fake: calls are exactly propose/evaluate/update/propose/evaluate/update; returned best is the optimizer's best; reject missing/extra IDs, wrong result types, and duplicate proposed IDs before update; `[]` with `done=False` raises instead of looping; already-done returns best without evaluator calls. Check exceptions/cancellation checkpoint and propagate, including preserving a primary error when checkpointing fails.
-- [ ] Run `rtk proxy .venv/bin/python -m unittest tests.test_search tests.test_optimizer_contract tests.test_evaluation -q`; confirm the new cases fail for the absent API, then implement the minimal definitions and sequential runner. Keep existing episode-contract tests until their migration in Task 2.
-- [ ] Run the same command plus `tests.test_package_boundaries`; require all applicable new tests to pass and identify any old API tests awaiting the explicit migration. No algorithm imports or type branches in core.
-- [ ] Commit only this task's files after its checks pass. Commit message: `feat: define round-based optimizer and measurement contract`.
+- [x] Add `test_measurement_preserves_evidence_and_rejects_invalid_values`: `{0: 0, 1: 10}` remains intact; named metrics/features survive; positional `Measurement({0: 3}, "ok")` still works; failure forces rejection; reject NaN/Inf, boolean scores, noninteger seed keys, invalid field types, and empty accepted evidence.
+- [x] Add runner tests with a tiny two-round fake: calls are exactly propose/evaluate/update/propose/evaluate/update; returned best is the optimizer's best; reject missing/extra IDs, wrong result types, and duplicate proposed IDs before update; `[]` with `done=False` raises instead of looping; already-done returns best without evaluator calls. Check exceptions/cancellation checkpoint and propagate, including preserving a primary error when checkpointing fails.
+- [x] Run `rtk proxy .venv/bin/python -m unittest tests.test_search tests.test_optimizer_contract tests.test_evaluation -q`; confirm the new cases fail for the absent API, then implement the minimal definitions and sequential runner. Keep existing episode-contract tests until their migration in Task 2.
+- [x] Run the same command plus `tests.test_package_boundaries`; require all applicable new tests to pass and identify any old API tests awaiting the explicit migration. No algorithm imports or type branches in core.
+- [x] Commit only this task's files after its checks pass. Commit message: `feat: define round-based optimizer and measurement contract`.
 
 ## Task 2: Make all AlphaEvolve variants compliant
 
@@ -63,11 +63,11 @@ Implement Task 1 first, then AlphaEvolve, ShinkaEvolve, EliteSearch, and Lineage
 
 **Evaluation boundary:** keep `EvaluationResult` private to the algorithm package. Change `assess(...)` and `evaluate_cascade(...)` to return neutral `Measurement`; change `EvaluationStage.evaluate` and grader types accordingly. Preserve cheap-stage pruning and latest-measurement precedence. `AlphaEvolve.update()` constructs the internal results and passes them to existing archive operations.
 
-- [ ] Extend the common contract test to original/improved/paper. One round with seed scores `{0: 3, 1: 7}` yields mean 5; paper derives worst 3 and stability -2. `{0: 0, 1: 10}` and `{0: 5, 1: 5}` remain distinguishable. Explicit custom metrics/features override derived defaults and missing configured descriptors fail before archive changes. Duplicate attempts share one returned policy ID and both settle on one update.
-- [ ] Add repair/round cases: next proposals queue only failed candidates; a repair ID change preserves the original attempt; original proposal limits exclude repairs; repeated updates and propose-before-update raise; founders are measured before descendants; all-invalid generation eventually reaches its finite proposal limit. Preserve original versus improved founder tests.
-- [ ] Run `rtk proxy .venv/bin/python -m unittest tests.test_optimizer_contract tests.test_alphaevolve tests.test_variants tests.test_paper_agent tests.test_paper_pipeline tests.test_paper_feedback -q` to see the expected contract failures. Implement transitions, neutral screening/assessment, and private result construction. Persist original-attempt count, pending phase, and repair queues alongside existing paper checkpoint metadata, with absent-field handling for legacy completed checkpoints.
-- [ ] Replace paper pipeline orchestration with a thin call to core `search`; migrate overlap-specific tests to explicitly assert founder ordering, stage concurrency limits, and complete-round barriers. Keep screening tests asserting that expensive evaluation is never called after rejection. Repeat the command; all tests must pass. Do not describe the new schedule as the published asynchronous pipeline.
-- [ ] Commit after passing checks: `refactor: drive AlphaEvolve through the shared optimizer contract`.
+- [x] Extend the common contract test to original/improved/paper. One round with seed scores `{0: 3, 1: 7}` yields mean 5; paper derives worst 3 and stability -2. `{0: 0, 1: 10}` and `{0: 5, 1: 5}` remain distinguishable. Explicit custom metrics/features override derived defaults and missing configured descriptors fail before archive changes. Duplicate attempts share one returned policy ID and both settle on one update.
+- [x] Add repair/round cases: next proposals queue only failed candidates; a repair ID change preserves the original attempt; original proposal limits exclude repairs; repeated updates and propose-before-update raise; founders are measured before descendants; all-invalid generation eventually reaches its finite proposal limit. Preserve original versus improved founder tests.
+- [x] Run `rtk proxy .venv/bin/python -m unittest tests.test_optimizer_contract tests.test_alphaevolve tests.test_variants tests.test_paper_agent tests.test_paper_pipeline tests.test_paper_feedback -q` to see the expected contract failures. Implement transitions, neutral screening/assessment, and private result construction. Persist original-attempt count, pending phase, and repair queues alongside existing paper checkpoint metadata, with absent-field handling for legacy completed checkpoints.
+- [x] Replace paper pipeline orchestration with a thin call to core `search`; migrate overlap-specific tests to explicitly assert founder ordering, stage concurrency limits, and complete-round barriers. Keep screening tests asserting that expensive evaluation is never called after rejection. Repeat the command; all tests must pass. Do not describe the new schedule as the published asynchronous pipeline.
+- [x] Commit after passing checks: `refactor: drive AlphaEvolve through the shared optimizer contract`.
 
 ## Task 3: Make ShinkaEvolve compliant
 
@@ -75,11 +75,11 @@ Implement Task 1 first, then AlphaEvolve, ShinkaEvolve, EliteSearch, and Lineage
 
 **Interfaces:** add `batch_size: int = 25`, `generations: int = 10`, `generation_concurrency: int = 4` to `Config`; validate positive batch/concurrency and nonnegative generation count. Existing example/wrapper arguments explicitly override these defaults. `propose()` opens a generation or performs queued repairs. `update()` consumes neutral measurements and derives mean fitness before existing population/model-gain operations. Rename the old scalar updater to the explicit `update_scores` helper if still needed internally.
 
-- [ ] Add Shinka to the shared contract tests. Check model gains and migration counters update once per original attempt, repairs do not create another generation, duplicate feedback cannot double-count, and seed scores produce the same means used by current selection tests.
-- [ ] Add `test_reflection_runs_before_next_proposal_without_evaluation_in_optimizer`: preserve existing reflection/novelty provider calls in proposal preparation, and use a fail-on-call evaluator sentinel to prove the optimizer never invokes evaluation itself.
-- [ ] Run `rtk proxy .venv/bin/python -m unittest tests.test_shinkaevolve tests.test_optimizer_contract -q` for the expected new failures; implement the phase transitions and turn `run_search(...)` into configuration/persistence plus core `search` delegation.
-- [ ] Repeat the command; require existing patch, novelty, allocation, migration, provider-error, and generation-record tests to pass. Do not add unsupported resume promises.
-- [ ] Commit after passing checks: `refactor: expose ShinkaEvolve proposal and feedback rounds`.
+- [x] Add Shinka to the shared contract tests. Check model gains and migration counters update once per original attempt, repairs do not create another generation, duplicate feedback cannot double-count, and seed scores produce the same means used by current selection tests.
+- [x] Add `test_reflection_runs_before_next_proposal_without_evaluation_in_optimizer`: preserve existing reflection/novelty provider calls in proposal preparation, and use a fail-on-call evaluator sentinel to prove the optimizer never invokes evaluation itself.
+- [x] Run `rtk proxy .venv/bin/python -m unittest tests.test_shinkaevolve tests.test_optimizer_contract -q` for the expected new failures; implement the phase transitions and turn `run_search(...)` into configuration/persistence plus core `search` delegation.
+- [x] Repeat the command; require existing patch, novelty, allocation, migration, provider-error, and generation-record tests to pass. Do not add unsupported resume promises.
+- [x] Commit after passing checks: `refactor: expose ShinkaEvolve proposal and feedback rounds`.
 
 ## Task 4: Extract EliteSearch's proposal and feedback phases
 
@@ -87,11 +87,11 @@ Implement Task 1 first, then AlphaEvolve, ShinkaEvolve, EliteSearch, and Lineage
 
 **Interfaces:** `EliteSearch(task, provider, evaluate=None, *, ...)` temporarily accepts its legacy evaluator only for a thin `run()` compatibility wrapper. Canonical `propose()`/`update()` never access it. The wrapper delegates to core `search` and returns `self.elites`, preserving old callers. New integrations omit `evaluate`. Existing `Config.population_size`, `elite_size`, and `generations` own round size/stopping.
 
-- [ ] Add Elite to common conformance. Pin two generations with population 5/elites 2: all second-generation parents come from the first-generation snapshot; promotion occurs once only after terminal repair outcomes; existing operator counts and tie rules remain unchanged.
-- [ ] Add failure/restore cases: one success and one failure cause only the failure's replacement to be proposed; a completed generation is not promoted again on restore; an incomplete round restores its outstanding candidates and repair allowance from records. Preserve the existing model-call-ledger assertions and moved-run-directory test.
-- [ ] Run `rtk proxy .venv/bin/python -m unittest tests.test_elitesearch tests.test_optimizer_contract tests.test_meta_resume -q` for the expected failures. Split `_experiment`/`_measure`/`run` into proposal generation, validated update, and phase finalization, reusing `_population`, `_rank`, `_promote`, and repair machinery. Keep candidate-level paid-call checkpoints.
-- [ ] Repeat the command plus `tests.test_experiment`; keep completed candidate records byte-equivalent where existing tests require it. Update schedule tests to assert within-stage concurrency and the deliberate round barrier. Verify budget exhaustion preserves already returned evidence and does not mark unresolved rounds complete.
-- [ ] Commit after passing checks: `refactor: run EliteSearch through shared proposal rounds`.
+- [x] Add Elite to common conformance. Pin two generations with population 5/elites 2: all second-generation parents come from the first-generation snapshot; promotion occurs once only after terminal repair outcomes; existing operator counts and tie rules remain unchanged.
+- [x] Add failure/restore cases: one success and one failure cause only the failure's replacement to be proposed; a completed generation is not promoted again on restore; an incomplete round restores its outstanding candidates and repair allowance from records. Preserve the existing model-call-ledger assertions and moved-run-directory test.
+- [x] Run `rtk proxy .venv/bin/python -m unittest tests.test_elitesearch tests.test_optimizer_contract tests.test_meta_resume -q` for the expected failures. Split `_experiment`/`_measure`/`run` into proposal generation, validated update, and phase finalization, reusing `_population`, `_rank`, `_promote`, and repair machinery. Keep candidate-level paid-call checkpoints.
+- [x] Repeat the command plus `tests.test_experiment`; keep completed candidate records byte-equivalent where existing tests require it. Update schedule tests to assert within-stage concurrency and the deliberate round barrier. Verify budget exhaustion preserves already returned evidence and does not mark unresolved rounds complete.
+- [x] Commit after passing checks: `refactor: run EliteSearch through shared proposal rounds`.
 
 ## Task 5: Extract LineageSearch's proposal and feedback phases
 
@@ -99,11 +99,11 @@ Implement Task 1 first, then AlphaEvolve, ShinkaEvolve, EliteSearch, and Lineage
 
 **Interfaces:** match Elite's optional legacy evaluator/delegating `run()` pattern, preserving `Study` as the wrapper's return value. `done` reflects terminal study state. Existing `Config` remains the source of attempt limits, family counts, expansion sizes, and patience. Use a small private phase value plus existing family/trial records; no general state-machine framework.
 
-- [ ] Add Lineage to conformance and pin the sequence: discovery → founder planning for all families → complete exploration sweep → global cull → individual bonus expansions. Check global culling waits for all sweep expansions and their repairs, and later parents are surviving frontier members only.
-- [ ] Retain paired-seed uncertainty tests and add mismatched-seed rejection before mutation. Pin a truncated final expansion's existing `full_batch=False` patience behavior; generation/planning failures must retain existing attempt and patience accounting. All families retired or the attempt cap reached terminates without empty-round spinning.
-- [ ] Run `rtk proxy .venv/bin/python -m unittest tests.test_lineagesearch tests.test_optimizer_contract -q` for expected failures. Separate `_expand` planning/generation from measured family updates; retain selected parents, expansion sizes, and phase boundaries until update. Queue repairs in proposal preparation; no evaluator invocation or hidden model calls in update.
-- [ ] Repeat the command; existing decomposition, refinement/pivot, culling, hypothesis, repair-budget, and best-policy assertions must pass. Keep `Study` and trial evidence available to checkpoint adapters without adding universal record methods to the core protocol.
-- [ ] Commit after passing checks: `refactor: separate LineageSearch planning from evaluation`.
+- [x] Add Lineage to conformance and pin the sequence: discovery → founder planning for all families → complete exploration sweep → global cull → individual bonus expansions. Check global culling waits for all sweep expansions and their repairs, and later parents are surviving frontier members only.
+- [x] Retain paired-seed uncertainty tests and add mismatched-seed rejection before mutation. Pin a truncated final expansion's existing `full_batch=False` patience behavior; generation/planning failures must retain existing attempt and patience accounting. All families retired or the attempt cap reached terminates without empty-round spinning.
+- [x] Run `rtk proxy .venv/bin/python -m unittest tests.test_lineagesearch tests.test_optimizer_contract -q` for expected failures. Separate `_expand` planning/generation from measured family updates; retain selected parents, expansion sizes, and phase boundaries until update. Queue repairs in proposal preparation; no evaluator invocation or hidden model calls in update.
+- [x] Repeat the command; existing decomposition, refinement/pivot, culling, hypothesis, repair-budget, and best-policy assertions must pass. Keep `Study` and trial evidence available to checkpoint adapters without adding universal record methods to the core protocol.
+- [x] Commit after passing checks: `refactor: separate LineageSearch planning from evaluation`.
 
 ## Task 6: Connect every built-in to the common runner and lifecycle
 
@@ -111,11 +111,11 @@ Implement Task 1 first, then AlphaEvolve, ShinkaEvolve, EliteSearch, and Lineage
 
 **Interfaces:** retain the existing component `Options`, `add_arguments`, and `async optimize(*, task, provider, evaluate, run, options, seed)` contract. Each built-in adapter constructs a compliant optimizer, calls core `search`, and returns unique successful finalists sorted by search fitness. Built-in selectors are `alphaevolve`, `shinka`, `elite`, `lineage`; AlphaEvolve adds `--variant paper|original|improved` with paper default. Use per-algorithm Config-backed options with `extra='forbid'`; expose numerical/boolean/string Config controls, not arbitrary callable hooks. Keep generation concurrency/timeout in the shared generation section, mapped into each optimizer's configuration.
 
-- [ ] Add table-driven CLI/config tests: each selector resolves; variant selection works; invalid settings fail before provider calls; unsupported videos/resume combinations fail explicitly. Search-phase measurements and independent validation/test panels remain the same across selectors.
-- [ ] Add integration tests spying on core `search`: every built-in delegates to it and returns correctly ordered policy finalists. Gymnasium/Ocean adapters return the canonical Measurement identity. Persist `optimization_schedule: round-v1` in new search manifests and preserve that value on resume.
-- [ ] Add recovery tests for both existing supported paths: unified Elite and paper AlphaEvolve. Preserve prior call reservations, source/ancestry, cached successful episodes, partial rounds, and winner selection. Accept tested legacy completed checkpoints; reject incomplete legacy streaming checkpoints before generation rather than guessing. Keep original provenance unchanged on legacy resume and record schedule changes separately in appended run evidence.
-- [ ] Run `rtk proxy .venv/bin/python -m unittest tests.test_cli tests.test_experiment tests.test_ocean_search tests.test_meta_resume tests.test_meta_ocean tests.test_meta_elitetable -q` to expose migration failures; implement small adapters and replace loop bodies in examples. Preserve Elite's generation-video callback and the custom-file optimizer contract. Update dependency-boundary allowlists narrowly for shared orchestration/provider utilities where an adapter actually requires them.
-- [ ] Repeat those checks in the existing Docker environment if optional Ocean/native dependencies are absent locally. Require preserved results/artifacts/usage accounting; keep new Shinka/Lineage resume unsupported. Commit after passing checks: `feat: expose compliant optimizers through unified experiments`.
+- [x] Add table-driven CLI/config tests: each selector resolves; variant selection works; invalid settings fail before provider calls; unsupported videos/resume combinations fail explicitly. Search-phase measurements and independent validation/test panels remain the same across selectors.
+- [x] Add integration tests spying on core `search`: every built-in delegates to it and returns correctly ordered policy finalists. Gymnasium/Ocean adapters return the canonical Measurement identity. Persist `optimization_schedule: round-v1` in new search manifests and preserve that value on resume.
+- [x] Add recovery tests for both existing supported paths: unified Elite and paper AlphaEvolve. Preserve prior call reservations, source/ancestry, cached successful episodes, partial rounds, and winner selection. Accept tested legacy completed checkpoints; reject incomplete legacy streaming checkpoints before generation rather than guessing. Keep original provenance unchanged on legacy resume and record schedule changes separately in appended run evidence.
+- [x] Run `rtk proxy .venv/bin/python -m unittest tests.test_cli tests.test_experiment tests.test_ocean_search tests.test_meta_resume tests.test_meta_ocean tests.test_meta_elitetable -q` to expose migration failures; implement small adapters and replace loop bodies in examples. Preserve Elite's generation-video callback and the custom-file optimizer contract. Update dependency-boundary allowlists narrowly for shared orchestration/provider utilities where an adapter actually requires them.
+- [x] Repeat those checks in the existing Docker environment if optional Ocean/native dependencies are absent locally. Require preserved results/artifacts/usage accounting; keep new Shinka/Lineage resume unsupported. Commit after passing checks: `feat: expose compliant optimizers through unified experiments`.
 
 ## Task 7: Prove interchangeability and finish the migration
 
@@ -123,25 +123,25 @@ Implement Task 1 first, then AlphaEvolve, ShinkaEvolve, EliteSearch, and Lineage
 
 **Interfaces:** demonstrate `from rsikit import Measurement, search` with the same evaluator function and loop for all six implementations. Document optimizer-specific construction separately. The search return value is always the best policy definition or `None`; algorithm history stays on its owning optimizer/Run.
 
-- [ ] Complete a six-implementation conformance matrix using existing scripted providers and real optimizer classes, not method-presence mocks. For each: success, a failed candidate followed by repair/exhaustion, screening rejection, duplicate/unknown feedback, pending-round misuse, and completion. Compare deterministic algorithm invariants, not old asynchronous arrival order.
-- [ ] Run `rtk proxy .venv/bin/python -m unittest tests.test_search tests.test_optimizer_contract tests.test_package_boundaries -q`; require one runner, no algorithm type branching, no cross-algorithm imports, and no core references to AlphaEvolve's EvaluationResult. Adjust stale episode-feedback tests to the explicit new contract rather than weakening assertions.
-- [ ] Rewrite API examples around the common loop. Explain seed-level evidence, algorithm-owned rounds/results, explicit failures, repair rounds, and schedule migration. Correct wheel packaging claims to match `pyproject.toml`. Remove duplicated orchestration after auditing callers with `rtk proxy rg -n 'propose\(|update\(|run_search\(|\.run\(|paper.*search' rsikit research examples tests`; retain only necessary thin wrappers.
-- [ ] Run repository checks: `rtk proxy ./scripts/run unittest discover -s tests -v`, `rtk proxy ./scripts/run ruff check .`, and `rtk proxy ./scripts/run ruff format --check .`. These run offline/scripted tests, not paid experiments. Report environment blockers explicitly; a missing Ocean installation is not a passing full suite.
-- [ ] Commit after passing checks: `docs: document and verify the unified optimization workflow`. Report that within-stage concurrency remains but cross-stage overlap is removed; no throughput claim without a separate measured comparison.
+- [x] Complete a six-implementation conformance matrix using existing scripted providers and real optimizer classes, not method-presence mocks. For each: success, a failed candidate followed by repair/exhaustion, screening rejection, duplicate/unknown feedback, pending-round misuse, and completion. Compare deterministic algorithm invariants, not old asynchronous arrival order.
+- [x] Run `rtk proxy .venv/bin/python -m unittest tests.test_search tests.test_optimizer_contract tests.test_package_boundaries -q`; require one runner, no algorithm type branching, no cross-algorithm imports, and no core references to AlphaEvolve's EvaluationResult. Adjust stale episode-feedback tests to the explicit new contract rather than weakening assertions.
+- [x] Rewrite API examples around the common loop. Explain seed-level evidence, algorithm-owned rounds/results, explicit failures, repair rounds, and schedule migration. Correct wheel packaging claims to match `pyproject.toml`. Remove duplicated orchestration after auditing callers with `rtk proxy rg -n 'propose\(|update\(|run_search\(|\.run\(|paper.*search' rsikit research examples tests`; retain only necessary thin wrappers.
+- [x] Run repository checks: `rtk proxy ./scripts/run unittest discover -s tests -v`, `rtk proxy ./scripts/run ruff check .`, and `rtk proxy ./scripts/run ruff format --check .`. These run offline/scripted tests, not paid experiments. Report environment blockers explicitly; a missing Ocean installation is not a passing full suite.
+- [x] Commit after passing checks: `docs: document and verify the unified optimization workflow`. Report that within-stage concurrency remains but cross-stage overlap is removed; no throughput claim without a separate measured comparison.
 
 ## Completion checklist
 
-- [ ] All six optimizers use the same core runner and neutral feedback shape.
-- [ ] AlphaEvolve alone constructs and owns its richer EvaluationResult.
-- [ ] Scalar means do not replace required seed evidence or measured descriptors.
-- [ ] No optimizer evaluates policies internally through its canonical proposal/update API.
-- [ ] Repair, culling, promotion, completion, supported recovery, and budget invariants pass.
-- [ ] All built-ins are reachable through the unified CLI; examples no longer implement divergent loops.
-- [ ] The complete-round scheduling change and API migrations are documented.
-- [ ] Full relevant checks pass, with no paid calls or unrelated edits.
+- [x] All six optimizers use the same core runner and neutral feedback shape.
+- [x] AlphaEvolve alone constructs and owns its richer EvaluationResult.
+- [x] Scalar means do not replace required seed evidence or measured descriptors.
+- [x] No optimizer evaluates policies internally through its canonical proposal/update API.
+- [x] Repair, culling, promotion, completion, supported recovery, and budget invariants pass.
+- [x] All built-ins are reachable through the unified CLI; examples no longer implement divergent loops.
+- [x] The complete-round scheduling change and API migrations are documented.
+- [x] Full relevant checks pass, with no paid calls or unrelated edits.
 
 ## Deferred work
 
 Streaming/partial updates, global prompt-root removal, new recovery support for previously non-resumable algorithms, and a `fit()` convenience method are outside this plan. None is required to make the algorithms compliant with the agreed complete-round interface.
 
-Implementation can proceed sequentially in this workspace after review of this plan; no execution-method decision is needed for this plan-only request.
+Implemented sequentially in this workspace. Fresh review and its verified fixes are recorded in the branch history.

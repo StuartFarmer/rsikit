@@ -28,7 +28,8 @@ trajectories: missing episodes are executed again when requested.
 `mean_rewards` explicitly selects cumulative reward as fitness and averages the
 requested seeds. `measure_rewards` returns per-seed `Measurement` objects and
 candidate diagnostics. AlphaEvolve's `research.alphaevolve.paper.evaluation.assess`
-owns its richer `EvaluationResult`, descriptors, and screening thresholds.
+returns neutral `Measurement` values and applies screening thresholds. AlphaEvolve
+constructs its richer `EvaluationResult` and derived descriptors during update.
 Infrastructure errors and cancellation propagate; these are not low fitness.
 
 ## Core execution
@@ -166,7 +167,7 @@ No UI setup is needed in application scripts:
 ```python
 async with Run.create(name="experiment") as run:
     # Construct the environment, executor and optimizer as usual.
-    await optimizer.run()
+    await search(optimizer, evaluate, on_checkpoint=lambda agent: run.save(*agent.records()))
 ```
 
 The optional `total_generations` field on `search_started` supplies the generation budget; the display counts completed batch events. `leaderboard_size` supplies the row capacity (default ten, display capped at ten); EliteSearch reports its configured elite count.
@@ -183,15 +184,31 @@ leaderboard_columns = {
 Their normal domain logs carry structured fields, for example:
 
 ```python
-logger.info("Starting search", extra={"progress": {
-    "kind": "search_started", "optimizer": "MyOptimizer",
-    "total_candidates": 50, "total_generations": 5,
-    "columns": leaderboard_columns, "resumed": False,
-}})
+logger.info(
+    "Starting search",
+    extra={
+        "progress": {
+            "kind": "search_started",
+            "optimizer": "MyOptimizer",
+            "total_candidates": 50,
+            "total_generations": 5,
+            "columns": leaderboard_columns,
+            "resumed": False,
+        }
+    },
+)
 ```
 
 Candidate events use stable attempt IDs and revisions; leaderboard events include already-ranked rows with standard fields and custom `extras` values. The dashboard preserves optimizer ranking and interprets model-provided strings literally. See the [event contract](superpowers/specs/2026-09-28-automatic-progress-dashboard.md#structured-logging-contract) for fields and lifecycle events. No registration, adapter, or renderer change is needed for another optimizer.
 
 Known-size batches finish when all their candidate slots settle, including standalone generate/update loops. Native paper searches resumed from only a population checkpoint recover known accepted completions; unknown historical outcomes stay unresolved. Application searches use their detailed Run history where available.
 
-AlphaEvolve and ShinkaEvolve's application loops live in `research.alphaevolve.search` and `research.shinkaevolve.search`. Their example entry points remain available. Test/application console injection belongs on `Run.create(..., console=...)` or `Run.open(..., console=...)`, not on the search loop.
+AlphaEvolve and ShinkaEvolve's persistence adapters live in `research.alphaevolve.search` and `research.shinkaevolve.search`. They delegate to `rsikit.search`. Their example entry points remain available. Test/application console injection belongs on `Run.create(..., console=...)` or `Run.open(..., console=...)`, not on the search loop.
+
+New unified search manifests record `optimization_schedule: round-v1`. Optimizer
+checkpoints retain complete-round boundaries, pending feedback, and queued repairs
+where recovery is supported. `Run.open` alone does not restore an optimizer.
+Unified Elite and the paper AlphaEvolve example support recovery; historical
+baseline AlphaEvolve, ShinkaEvolve, and LineageSearch do not gain resume support.
+Legacy provenance remains unchanged; schedule transitions are separate appended
+evidence. See [CLI recovery](CLI.md#resume-an-interrupted-search).

@@ -51,6 +51,29 @@ For a single local price CSV, use `--env PriceSeries --env-data-path prices.csv`
 It defaults to the `price` column and one seed. Column names, timestamp ranges,
 fees, and starting cash are configurable; see [PriceSeries](PRICE_SERIES.md).
 
+## Choose an optimizer
+
+| Selector | Main controls |
+| --- | --- |
+| `alphaevolve` | `--variant paper|original|improved` (paper default), `--proposals`, `--proposal-batch-size`, `--islands` |
+| `shinka` | `--generations`, `--proposal-batch-size`, `--islands`, `--archive-size` |
+| `elite` | `--generations`, `--population`, `--elites` |
+| `lineage` | `--max-attempts`, `--families`, `--initial-per-family`, `--proposal-batch-size`, `--patience` |
+
+All four use the same `rsikit.search` runner, neutral `Measurement` feedback,
+search seed panel, budget provider, and validation/test selection. Options belong
+to the selected algorithm; switching selectors with incompatible saved options
+raises during validation. Use that selector's `--help` for the full list.
+`--proposal-batch-size` controls optimizer rounds; `--batch-size` continues to
+control Ocean episode batches. Shared `--generation-concurrency` and
+`--generation-timeout` configure every optimizer. Provider ensembles, embeddings,
+and custom grading remain Python API choices.
+
+New manifests contain `optimization_schedule: round-v1`: complete generation,
+then evaluation, then update, with concurrency within each stage. Repair rounds
+settle before the next generation or family cull. This changes feedback timing
+from historical overlapping implementations.
+
 ## Configuration fields
 
 YAML is the supported config format. See the complete [Ocean](../experiments/ocean-2048.yaml) and [Blackjack](../experiments/blackjack-elite.yaml) files.
@@ -95,7 +118,12 @@ reuse cached episodes, and calls whose responses were lost are sent again.
 Keep the full run directory, including `model_calls.jsonl`: previous calls,
 including failed or interrupted requests, still consume the original budget.
 Configuration and provenance remain unchanged; usage and phase counts accumulate
-across resumptions. A moved run directory is supported if its input paths still exist.
+across resumptions. A moved run directory is supported if its input paths still exist. Completed legacy checkpoints are accepted;
+incomplete legacy streaming checkpoints are rejected before model calls. A legacy
+schedule transition is appended to `schedule_changes.jsonl`, leaving the original
+manifest untouched. Paper AlphaEvolve retains its separate
+`examples.alphaevolve --resume` path. Unified resume for Shinka, Lineage, and
+AlphaEvolve is unsupported; generation videos remain Elite/Blackjack-only.
 
 A connection failure can surface as Slick's `ProviderError` wrapping an SDK
 `APIConnectionError` or an HTTP read error. Connection failures and SDK timeouts
@@ -138,12 +166,15 @@ An optimizer file exports `Options`, `add_arguments`, and `optimize`:
 ```python
 from pydantic import BaseModel, ConfigDict, Field
 
+
 class Options(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True)
     proposals: int = Field(default=10, ge=1)
 
+
 def add_arguments(parser):
     parser.add_argument("--proposals", type=int)
+
 
 async def optimize(*, task, provider, evaluate, run, options, seed):
     # Generate Policy definitions using provider.acall, then:
@@ -152,7 +183,7 @@ async def optimize(*, task, provider, evaluate, run, options, seed):
     return []
 ```
 
-The `options` dictionary contains validated public options plus reserved `generation` and `videos` dictionaries. Do not use those names for public optimizer options. Generation settings include concurrency, timeout, and token limits; the custom optimizer owns scheduling/deadlines for its calls. All paid calls must go through the supplied provider for usage logging and any explicitly configured budget limits. Budgets are optional for custom optimizers too. Each measurement is the existing `research.rewards.Measurement`, keyed by policy ID, with per-seed scores and explicit failure status. The runner persists measurements and policy definitions; custom optimizers own their algorithm-specific checkpoints.
+The `options` dictionary contains validated public options plus reserved `generation` and `videos` dictionaries. Do not use those names for public optimizer options. Generation settings include concurrency, timeout, and token limits; the custom optimizer owns scheduling/deadlines for its calls. All paid calls must go through the supplied provider for usage logging and any explicitly configured budget limits. Budgets are optional for custom optimizers too. Each measurement is `rsikit.Measurement` (also re-exported from `research.rewards`), keyed by policy ID, with per-seed scores and explicit failure status. The runner persists measurements and policy definitions; custom optimizers own their algorithm-specific checkpoints.
 
 An environment file exports `environment`, an instance of `research.experiment.EnvironmentDefinition`. Its fields are:
 
@@ -178,4 +209,4 @@ The installed `rsikit` command runs directly in your current Python environment.
 | Gym `--heldout-seeds` | `--test-seeds` |
 | Ocean implicit validation/test panels | Explicit `selection` config or seed flags |
 
-The Ocean reference/matrix/timing tools remain in `examples.benchmark_ocean`; the unified runner uses the normal upstream batch path. Other research optimizers can adopt the file contract; this milestone ships Elite as the built-in optimizer.
+The Ocean reference/matrix/timing tools remain in `examples.benchmark_ocean`; the unified runner uses the normal upstream batch path. All four built-in selectors use the file contract; custom optimizer files remain supported.

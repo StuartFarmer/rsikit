@@ -1,6 +1,6 @@
 # Unified optimizer contract
 
-Status: agreed architecture; implementation decisions specified below. No implementation in this change.
+Status: implemented architecture. See the linked implementation plan and branch history for validation.
 
 ## Goal
 
@@ -21,6 +21,7 @@ class Measurement:
     metrics: dict[str, float] = field(default_factory=dict)
     features: dict[str, float] = field(default_factory=dict)
 
+
 # rsikit.optimization; exported from rsikit
 class Optimizer(Protocol):
     @property
@@ -29,6 +30,7 @@ class Optimizer(Protocol):
     def best(self) -> type[Policy] | None: ...
     async def propose(self) -> list[type[Policy]]: ...
     def update(self, results: Mapping[str, Measurement]) -> None: ...
+
 
 async def search(
     optimizer: Optimizer,

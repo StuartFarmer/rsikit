@@ -14,6 +14,106 @@ from tests.test_alphaevolve import program
 
 
 class OptimizerContractTests(unittest.IsolatedAsyncioTestCase):
+    def optimizer(self, kind):
+        from research import elitesearch, lineagesearch, shinkaevolve
+        from tests.test_elitesearch import program as elite_program
+        from tests.test_lineagesearch import experiments, families
+        from tests.test_lineagesearch import program as lineage_program
+
+        if kind in ("original", "improved", "paper"):
+            module = {"original": original, "improved": improved, "paper": paper}[kind]
+            root = Path(alphaevolve.__file__).parent
+            cls = module.AlphaEvolve
+            config = module.Config(
+                islands=1, proposals=2, batch_size=2, max_repairs=1, meta_interval=0
+            )
+            responses = [program(i) for i in range(3)]
+        elif kind == "shinka":
+            root = Path(shinkaevolve.__file__).parent / "prompts"
+            cls = shinkaevolve.ShinkaEvolve
+            config = shinkaevolve.Config(
+                islands=1, generations=1, batch_size=2, max_repairs=1, meta_interval=0
+            )
+            responses = [program(i) for i in range(3)]
+        elif kind == "elite":
+            root = Path(elitesearch.__file__).parent / "prompts"
+            cls = elitesearch.EliteSearch
+            config = elitesearch.Config(
+                population_size=2, elite_size=1, generations=1, max_repairs=1
+            )
+            responses = [elite_program(i) for i in range(3)]
+        else:
+            root = Path(lineagesearch.__file__).parent / "prompts"
+            cls = lineagesearch.LineageSearch
+            config = lineagesearch.Config(
+                families=1,
+                decomposition_k=1,
+                initial_per_family=2,
+                max_attempts=2,
+                max_repairs=1,
+                generation_concurrency=1,
+            )
+            responses = [families(), experiments(0, 1), *[lineage_program(i) for i in range(3)]]
+        templates = patch.object(prompts, "TEMPLATE_ROOT", root)
+        templates.start()
+        self.addCleanup(templates.stop)
+        provider = ScriptedProvider(responses)
+        agent = cls("task", provider, config=config)
+        if kind == "paper":
+            self.addCleanup(agent.close)
+        return agent, provider
+
+    async def test_six_optimizers_conform_to_one_runner_and_feedback_contract(self):
+        for kind in ("original", "improved", "paper", "shinka", "elite", "lineage"):
+            for outcome in ("success", "screened", "repaired", "exhausted"):
+                with self.subTest(optimizer=kind, outcome=outcome):
+                    agent, provider = self.optimizer(kind)
+                    panels, measurements = [], []
+
+                    async def evaluate(policies):
+                        self.assertFalse(agent.done)
+                        with self.assertRaises(RuntimeError):
+                            await agent.propose()
+                        calls = len(provider.calls)
+                        good = {p.id: Measurement({0: 3, 1: 7}) for p in policies}
+                        for invalid in (
+                            {},
+                            {**good, "unknown": Measurement({0: 1, 1: 1})},
+                            {p.id: 3.0 for p in policies},
+                        ):
+                            with self.assertRaises(ValueError):
+                                agent.update(invalid)
+                        self.assertEqual(len(provider.calls), calls)
+                        if not panels:
+                            first, second = policies
+                            if outcome == "screened":
+                                good[second.id] = Measurement(
+                                    accepted=False, feedback="Below screening threshold"
+                                )
+                            elif outcome in ("repaired", "exhausted"):
+                                good[second.id] = Measurement(failure="broken")
+                        else:
+                            self.assertEqual(len(policies), 1)
+                            self.assertNotIn(policies[0].id, panels[0])
+                            good[policies[0].id] = (
+                                Measurement({0: 8, 1: 10})
+                                if outcome == "repaired"
+                                else Measurement(failure="still broken")
+                            )
+                        panels.append([p.id for p in policies])
+                        measurements.append(good)
+                        return good
+
+                    best = await search(agent, evaluate)
+                    self.assertTrue(agent.done)
+                    self.assertEqual(best.id, agent.best.id)
+                    self.assertIn(best.id, panels[-1] if outcome == "repaired" else panels[0])
+                    self.assertEqual(len(panels), 2 if outcome in ("repaired", "exhausted") else 1)
+                    self.assertEqual(await agent.propose(), [])
+                    with self.assertRaises(ValueError):
+                        agent.update(measurements[-1])
+                    self.assertEqual(await search(agent, evaluate), best)
+
     async def test_alpha_variants_use_the_same_runner_and_seed_evidence(self):
         with patch.object(prompts, "TEMPLATE_ROOT", Path(alphaevolve.__file__).parent):
             for variant in (original, improved, paper):

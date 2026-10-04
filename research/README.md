@@ -16,7 +16,7 @@ examples. Variants within one algorithm may reuse that algorithm's internals.
 Run these commands from the repository root after following the
 [setup instructions](../README.md#setup). Searches require the Docker worker and
 an API key and make paid model calls. Research code is included in the source
-distribution; the installable library wheel contains only `rsikit`.
+distribution and wheel, alongside `rsikit`.
 
 Imports now use the `research` namespace, for example:
 
@@ -39,9 +39,12 @@ Shared modules available to every algorithm and runner:
 
 - `rsikit.policy.validate_policy`: explicit source checks after policy generation.
 - `rsikit.Evaluator` and `rsikit.Episode`: rollout execution and raw trajectories.
+- `rsikit.Optimizer`, `Measurement`, and `search`: one external propose/evaluate/update loop
+  across all six implementations. See [the contract](../docs/INNER_LOOP.md#one-optimization-loop).
 - `research.rollouts.Rollouts`: execution, episode persistence, and experiment-local reuse.
 - `research.rewards`: cumulative-reward fitness callbacks and per-seed measurements.
-  AlphaEvolve owns its richer `EvaluationResult` and screening in its own package.
+  `Measurement` is re-exported from core. AlphaEvolve builds its richer
+  `EvaluationResult` in update; screening stays in evaluator composition.
 - `rsikit.Policy.from_text` / `from_file` and `to_text` / `to_file`: canonical solution
   loading and saving, preserving source and identity without host execution.
 - `rsikit.envs.tasks`: environment presets and `make_environment`.
@@ -64,3 +67,9 @@ evolution-marker comments no special meaning.
 
 The dependency boundary is checked with
 `python -m unittest tests.test_package_boundaries -v`.
+
+The unified CLI exposes `alphaevolve` (`--variant paper|original|improved`),
+`shinka`, `elite`, and `lineage`. Construction and records remain algorithm-specific;
+feedback and orchestration are shared. Each optimizer selects complete evaluation
+rounds; within-stage concurrency remains, while generation/evaluation overlap is
+removed. New manifests identify this schedule as `round-v1`.
