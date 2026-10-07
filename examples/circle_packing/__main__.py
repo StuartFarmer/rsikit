@@ -4,7 +4,7 @@ import argparse
 import asyncio
 from pathlib import Path
 
-from rsikit import run_program
+from rsikit import Executor, PolicyDefinition
 from rsikit.envs import CirclePackingEnv
 from rsikit.evaluation import PolicyError
 
@@ -15,17 +15,15 @@ async def main():
         "program", nargs="?", type=Path, default=Path(__file__).with_name("initial.py")
     )
     args = parser.parse_args()
-    episode = await run_program(
-        args.program,
-        CirclePackingEnv,
-        env_seed=1,
-        policy_seed=2,
-        max_steps=1,
-    )
-    if episode.error is not None:
-        raise PolicyError(episode.error)
-    info = episode.infos[-1]
-    print(info)
+    policy = PolicyDefinition.from_file(args.program)
+    with CirclePackingEnv() as environment:
+        async with Executor() as executor:
+            async for _, _, episode in executor.evaluate(
+                [(policy.id, policy.source, 1)], environment, policy_seed=2, max_steps=1
+            ):
+                if episode.error is not None:
+                    raise PolicyError(episode.error)
+                print(episode.infos[-1])
 
 
 if __name__ == "__main__":

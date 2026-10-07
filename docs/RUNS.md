@@ -44,6 +44,11 @@ The environment is an unstarted, serializable Gymnasium instance used as a templ
 Each episode gets fresh environment and policy instances in a local child process,
 resets them, uses `Evaluator`, and closes them. The caller owns the template.
 
+The same API handles a single job loaded through `PolicyDefinition.from_file()`.
+Optional `max_steps`, `instructions`, and `policy_seed` arguments apply to all jobs
+in a call. By default the job seed resets both environment and policy; explicitly
+passing `policy_seed=None` leaves the policy unseeded.
+
 Use `async with Executor(concurrency=4, episode_timeout=60)` to bound evaluation
 work. Context exit cancels and reaps outstanding episodes. `Run` contexts only
 release storage. Candidate failures preserve successful siblings; runtime failures

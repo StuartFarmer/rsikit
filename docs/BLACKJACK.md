@@ -45,10 +45,11 @@ The environment's `instructions` describes the rules and observation layout to
 generated policies. Its `Box`/`Discrete` spaces work with the existing sandbox
 codec. Only the observation reaches the policy through `act()`.
 
-The same example source can run through `run_program(Path("examples/blackjack.py"),
-BlackjackEnv, env_seed=42, policy_seed=1)` with the existing Docker policy worker.
-When using `Executor`, which also moves the environment into Docker, rebuild
-the worker image after adding this environment so the new module is installed.
+Load the same source with `PolicyDefinition.from_file("examples/blackjack.py")`
+and pass `[(policy.id, policy.source, 42)]` and a `BlackjackEnv()` to
+`Executor.evaluate(..., policy_seed=1)`. The caller closes the environment template;
+execution runs in a fresh local child. Use the application launcher for Docker
+isolation, and rebuild its image after adding environments.
 
 ## Actions and rules
 

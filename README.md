@@ -119,8 +119,9 @@ No sibling checkout or `slick-bits` dependency is required.
 ```
 
 A program exports `Solution(Policy)`. One policy instance and event loop persist
-throughout an episode. Both `Executor` and `run_program` execute the environment,
-policy and scoring together in a child of the current application. Use the launcher
+throughout an episode. Load files with `PolicyDefinition.from_file`, then pass their
+source to `Executor.evaluate`. It executes the environment and policy together
+in a child of the current application. Use the launcher
 to put that application in Docker; calling the library directly runs locally.
 
 For caller-owned instances, use `Evaluator(env, policy, max_steps=1000)` and

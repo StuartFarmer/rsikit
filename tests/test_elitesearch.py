@@ -380,7 +380,10 @@ class EliteSearchTests(unittest.IsolatedAsyncioTestCase):
                 patch.object(
                     example, "Executor", return_value=fake_executor(evaluation=evaluation)
                 ),
-                patch("rsikit.progress.Console", return_value=Console(file=terminal, width=140)),
+                patch(
+                    "rsikit.progress.controller.Console",
+                    return_value=Console(file=terminal, width=140),
+                ),
             ):
                 await example.main()
             summary = json.loads((output / "summary.json").read_text())
@@ -422,7 +425,9 @@ class EliteSearchTests(unittest.IsolatedAsyncioTestCase):
                 patch.object(
                     example, "Executor", return_value=fake_executor(evaluation=FakeEvaluation())
                 ),
-                patch("rsikit.progress.Console", return_value=Console(file=io.StringIO())),
+                patch(
+                    "rsikit.progress.controller.Console", return_value=Console(file=io.StringIO())
+                ),
             ):
                 with self.assertRaises(TimeoutError):
                     await asyncio.wait_for(

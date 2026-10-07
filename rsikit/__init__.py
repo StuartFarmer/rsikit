@@ -2,7 +2,7 @@
 
 from .episode import Episode
 from .evaluation import Evaluator
-from .execution import Executor, run_program
+from .execution import Executor
 from .generation import generate
 from .optimization import Optimizer, search
 from .policy import Policy, PolicyDefinition, PolicyEncoder
@@ -18,6 +18,5 @@ __all__ = [
     "PolicyEncoder",
     "Run",
     "generate",
-    "run_program",
     "search",
 ]

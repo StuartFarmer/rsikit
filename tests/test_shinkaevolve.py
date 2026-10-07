@@ -70,7 +70,7 @@ class ShinkaTests(unittest.IsolatedAsyncioTestCase):
                 patch.object(
                     example, "Executor", return_value=fake_executor(evaluation=FakeEvaluation())
                 ),
-                patch("rsikit.progress.Console", return_value=console),
+                patch("rsikit.progress.controller.Console", return_value=console),
             ):
                 await example.main()
             self.assertEqual(

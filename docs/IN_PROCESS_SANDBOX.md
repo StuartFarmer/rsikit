@@ -58,7 +58,7 @@ keeps its existing representation. Episode stdout/stderr becomes an `episode.log
 artifact; failures include at most 4 KiB of its tail. Rich stays in the main process.
 
 The old `rsikit.sandbox` package and `DockerSandbox` are removed. Use
-`Executor(episode_timeout=...)` or `run_program(episode_timeout=...)`.
+`Executor(episode_timeout=...)` for both individual episodes and batches.
 Poker retains its separate Docker service and private player processes; use its
 [own launcher in the paper repository](../../elitelist_papers/poker/README.md).
 

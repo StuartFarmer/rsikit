@@ -11,7 +11,7 @@ import numpy as np
 from gymnasium import spaces
 
 from research.rewards import mean_rewards
-from rsikit import run_program
+from rsikit import Executor, PolicyDefinition
 from rsikit.episode import EpisodeEncoder
 from rsikit.evaluation import InfrastructureError, PolicyError
 from rsikit.policy import Policy
@@ -89,13 +89,17 @@ class CodecSmoke(unittest.TestCase):
 
 class ApplicationEpisodeTests(unittest.IsolatedAsyncioTestCase):
     async def run_source(self, source, *, timeout=3, raw=False):
-        with tempfile.TemporaryDirectory() as directory:
-            path = Path(directory) / "solution.py"
-            path.write_text(source, encoding="utf-8")
-            episode = await run_program(
-                path, CounterEnv, env_seed=1, policy_seed=2, max_steps=5, episode_timeout=timeout
-            )
-            return episode if raw else episode.final_step
+        policy = PolicyDefinition.from_text(source)
+        with CounterEnv() as environment:
+            async with Executor(episode_timeout=timeout) as executor:
+                results = [
+                    episode
+                    async for _, _, episode in executor.evaluate(
+                        [(policy.id, policy.source, 1)], environment, policy_seed=2, max_steps=5
+                    )
+                ]
+        (episode,) = results
+        return episode if raw else episode.final_step
 
     async def test_state_instructions_and_examples(self):
         local = await run_episode(CounterEnv, CounterPolicy, env_seed=1, policy_seed=2, max_steps=5)
@@ -108,18 +112,28 @@ class ApplicationEpisodeTests(unittest.IsolatedAsyncioTestCase):
         from examples.circle_packing import initial
         from rsikit.envs import CirclePackingEnv
 
-        packing = await run_program(
-            Path(initial.__file__), CirclePackingEnv, env_seed=1, policy_seed=2, max_steps=5
-        )
+        episodes = []
+        for path, make_env, limit in (
+            (initial.__file__, CirclePackingEnv, 5),
+            (cartpole.__file__, lambda: gym.make("CartPole-v1"), 8),
+        ):
+            policy = PolicyDefinition.from_file(path)
+            with make_env() as environment:
+                async with Executor() as executor:
+                    episodes.extend(
+                        [
+                            episode
+                            async for _, _, episode in executor.evaluate(
+                                [(policy.id, policy.source, 1)],
+                                environment,
+                                policy_seed=2,
+                                max_steps=limit,
+                            )
+                        ]
+                    )
+        packing, cart = episodes
         self.assertTrue(packing.terminations[-1])
         self.assertAlmostEqual(packing.infos[-1]["episode"]["r"], 1.0)
-        cart = await run_program(
-            Path(cartpole.__file__),
-            "CartPole-v1",
-            env_seed=1,
-            policy_seed=2,
-            max_steps=8,
-        )
         self.assertTrue(cart.terminations[-1] or cart.truncations[-1])
         self.assertGreater(cart.infos[-1]["episode"]["l"], 1)
 

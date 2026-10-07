@@ -20,7 +20,7 @@ import gymnasium as gym
 
 from .episode import Episode
 from .evaluation import InfrastructureError, PolicyError, PolicyTimeout, _run_episode
-from .policy import MAX_SOURCE, load_policy
+from .policy import load_policy
 
 MAX_RESULT = 64 * 1024 * 1024
 
@@ -167,10 +167,16 @@ class Executor:
 
     async def evaluate(
         self,
-        jobs: Iterable[tuple[str, str, int]],
+        jobs: Iterable[tuple[str, str, int | None]],
         environment: gym.Env,
-    ) -> AsyncIterator[tuple[str, int, Episode]]:
-        """Yield one attempted episode per job, including candidate errors."""
+        **options,
+    ) -> AsyncIterator[tuple[str, int | None, Episode]]:
+        """Yield an episode per (policy ID, source, seed) job, including candidate errors.
+
+        Each child receives a copy of the environment; the caller owns the template.
+        Options are max_steps, instructions, and policy_seed. An omitted policy_seed
+        uses each job's seed; explicit None leaves the policy unseeded.
+        """
         jobs = list(jobs)
         if not jobs:
             return
@@ -192,6 +198,7 @@ class Executor:
                         implementation,
                         definition,
                         seed,
+                        **options,
                     )
                     if episode.error is not None:
                         logging.getLogger(__name__).error(
@@ -265,42 +272,3 @@ class Executor:
                 task.cancel()
             await asyncio.gather(*tasks, return_exceptions=True)
             self._tasks.difference_update(tasks)
-
-
-async def run_program(
-    program: Path,
-    make_env,
-    *,
-    env_seed: int | None = None,
-    policy_seed: int | None = None,
-    max_steps: int | None = None,
-    instructions: str | None = None,
-    episode_timeout: float = 60.0,
-) -> Episode:
-    """Run a saved policy in a fresh child of the current application."""
-    executor = Executor(episode_timeout=episode_timeout)
-    try:
-        with Path(program).open(encoding="utf-8") as stream:
-            source = stream.read(MAX_SOURCE + 1)
-    except (OSError, UnicodeError) as exc:
-        raise InfrastructureError(f"Cannot read policy source: {exc}") from exc
-    if len(source.encode()) > MAX_SOURCE:
-        raise PolicyError("Source exceeds 64 KiB")
-    env = gym.make(make_env) if isinstance(make_env, str) else make_env()
-    try:
-        return await executor._evaluate(
-            source,
-            cloudpickle.dumps(env),
-            env_seed,
-            policy_seed=policy_seed,
-            max_steps=max_steps,
-            instructions=instructions,
-        )
-    finally:
-        primary = sys.exc_info()[1]
-        try:
-            env.close()
-        except BaseException:
-            if primary is None:
-                raise
-            logging.getLogger(__name__).exception("Environment cleanup failed during evaluation")

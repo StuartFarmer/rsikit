@@ -20,7 +20,7 @@ class MetaProgressTests(unittest.TestCase):
         from rich.console import Console
 
         from research.meta_ocean import runner
-        from rsikit.progress import _current_run
+        from rsikit.progress.controller import _current_run
 
         terminal = io.StringIO()
         console = Console(file=terminal, force_terminal=True, width=120, height=35)
@@ -29,8 +29,8 @@ class MetaProgressTests(unittest.TestCase):
         def metadata(name):
             binding = _current_run.get()
             self.assertIsNotNone(binding)
-            self.assertTrue(binding["display"].active)
-            displays.append(binding["display"])
+            self.assertTrue(binding.model.active)
+            displays.append(binding)
             return {}
 
         async def rollout(source, seeds, *args, **kwargs):
@@ -39,7 +39,7 @@ class MetaProgressTests(unittest.TestCase):
             kwargs["_on_batch"](rows[:1])
             self.assertIn("1/2 games", (output / "run.log").read_text())
             self.assertTrue(
-                any(r["status"] == "evaluating" for r in displays[0].candidates.values())
+                any(r["status"] == "evaluating" for r in displays[0].model.candidates.values())
             )
             kwargs["_on_batch"](rows)
             return dict(results=rows, steps=len(rows))
@@ -48,7 +48,7 @@ class MetaProgressTests(unittest.TestCase):
             output = Path(directory) / "run"
             with (
                 patch.dict(os.environ, OPENROUTER_API_KEY="test"),
-                patch("rsikit.progress.Console", return_value=console),
+                patch("rsikit.progress.controller.Console", return_value=console),
                 patch.object(runner, "metadata", side_effect=metadata),
                 patch.object(
                     runner.subprocess, "run", return_value=SimpleNamespace(stdout="sha256:test")
@@ -63,7 +63,7 @@ class MetaProgressTests(unittest.TestCase):
                 )
             log = (output / "run.log").read_text()
             self.assertEqual(result["status"], "completed")
-            self.assertEqual(displays[0].status, "completed")
+            self.assertEqual(displays[0].model.status, "completed")
             self.assertIn("baseline", log)
             self.assertIn("reference", log)
             self.assertIn("2/2 games", log)

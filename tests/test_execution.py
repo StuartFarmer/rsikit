@@ -10,7 +10,7 @@ from unittest.mock import Mock, patch
 
 import gymnasium as gym
 
-from rsikit import Executor, run_program
+from rsikit import Executor, PolicyDefinition
 from rsikit.evaluation import InfrastructureError, PolicyError
 
 
@@ -152,12 +152,27 @@ class ExecutionTests(unittest.IsolatedAsyncioTestCase):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "policy.py"
             path.write_text(SOURCE)
-            episode = await run_program(
-                path, ProcessEnv, env_seed=3, policy_seed=5, instructions="override", max_steps=1
-            )
-        self.assertEqual(json.loads(episode.artifacts["state.json"])[1:], [1, 5, "override"])
-        self.assertEqual(episode.infos[0]["seed"], 3)
-        self.assertEqual(episode.truncations, [True])
+            policy = PolicyDefinition.from_file(path)
+            with ProcessEnv() as environment:
+                async with Executor() as executor:
+                    for policy_seed, instructions in ((5, "override"), (None, "")):
+                        results = [
+                            episode
+                            async for _, _, episode in executor.evaluate(
+                                [(policy.id, policy.source, 3)],
+                                environment,
+                                policy_seed=policy_seed,
+                                instructions=instructions,
+                                max_steps=1,
+                            )
+                        ]
+                        (episode,) = results
+                        self.assertEqual(
+                            json.loads(episode.artifacts["state.json"])[1:],
+                            [1, policy_seed, instructions],
+                        )
+                        self.assertEqual(episode.infos[0]["seed"], 3)
+                        self.assertEqual(episode.truncations, [True])
 
     async def test_errors_and_successful_siblings(self):
         async with Executor(concurrency=2, episode_timeout=3) as executor:

@@ -43,7 +43,7 @@ class VariantTests(unittest.IsolatedAsyncioTestCase):
                 "Executor",
                 return_value=fake_executor(evaluation=evaluation or FakeEvaluation()),
             ),
-            patch("rsikit.progress.Console", return_value=Console(file=io.StringIO())),
+            patch("rsikit.progress.controller.Console", return_value=Console(file=io.StringIO())),
             patch.object(prompts, "TEMPLATE_ROOT", Path(alphaevolve.__file__).parent),
         ):
             await example.main()
@@ -79,7 +79,10 @@ class VariantTests(unittest.IsolatedAsyncioTestCase):
                     patch.object(
                         example, "Executor", return_value=fake_executor(evaluation=FakeEvaluation())
                     ),
-                    patch("rsikit.progress.Console", return_value=Console(file=io.StringIO())),
+                    patch(
+                        "rsikit.progress.controller.Console",
+                        return_value=Console(file=io.StringIO()),
+                    ),
                     patch.object(prompts, "TEMPLATE_ROOT"),
                 ):
                     await example.main()

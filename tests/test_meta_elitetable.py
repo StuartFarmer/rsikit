@@ -70,18 +70,18 @@ class GenerationTests(unittest.IsolatedAsyncioTestCase):
             report = asyncio.create_task(report_workers(slots))
             try:
                 await asyncio.sleep(0.35)
-                self.assertEqual(display.workers["Panels"]["active"], 1)
-                self.assertEqual(display.workers["Panels"]["queued"], 1)
+                self.assertEqual(display.model.workers["Panels"]["active"], 1)
+                self.assertEqual(display.model.workers["Panels"]["queued"], 1)
                 self.assertIn("Panels 1/1", output.getvalue())
                 queued.cancel()
                 await asyncio.gather(queued, return_exceptions=True)
                 slots["evaluations"].release()
                 await asyncio.sleep(1.1)
                 self.assertEqual(
-                    display.workers["Panels"], dict(active=0, limit=1, queued=0, finished=1)
+                    display.model.workers["Panels"], dict(active=0, limit=1, queued=0, finished=1)
                 )
                 self.assertIn("Panels 0/1", output.getvalue())
-                self.assertFalse(display.batches)
+                self.assertFalse(display.model.batches)
             finally:
                 queued.cancel()
                 report.cancel()
@@ -307,13 +307,13 @@ class DisplayTests(unittest.TestCase):
 
         from research.meta_ocean import elitetable, runner
         from research.meta_ocean.experiment import progress
-        from rsikit.progress import _current_run
+        from rsikit.progress.controller import _current_run
 
         async def calibrate(config, path):
             self.fail("EliteTable must not run heuristic calibration")
 
         def campaign(config, path, anchors, loop):
-            self.assertIsNone(_current_run.get()["live"])
+            self.assertIsNone(_current_run.get().live)
             path.mkdir()
             with bind_run(path):
                 progress(
@@ -322,7 +322,7 @@ class DisplayTests(unittest.TestCase):
                     total_candidates=50,
                     optimizer="EliteTable meta",
                 )
-                self.assertIsNotNone(_current_run.get()["live"])
+                self.assertIsNotNone(_current_run.get().live)
                 progress("done", kind="search_finished", status="completed", reason="test")
             return {}
 
@@ -330,7 +330,7 @@ class DisplayTests(unittest.TestCase):
             tempfile.TemporaryDirectory() as directory,
             patch.dict(os.environ, OPENROUTER_API_KEY="test"),
             patch(
-                "rsikit.progress.Console",
+                "rsikit.progress.controller.Console",
                 return_value=Console(file=io.StringIO(), force_terminal=True),
             ),
             patch.object(runner, "metadata", return_value={}),
@@ -504,7 +504,7 @@ class Solution(Policy):
                 leaderboard = json.loads((path / "leaderboard.json").read_text())
                 self.assertEqual(leaderboard[0]["name"], "Mutated evolver")
                 self.assertIn("metrics", leaderboard[0])
-                self.assertEqual(len(display.leaders), 1)
+                self.assertEqual(len(display.model.leaders), 1)
                 self.assertEqual(
                     len(baseline_runs), 6
                 )  # Reused across all outer proposals/repairs.

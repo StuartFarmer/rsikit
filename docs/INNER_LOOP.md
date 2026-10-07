@@ -113,16 +113,25 @@ No weights are trained by the evaluator.
 ## Generated programs
 
 ```python
-from pathlib import Path
-from rsikit import run_program
+import gymnasium as gym
+from rsikit import Executor, PolicyDefinition
 
-episode = await run_program(Path("solution.py"), "CartPole-v1", max_steps=100)
-print(episode.total_reward, episode.actions)
+policy = PolicyDefinition.from_file("solution.py")
+with gym.make("CartPole-v1") as environment:
+    async with Executor(episode_timeout=60) as executor:
+        async for _, seed, episode in executor.evaluate(
+            [(policy.id, policy.source, 42)], environment, max_steps=100
+        ):
+            print(seed, episode.error, episode.total_reward)
 ```
 
-`run_program` creates an environment template, then runs reset, policy execution,
-steps and scoring in a fresh local child. The source must export `Solution(Policy)`.
-`env_seed`, `policy_seed`, `instructions`, and `max_steps` apply inside that child.
+Load files with `PolicyDefinition.from_file` and pass jobs to `Executor.evaluate`,
+whether evaluating one episode or a batch. The caller owns the environment template;
+each child receives its own copy. The source must export `Solution(Policy)`.
+Each job's seed resets both environment and policy by default. Optional `policy_seed`,
+`instructions`, and `max_steps` override policy seeding, task text, and the step cap.
+Explicit `policy_seed=None` leaves the policy unseeded. Options apply to every job
+in that call; candidate failures are returned in `episode.error`.
 The episode deadline defaults to 60 seconds and includes policy loading, reset,
 actions, cleanup and result preparation. Direct `Evaluator` calls have no deadline.
 
