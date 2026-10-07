@@ -20,6 +20,7 @@ from research.alphaevolve import improved, original, paper
 from research.alphaevolve.generation import _PolicyResponse
 from research.alphaevolve.history import Evaluation, Generation
 from research.alphaevolve.improved import AlphaEvolve, Config
+from rsikit import Job
 from rsikit.evaluation import InfrastructureError, PolicyError
 from tests.helpers import fake_executor, recorded_run
 from tests.providers import ScriptedProvider
@@ -399,8 +400,8 @@ class RepairTests(unittest.IsolatedAsyncioTestCase):
         evaluation.evaluate.side_effect = evaluate
         with gym.make("CartPole-v1") as env:
             with self.assertRaisesRegex(InfrastructureError, "Docker stopped"):
-                async for _ in fake_executor(evaluation=evaluation, concurrency=2).evaluate(
-                    [(policy.id, policy.source, seed) for seed in (0, 1)], env
+                async for _ in fake_executor(evaluation=evaluation, concurrency=2).execute(
+                    [Job(policy, env, seed=seed) for seed in (0, 1)]
                 ):
                     pass
 

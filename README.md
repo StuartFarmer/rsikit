@@ -21,7 +21,8 @@ This is an experimental release; APIs may change.
   `from_file`, save with `to_text` / `to_file`, and check source with `validate()`.
 - `PolicyEncoder`: encodes/decodes definitions and owns static source validation.
 - `generate`: returns a named `PolicyDefinition` from the LLM.
-- `Evaluator`: rolls out existing environment and policy instances.
+- `evaluate` / `Evaluator`: roll out existing environment and policy instances.
+- `Job` / `execute`: evaluate private worker copies with one seed per episode.
 - `Episode`: records observations, actions, rewards, flags, infos, and artifacts.
 - `Optimizer`: the `propose()` / `update(episodes)` protocol, with `done` and `best`, implemented by all six optimizers.
 - `Episode` feedback and `search`: raw per-seed rollout evidence and one external optimization loop.
@@ -35,6 +36,42 @@ The shared library lives in `rsikit/`. The four independent search algorithms
 live under [`research/`](research/README.md) and import shared functionality from
 `rsikit`, never from another algorithm. Run research examples from the repository
 root; the wheel includes both `rsikit` and `research`, including the unified CLI.
+
+Start with instances, then use the same kinds of objects for a sweep:
+
+```python
+from copy import deepcopy
+import gymnasium as gym
+from rsikit import Job, Policy, evaluate, execute
+
+
+class RandomPolicy(Policy):
+    async def act(self, observation):
+        return self.action_space.sample()
+
+
+# Inside an async function:
+with gym.make("CartPole-v1") as environment:
+    policy = RandomPolicy(
+        deepcopy(environment.observation_space), deepcopy(environment.action_space)
+    )
+    try:
+        episode = await evaluate(policy, environment, seed=42)
+        print(episode.total_reward)
+        jobs = [Job(policy, environment, seed=seed) for seed in range(10)]
+        completed_jobs = await execute(jobs, concurrency=4)
+        print([job.result.total_reward for job in completed_jobs])
+    finally:
+        await policy.close()
+```
+
+One seed resets both objects once per episode. Direct evaluation uses the original
+instances; execution copies them into workers and returns the original jobs with
+`result` attached. Inputs must be serializable; keep them unchanged while jobs run.
+For large runs, use `Executor.execute(jobs)` to stream and persist each result.
+See [lifecycle and failure behavior](docs/INNER_LOOP.md).
+
+Generate policies and persist a research run:
 
 ```python
 from pathlib import Path
@@ -120,14 +157,17 @@ No sibling checkout or `slick-bits` dependency is required.
 
 A program exports `Solution(Policy)`. One policy instance and event loop persist
 throughout an episode. Load files with `PolicyDefinition.from_file`, then pass their
-source to `Executor.evaluate`. It executes the environment and policy together
+definitions in `Job(policy, environment, seed=...)` to `execute()` or
+`Executor.execute()`. It executes the environment and policy together
 in a child of the current application. Use the launcher
 to put that application in Docker; calling the library directly runs locally.
 
-For caller-owned instances, use `Evaluator(env, policy, max_steps=1000)` and
-`await evaluator.run(observation, info=info)` after resetting both objects.
+For caller-owned instances, use `Evaluator(max_steps=1000)` and
+`await evaluator.evaluate(policy, env, seed=42)` to reset both objects and run an episode.
 It returns an `Episode` with observations, actions, rewards, end flags, and infos
-for later analysis. Creation, seeding, and cleanup stay with the caller.
+for later analysis. Creation and cleanup stay with the caller.
+`Episode` is a Pydantic model; worker results and saved `.pkl` episodes use pickle
+to retain NumPy arrays, scalars, tuples, and bytes. Only load trusted run directories.
 
 See the [API guide](docs/INNER_LOOP.md) for task instructions, class contracts,
 results, and execution limits.

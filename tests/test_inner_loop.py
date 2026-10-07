@@ -11,7 +11,7 @@ from gymnasium.utils.env_checker import check_env
 from examples.cartpole import Solution as CartPolePolicy
 from examples.circle_packing.initial import Solution as PackingPolicy
 from rsikit.envs import CirclePackingEnv
-from rsikit.evaluation import InfrastructureError, _run_episode
+from rsikit.evaluation import Evaluator, InfrastructureError
 from rsikit.policy import Policy
 from tests.helpers import run_episode
 
@@ -27,6 +27,7 @@ class CounterEnv(gym.Env):
 
     def reset(self, *, seed=None, options=None):
         super().reset(seed=seed)
+        self.steps = 0
         self.value = np.array([0], dtype=np.int64)
         return self.value, {"private": "not for policy"}
 
@@ -62,8 +63,7 @@ class InnerLoopTests(unittest.IsolatedAsyncioTestCase):
         return await run_episode(
             CounterEnv,
             policy,
-            env_seed=1,
-            policy_seed=2,
+            seed=1,
             max_steps=kwargs.pop("max_steps", 10),
             **kwargs,
         )
@@ -102,10 +102,10 @@ class InnerLoopTests(unittest.IsolatedAsyncioTestCase):
                 return 50
 
         env = CounterEnv()
-        episode = await _run_episode(lambda: env, Invalid)
+        episode = await Evaluator().evaluate(Invalid(env.observation_space, env.action_space), env)
         self.assertIn("outside action_space", episode.error)
         self.assertEqual(env.steps, 0)
-        self.assertTrue(env.closed)
+        self.assertFalse(env.closed)
 
         class Broken(CounterPolicy):
             async def act(self, observation):
@@ -113,14 +113,10 @@ class InnerLoopTests(unittest.IsolatedAsyncioTestCase):
                     raise RuntimeError("policy failed")
                 return await super().act(observation)
 
-            async def close(self):
-                raise RuntimeError("cleanup also failed")
-
-        with self.assertLogs("rsikit.evaluation", level="ERROR") as logged:
-            episode = await _run_episode(CounterEnv, Broken)
-            self.assertIn("policy failed", episode.error)
-            self.assertEqual(episode.rewards, [1.0])
-        self.assertIn("cleanup also failed", logged.output[0])
+        env = CounterEnv()
+        episode = await Evaluator().evaluate(Broken(env.observation_space, env.action_space), env)
+        self.assertIn("policy failed", episode.error)
+        self.assertEqual(episode.rewards, [1.0])
 
         class BrokenEnv(CounterEnv):
             def step(self, action):
@@ -142,9 +138,11 @@ class InnerLoopTests(unittest.IsolatedAsyncioTestCase):
                 raise gym.error.InvalidAction("Action masked in this state")
 
         env = MaskedEnv()
-        episode = await _run_episode(lambda: env, CounterPolicy)
+        episode = await Evaluator().evaluate(
+            CounterPolicy(env.observation_space, env.action_space), env
+        )
         self.assertIn("Action masked", episode.error)
-        self.assertTrue(env.closed)
+        self.assertFalse(env.closed)
 
         class BrokenEnv(CounterEnv):
             def step(self, action):
@@ -153,8 +151,8 @@ class InnerLoopTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaisesRegex(ValueError, "Broken environment calculation"):
             await run_episode(BrokenEnv, CounterPolicy)
 
-    async def test_cancellation_closes_both_sides(self):
-        env, policies = CounterEnv(), []
+    async def test_cancellation_leaves_cleanup_with_caller(self):
+        env = CounterEnv()
         started = asyncio.Event()
 
         class Waiting(CounterPolicy):
@@ -162,35 +160,17 @@ class InnerLoopTests(unittest.IsolatedAsyncioTestCase):
                 started.set()
                 await asyncio.Event().wait()
 
-        def factory(*args, **kwargs):
-            policies.append(Waiting(*args, **kwargs))
-            return policies[-1]
-
-        task = asyncio.create_task(
-            run_episode(lambda: env, factory, env_seed=1, policy_seed=2, max_steps=3)
-        )
-        await started.wait()
-        task.cancel()
-        with self.assertRaises(asyncio.CancelledError):
-            await task
-        self.assertTrue(env.closed and policies[0].closed)
-
-        close_started = asyncio.Event()
-
-        class SlowClose(CounterPolicy):
-            async def close(self):
-                close_started.set()
-                await asyncio.Event().wait()
-
-        env = CounterEnv()
-        task = asyncio.create_task(
-            run_episode(lambda: env, SlowClose, env_seed=1, policy_seed=2, max_steps=3)
-        )
-        await close_started.wait()
-        task.cancel()
-        with self.assertRaises(asyncio.CancelledError):
-            await task
-        self.assertTrue(env.closed)
+        policy = Waiting(env.observation_space, env.action_space)
+        task = asyncio.create_task(Evaluator().evaluate(policy, env, seed=1))
+        try:
+            await started.wait()
+            task.cancel()
+            with self.assertRaises(asyncio.CancelledError):
+                await task
+            self.assertFalse(env.closed or policy.closed)
+        finally:
+            await policy.close()
+            env.close()
 
     async def test_custom_and_builtin_gymnasium_environments(self):
         check_env(CirclePackingEnv(), skip_render_check=True)
@@ -207,10 +187,7 @@ class InnerLoopTests(unittest.IsolatedAsyncioTestCase):
         _, _, _, _, info = await run_episode(CirclePackingEnv, Overlapping)
         self.assertEqual(info["episode"]["r"], 0.0)
         self.assertFalse(info["feasible"])
-        episodes = [
-            await run_episode("CartPole-v1", CartPolePolicy, env_seed=1, policy_seed=2)
-            for _ in range(2)
-        ]
+        episodes = [await run_episode("CartPole-v1", CartPolePolicy, seed=1) for _ in range(2)]
         self.assertEqual(episodes[0][4]["episode"]["r"], episodes[1][4]["episode"]["r"])
         self.assertTrue(episodes[0][2] or episodes[0][3])
         self.assertTrue(1 < episodes[0][4]["episode"]["l"] <= 500)
@@ -220,9 +197,7 @@ class InnerLoopTests(unittest.IsolatedAsyncioTestCase):
                 assert self.instructions == ""
                 return self.action_space.sample()
 
-        _, _, terminated, truncated, info = await run_episode(
-            "FrozenLake-v1", RandomPolicy, env_seed=1, policy_seed=2
-        )
+        _, _, terminated, truncated, info = await run_episode("FrozenLake-v1", RandomPolicy, seed=1)
         self.assertTrue(terminated or truncated)
         self.assertTrue(0 < info["episode"]["l"] <= 100)
 

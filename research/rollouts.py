@@ -4,7 +4,7 @@ import asyncio
 import logging
 from contextlib import AsyncExitStack, aclosing
 
-from rsikit import Executor, Run
+from rsikit import Executor, Job, Run
 
 
 class Rollouts:
@@ -36,12 +36,13 @@ class Rollouts:
                 for seed in seeds:
                     episode = self.run.load_episode(policy, seed)
                     if episode is None or episode.error is not None:
-                        jobs.append((policy.id, policy.source, seed))
+                        jobs.append(Job(policy, self.environment, seed=seed))
                     else:
                         yield policy.id, seed, episode
-            requested = {(policy_id, seed) for policy_id, _, seed in jobs}
-            async with aclosing(self.executor.evaluate(jobs, self.environment)) as results:
-                async for policy_id, seed, episode in results:
+            requested = {(job.policy.id, job.seed) for job in jobs}
+            async with aclosing(self.executor.execute(jobs)) as results:
+                async for job in results:
+                    policy_id, seed, episode = job.policy.id, job.seed, job.result
                     if (policy_id, seed) not in requested:
                         raise ValueError("Executor returned an unexpected or duplicate result")
                     self.run.save_episode(policies[policy_id], seed, episode)

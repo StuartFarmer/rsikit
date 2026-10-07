@@ -17,7 +17,7 @@ import gymnasium as gym
 
 from research.rewards import mean_rewards
 from research.rollouts import Rollouts
-from rsikit import Episode, Executor, Run
+from rsikit import Episode, Executor, Job, Run
 from rsikit.envs import BitcoinEnv, BlackjackEnv, CirclePackingEnv
 from rsikit.evaluation import PolicyError
 from rsikit.policy import PolicyDefinition
@@ -87,15 +87,23 @@ async def scheduling(samples):
             active = peak = 0
 
             class TimedExecutor(Executor):
-                async def _evaluate(self, implementation, environment, seed):
+                async def _evaluate(self, job):
                     nonlocal active, peak
+                    implementation, seed = job.policy.source, job.seed
                     start = perf_counter()
                     waits.append(start - arrived[implementation])
                     active += 1
                     peak = max(peak, active)
                     try:
                         await asyncio.sleep(0.08 if seed == 0 else 0.008)
-                        return Episode([0, 1], [0], [0.5], [True], [False], [{}, {}])
+                        return Episode(
+                            observations=[0, 1],
+                            actions=[0],
+                            rewards=[0.5],
+                            terminations=[True],
+                            truncations=[False],
+                            infos=[{}, {}],
+                        )
                     finally:
                         active -= 1
                         durations.append(perf_counter() - start)
@@ -211,7 +219,10 @@ async def main(samples, output):
             for repeat in range(samples + 1):
                 start = perf_counter()
                 results = [
-                    r async for _, _, r in executor.evaluate([(label, source + TIMING, 1)], env)
+                    job.result
+                    async for job in executor.execute(
+                        [Job(PolicyDefinition(source=source + TIMING, name=label), env, seed=1)]
+                    )
                 ]
                 elapsed = perf_counter() - start
                 result = results[0]

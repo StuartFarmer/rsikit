@@ -209,9 +209,7 @@ class BlackjackTests(unittest.TestCase):
             async def act(self, obs):
                 return int(obs[0] == 1 and obs[1] < 17)
 
-        _, _, done, truncated, info = asyncio.run(
-            run_episode(envs.BlackjackEnv, Player, env_seed=1, policy_seed=2)
-        )
+        _, _, done, truncated, info = asyncio.run(run_episode(envs.BlackjackEnv, Player, seed=1))
         self.assertTrue(done)
         self.assertFalse(truncated)
         self.assertGreater(info["rounds"], 1)
@@ -259,9 +257,12 @@ class BlackjackTests(unittest.TestCase):
             async def act(self, observation):
                 return 3  # Bet eight units, then incorrectly split every hand.
 
-        from rsikit.evaluation import _run_episode
+        from rsikit import Evaluator
 
-        episode = asyncio.run(_run_episode(envs.BlackjackEnv, InvalidPlayer, env_seed=0))
+        with envs.BlackjackEnv() as env:
+            policy = InvalidPlayer(env.observation_space, env.action_space)
+            episode = asyncio.run(Evaluator().evaluate(policy, env, seed=0))
+            asyncio.run(policy.close())
         self.assertIn("legal-action mask", episode.error)
 
     def test_optimizer_environment_factory(self):

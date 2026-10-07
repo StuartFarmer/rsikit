@@ -38,7 +38,7 @@ remains available through its original config: `python -m research.meta_ocean --
 Shared modules available to every algorithm and runner:
 
 - `PolicyDefinition.validate()`: explicit source checks after policy generation.
-- `rsikit.Evaluator` and `rsikit.Episode`: rollout execution and raw trajectories.
+- `rsikit.evaluate`, `rsikit.Evaluator` and `rsikit.Episode`: rollout execution and raw trajectories.
 - `rsikit.Optimizer`, `Episode`, and `search`: one external propose/evaluate/update loop
   across all six implementations. See [the contract](../docs/INNER_LOOP.md#one-optimization-loop).
 - `research.rollouts.Rollouts`: execution, episode persistence, and experiment-local reuse.
@@ -49,7 +49,7 @@ Shared modules available to every algorithm and runner:
   loading and saving, preserving source and identity without host execution.
 - `rsikit.envs.tasks`: environment presets and `make_environment`.
 - `rsikit.progress`: automatic Run-scoped logging and the shared Rich dashboard; optimizers emit domain events and declare optional leaderboard columns.
-- `rsikit`: `Policy`, `PolicyDefinition`, `Run`, and `Executor` with Docker evaluation.
+- `rsikit`: `Policy`, `PolicyDefinition`, `Job`, `Run`, and `Executor` for local workers inside the application container.
 
 Each optimizer composes its own `SelfHealer` in `healing.py`, with task context,
 provider, and a local repair prompt. It proposes a repair; the optimizer owns

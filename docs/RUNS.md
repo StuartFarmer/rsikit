@@ -34,36 +34,28 @@ Infrastructure errors and cancellation propagate; these are not low fitness.
 
 ## Core execution
 
-`Evaluator(environment, policy).run(observation, info=info)` consumes caller-owned,
-already-reset instances and returns an `Episode`. It never creates, resets, seeds,
-or closes them. See [the inner-loop contract](INNER_LOOP.md).
+`evaluate(policy, environment, seed=..., max_steps=...)` runs one episode on
+caller-owned instances. `Evaluator(max_steps=...).evaluate(...)` is the reusable
+class API. Both reset the environment and policy exactly once with the same seed,
+and neither closes the caller's objects.
 
-`Executor.evaluate(jobs, environment)` is an async stream of
-`(policy_id, seed, episode)`, where each job is `(policy_id, source, seed)`.
-The environment is an unstarted, serializable Gymnasium instance used as a template.
-Each episode gets fresh environment and policy instances in a local child process,
-resets them, uses `Evaluator`, and closes them. The caller owns the template.
+`Job(policy, environment, seed=..., max_steps=...)` describes one worker episode.
+Its policy may be a live `Policy` or a `PolicyDefinition`; definitions load inside
+the worker deadline. `instructions` is an optional construction override for
+definitions. A worker copies the inputs, resets both with the job seed, runs the
+same Evaluator, closes its copies and returns native Episode fields using pickle.
 
-The same API handles a single job loaded through `PolicyDefinition.from_file()`.
-Optional `max_steps`, `instructions`, and `policy_seed` arguments apply to all jobs
-in a call. By default the job seed resets both environment and policy; explicitly
-passing `policy_seed=None` leaves the policy unseeded.
+`await execute(jobs, concurrency=4)` returns the original jobs in completion order.
+`Executor.execute(jobs)` streams those jobs for incremental persistence. Each job
+has `result=None` until its result arrives; `done` means an Episode is available,
+including failed attempts. Jobs are single-use. Infrastructure failures raise after
+successful siblings finish, and cancellation propagates after worker cleanup.
 
-Use `async with Executor(concurrency=4, episode_timeout=60)` to bound evaluation
-work. Context exit cancels and reaps outstanding episodes. `Run` contexts only
-release storage. Candidate failures preserve successful siblings; runtime failures
-and cancellation propagate. There is no backend selector or persistent service.
-
-The launcher puts the entire application in one container:
-
-```sh
-./scripts/run examples.inner_loop --output runs/comparison
-./scripts/run examples.inner_loop --resume runs/comparison
-```
-
-Rich renders in the main application process. Episode prints are saved as
-`episode.log` artifacts; failures include a bounded log tail. See
-[execution details](IN_PROCESS_SANDBOX.md).
+Use `async with Executor(concurrency=4, episode_timeout=60)` to share worker limits
+across submissions. Close partially consumed streams with `contextlib.aclosing`.
+Keep template instances unchanged until execution finishes; serialization occurs
+when each job acquires a slot. Templates must be serializable and remain caller-owned.
+See [the direct-to-sweep examples](INNER_LOOP.md#from-interactive-evaluation-to-a-sweep).
 
 ## Storage and analysis
 
@@ -95,10 +87,16 @@ on open. `policies()` reloads saved definitions.
 
 `run.sqlite` contains core `settings` and `policy` tables plus optimizer-defined
 records. Per-seed scores are explicit caller data; `None` denotes unfinished work.
-Raw trajectories are stored under `episodes/<policy-id>/<seed>.json`, preserving
-numeric arrays, tuples and byte payloads. Episode files are written atomically
+Raw trajectories are stored under `episodes/<policy-id>/<seed>.pkl`, preserving
+NumPy arrays and scalars, tuples and byte payloads using standard Python pickle.
+Episode files are written atomically
 after their artifacts. `load_episode` returns `None` when no episode was saved.
 Both storage and process transfer limit each episode to 64 MiB.
+Only load trusted run directories: unpickling can execute Python code. The loader
+also accepts older `.json` episodes that satisfy the current Episode contract;
+new `.pkl` files take precedence when both exist.
+Ocean panel measurements keep readable JSON summaries; when trajectories are
+recorded, `episode_file` points to a companion `.pkl` containing the native panel.
 
 Gymnasium recording wrappers run in the episode process, with output relocated to an
 isolated episode directory. Files and the final `info["artifacts"]` byte mapping

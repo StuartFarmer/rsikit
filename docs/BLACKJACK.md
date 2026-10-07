@@ -32,9 +32,7 @@ from rsikit import Evaluator
 with BlackjackEnv() as env:
     policy = Solution(deepcopy(env.observation_space), deepcopy(env.action_space))
     try:
-        observation, info = env.reset(seed=42)
-        await policy.reset(seed=1)
-        episode = await Evaluator(env, policy).run(observation, info=info)
+        episode = await Evaluator().evaluate(policy, env, seed=42)
     finally:
         await policy.close()
 print(episode.total_reward, len(episode))
@@ -46,8 +44,9 @@ generated policies. Its `Box`/`Discrete` spaces work with the existing sandbox
 codec. Only the observation reaches the policy through `act()`.
 
 Load the same source with `PolicyDefinition.from_file("examples/blackjack.py")`
-and pass `[(policy.id, policy.source, 42)]` and a `BlackjackEnv()` to
-`Executor.evaluate(..., policy_seed=1)`. The caller closes the environment template;
+and pass `[Job(policy, environment, seed=42)]` to `execute()` or
+`Executor.execute()`, with `environment = BlackjackEnv()`.
+The caller closes the environment template;
 execution runs in a fresh local child. Use the application launcher for Docker
 isolation, and rebuild its image after adding environments.
 

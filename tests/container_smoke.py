@@ -13,7 +13,7 @@ from slick import prompts
 import rsikit.generation as generation
 from examples.inner_loop import evaluate_policies
 from research.rollouts import Rollouts
-from rsikit import Executor, Run, generate
+from rsikit import Executor, Job, PolicyDefinition, Run, generate
 from tests.providers import ScriptedProvider
 from tests.test_execution import SOURCE, ProcessEnv
 
@@ -39,11 +39,11 @@ async def main(path, mode):
         rollouts = Rollouts(ProcessEnv(), executor, run)
         if mode == "resume":
             (policy,) = run.policies()
-            saved = run.path / "episodes" / policy.id / "0.json"
+            saved = run.path / "episodes" / policy.id / "0.pkl"
             original = saved.stat().st_mtime_ns
             with patch.object(executor, "_evaluate", wraps=executor._evaluate) as evaluation:
                 await evaluate_policies(rollouts, [policy], [0, 1], resumed=True)
-                assert [call.args[2] for call in evaluation.call_args_list] == [1]
+                assert [call.args[0].seed for call in evaluation.call_args_list] == [1]
             assert saved.stat().st_mtime_ns == original
             assert run.scores(policy) == {0: 2.0, 1: 2.0}
             console.print("[green]Resumed: cached seed 0; completed seed 1[/green]")
@@ -67,7 +67,9 @@ async def main(path, mode):
             if mode == "cancel":
                 source = SOURCE.replace("return 0", "while True: pass")
                 console.print("Waiting for Ctrl-C", highlight=False)
-                async for _ in executor.evaluate([("blocked", source, 2)], ProcessEnv()):
+                async for _ in executor.execute(
+                    [Job(PolicyDefinition(source=source), ProcessEnv(), seed=2)]
+                ):
                     pass
 
 

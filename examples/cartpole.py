@@ -16,14 +16,12 @@ async def main():
 
     import gymnasium as gym
 
-    from rsikit import Evaluator
+    from rsikit import evaluate
 
     with gym.make("CartPole-v1") as env:
         policy = Solution(deepcopy(env.observation_space), deepcopy(env.action_space))
         try:
-            observation, info = env.reset(seed=1)
-            await policy.reset(seed=2)
-            episode = await Evaluator(env, policy, max_steps=50).run(observation, info=info)
+            episode = await evaluate(policy, env, seed=1, max_steps=50)
         finally:
             await policy.close()
     if episode.error is not None:

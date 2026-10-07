@@ -34,11 +34,12 @@ network, mounted outputs and scoring state. This protects the rest of the host;
 it does not isolate mutually hostile policies or protect scores from tampering.
 
 ```python
-from rsikit import Executor
+from rsikit import Executor, Job
 
 async with Executor(concurrency=4, episode_timeout=60) as executor:
-    async for policy_id, seed, episode in executor.evaluate(jobs, environment):
-        print(policy_id, seed, episode.total_reward)
+    jobs = [Job(policy, environment, seed=seed) for seed in range(4)]
+    async for job in executor.execute(jobs):
+        print(job.seed, job.result.total_reward, job.result.error)
 ```
 
 `Executor` runs fresh episode processes in the current application. Calling it
@@ -53,8 +54,10 @@ guaranteed to disappear when the whole container exits. There is no per-action
 deadline. Candidate errors and timeouts preserve successful sibling episodes;
 runtime failures propagate. A later evaluation starts a fresh process.
 
-Results use a multiprocessing connection, capped at 64 MiB. Saved episode JSON
-keeps its existing representation. Episode stdout/stderr becomes an `episode.log`
+Inputs use cloudpickle to copy the policy/environment pair. Results use standard
+pickle over a multiprocessing connection, capped at 64 MiB, and saved episodes use
+the same native field representation in `.pkl` files. Workers and saved runs must be
+trusted: unpickling can execute Python code. Episode stdout/stderr becomes an `episode.log`
 artifact; failures include at most 4 KiB of its tail. Rich stays in the main process.
 
 The old `rsikit.sandbox` package and `DockerSandbox` are removed. Use

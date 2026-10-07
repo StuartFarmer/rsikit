@@ -1,14 +1,30 @@
 """Explicit storage/execution fixtures for optimizer integration tests."""
 
+from copy import deepcopy
+
+import gymnasium as gym
+
 from research.rewards import mean_rewards
 from research.rollouts import Rollouts
-from rsikit import Executor, Run
-from rsikit.evaluation import _run_episode
+from rsikit import Episode, Evaluator, Executor, Run
+from rsikit.evaluation import PolicyError
 
 
-async def run_episode(*args, **kwargs):
-    """Exercise worker lifecycle preparation while retaining concise legacy assertions."""
-    return (await _run_episode(*args, **kwargs)).final_step
+async def run_episode(make_env, make_policy, *, seed=None, max_steps=None, instructions=None):
+    """Own trusted test instances and expose the final transition for legacy assertions."""
+    with gym.make(make_env) if isinstance(make_env, str) else make_env() as env:
+        if instructions is None:
+            instructions = (
+                env.get_wrapper_attr("instructions") if env.has_wrapper_attr("instructions") else ""
+            )
+        policy = make_policy(
+            deepcopy(env.observation_space), deepcopy(env.action_space), instructions=instructions
+        )
+        try:
+            episode = await Evaluator(max_steps=max_steps).evaluate(policy, env, seed=seed)
+            return episode.final_step
+        finally:
+            await policy.close()
 
 
 class recorded_run:
@@ -51,8 +67,11 @@ async def finish_pending(rollouts):
 def fake_executor(*, evaluation, **kwargs):
     executor = Executor(**kwargs)
 
-    async def evaluate(*args):
-        return await evaluation.evaluate(*args)
+    async def evaluate(job):
+        try:
+            return await evaluation.evaluate(job.policy.source, job.environment, job.seed)
+        except PolicyError as exc:
+            return Episode(error=str(exc))
 
     executor._evaluate = evaluate
     return executor

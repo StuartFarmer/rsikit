@@ -2,6 +2,7 @@
 
 import asyncio
 import json
+import pickle
 import tempfile
 import unittest
 from pathlib import Path
@@ -93,6 +94,15 @@ class Solution(Policy):
         with tempfile.TemporaryDirectory() as directory:
             async with PanelEvaluator(directory, max_steps=3, timeout=10) as evaluator:
                 result = await evaluator.evaluate([policy], seeds=[0, 1])
+            event = json.loads(Path(directory, "evaluations.jsonl").read_text())
+            saved = pickle.loads(Path(directory, event["episode_file"]).read_bytes())
+            from research.ocean.evaluator import episode_panel
+
+            restored = episode_panel(saved, [0, 1])
+            self.assertEqual(
+                restored[0].observations[0].dtype, result[policy.id][0].observations[0].dtype
+            )
+            self.assertEqual(restored[0].error, result[policy.id][0].error)
         for episode in result[policy.id].values():
             self.assertEqual(len(episode), 1)
             self.assertEqual(len(episode.observations), 2)

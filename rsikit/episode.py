@@ -2,27 +2,49 @@
 
 import base64
 import math
-from dataclasses import field
-from typing import Annotated, Any
+from typing import Annotated, Union
 
 import numpy as np
-from pydantic import BeforeValidator, ConfigDict, Field, TypeAdapter
-from pydantic.dataclasses import dataclass
+from pydantic import AfterValidator, BaseModel, BeforeValidator, ConfigDict, Field
+from typing_extensions import TypeAliasType
 
 
 def _reward(value):
     # Strict float validation also accepts float-convertible objects, including NumPy booleans.
-    if type(value) not in (int, float):
-        raise ValueError("Episode rewards must be ordinary numbers")
+    if type(value) not in (int, float) or (type(value) is float and not math.isfinite(value)):
+        raise ValueError("Episode rewards must be finite ordinary numbers")
     return value
 
 
-@dataclass(
-    config=ConfigDict(
-        strict=True, extra="forbid", allow_inf_nan=False, revalidate_instances="always"
-    )
+def _array(value):
+    if value.dtype.kind not in "biuf" or value.dtype.itemsize > 16:
+        raise ValueError("Episode arrays must contain real numbers or booleans")
+    if value.nbytes > 262_144:
+        raise ValueError("Array exceeds 256 KiB")
+    return value
+
+
+EpisodeValue = TypeAliasType(
+    "EpisodeValue",
+    Union[
+        Annotated[np.ndarray, AfterValidator(_array)],
+        np.integer,
+        np.floating,
+        np.bool_,
+        None,
+        bool,
+        int,
+        float,
+        str,
+        bytes,
+        list["EpisodeValue"],
+        tuple["EpisodeValue", ...],
+        dict[str, "EpisodeValue"],
+    ],
 )
-class Episode:
+
+
+class Episode(BaseModel):
     """An attempted rollout, including its partial trajectory and candidate error.
 
     Recorded transitions have T actions/rewards/flags and T+1 observations/infos.
@@ -33,18 +55,22 @@ class Episode:
     terminations[t], truncations[t], infos[t+1]. Index 0 of infos is reset info.
     """
 
-    observations: list[Any] = field(default_factory=list)
-    actions: list[Any] = field(default_factory=list)
-    rewards: list[Annotated[int | float, BeforeValidator(_reward)]] = field(default_factory=list)
-    terminations: list[bool] = field(default_factory=list)
-    truncations: list[bool] = field(default_factory=list)
-    infos: list[dict[Any, Any]] = field(default_factory=list)
-    artifacts: dict[str, bytes] = field(default_factory=dict)
+    model_config = ConfigDict(
+        strict=True, extra="forbid", arbitrary_types_allowed=True, revalidate_instances="always"
+    )
+
+    observations: list[EpisodeValue] = Field(default_factory=list)
+    actions: list[EpisodeValue] = Field(default_factory=list)
+    rewards: list[Annotated[int | float, BeforeValidator(_reward)]] = Field(default_factory=list)
+    terminations: list[bool] = Field(default_factory=list)
+    truncations: list[bool] = Field(default_factory=list)
+    infos: list[dict[str, EpisodeValue]] = Field(default_factory=list)
+    artifacts: dict[str, bytes] = Field(default_factory=dict)
     error: Annotated[str, Field(pattern=r"\S")] | None = None
 
     def validate_complete(self) -> "Episode":
         """Validate current fields and trajectory, including post-construction mutations."""
-        _EPISODE.validate_python(self)
+        type(self).model_validate(self)
         length = len(self)
         if (not length and self.error is None) or any(
             len(track) != length for track in (self.actions, self.terminations, self.truncations)
@@ -61,17 +87,13 @@ class Episode:
         return self
 
     def encode(self) -> dict:
-        """Return the stable data-only representation for a saved episode."""
+        """Return validated native values for pickle transport and storage."""
         self.validate_complete()
-        return {
-            name: EpisodeEncoder.encode(value)
-            for name, value in vars(self).items()
-            if name != "error" or value is not None
-        }
+        return self.model_dump(exclude={"error"} if self.error is None else set())
 
     @classmethod
     def from_data(cls, data: dict) -> "Episode":
-        """Construct and validate an episode from its encoded representation."""
+        """Validate native fields, also accepting the previous tagged JSON format."""
         fields = {
             "observations",
             "actions",
@@ -83,8 +105,9 @@ class Episode:
         }
         if not isinstance(data, dict) or set(data) not in (fields, fields | {"error"}):
             raise ValueError("Malformed episode fields")
-        values = {name: EpisodeEncoder.decode(value) for name, value in data.items()}
-        return cls(**values).validate_complete()
+        if isinstance(data["rewards"], list) and data["rewards"][:1] == ["list"]:
+            data = {name: _LegacyDecoder.decode(value) for name, value in data.items()}
+        return cls.model_validate(data).validate_complete()
 
     def decode(self, data: dict) -> "Episode":
         """Replace this episode with decoded data, leaving it intact if validation fails."""
@@ -110,11 +133,8 @@ class Episode:
         )
 
 
-_EPISODE = TypeAdapter(Episode)
-
-
-class EpisodeEncoder:
-    """Encode and decode the nested values stored in episode fields."""
+class _LegacyDecoder:
+    """Read existing tagged JSON episodes; new episodes use pickle."""
 
     MAX_ARRAY_BYTES = 262_144
 
@@ -135,38 +155,6 @@ class EpisodeEncoder:
         if size > cls.MAX_ARRAY_BYTES:
             raise ValueError("Array exceeds 256 KiB")
         return size
-
-    @classmethod
-    def encode(cls, value, _depth=0):
-        if _depth > 64:
-            raise ValueError("Value nesting exceeds 64")
-        if isinstance(value, np.ndarray):
-            cls._shape(value.shape, cls._dtype(value.dtype.str))
-            return [
-                "array",
-                value.dtype.str,
-                list(value.shape),
-                base64.b64encode(value.tobytes()).decode(),
-            ]
-        if isinstance(value, np.generic):
-            return cls.encode(value.item(), _depth + 1)
-        if value is None or type(value) in (bool, int, str):
-            return value
-        if isinstance(value, bytes):
-            return ["bytes", base64.b64encode(value).decode()]
-        if type(value) is float:
-            return value if math.isfinite(value) else ["float", str(value)]
-        if isinstance(value, (tuple, list)):
-            return [
-                "tuple" if isinstance(value, tuple) else "list",
-                [cls.encode(v, _depth + 1) for v in value],
-            ]
-        if isinstance(value, dict):
-            return [
-                "dict",
-                [[cls.encode(k, _depth + 1), cls.encode(v, _depth + 1)] for k, v in value.items()],
-            ]
-        raise ValueError(f"Unsupported value type: {type(value).__name__}")
 
     @classmethod
     def decode(cls, value, _depth=0):

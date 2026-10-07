@@ -113,9 +113,7 @@ from rsikit import Evaluator
 with BitcoinEnv() as env:
     policy = Solution(deepcopy(env.observation_space), deepcopy(env.action_space))
     try:
-        observation, info = env.reset(seed=0)
-        await policy.reset(seed=1)
-        episode = await Evaluator(env, policy).run(observation, info=info)
+        episode = await Evaluator().evaluate(policy, env, seed=0)
     finally:
         await policy.close()
 print(episode.total_reward, len(episode))
@@ -147,7 +145,7 @@ from functools import partial
 
 make_validation_env = partial(BitcoinEnv, data_path="data/bitcoin/validation.csv")
 # Only after freezing the policy:
-# Create/reset fresh policy and environment instances, then use Evaluator.
+# Create policy and environment instances; Evaluator resets them.
 # For isolated execution, construct this environment on the host and pass it
 # to Executor with a separate Run for storage; loaded price tuples serialize.
 ```

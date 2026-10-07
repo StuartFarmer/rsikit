@@ -1,13 +1,15 @@
 """Raw episode transport and persistence do not require an execution backend."""
 
+import json
+import pickle
 import tempfile
 import unittest
 from pathlib import Path
 
 import numpy as np
+from pydantic import BaseModel
 
 from rsikit import Episode, PolicyDefinition, Run
-from rsikit.episode import EpisodeEncoder
 
 
 def trajectory(reward=3.0, artifacts=None):
@@ -23,6 +25,22 @@ def trajectory(reward=3.0, artifacts=None):
 
 
 class EpisodeStorageTests(unittest.TestCase):
+    def test_native_contract_and_pickle_roundtrip(self):
+        episode = trajectory(artifacts={"blob": b"\x00\xff"})
+        self.assertIsInstance(episode, BaseModel)
+        episode.infos[-1]["scalar"] = np.int16(7)
+        data = episode.encode()
+        self.assertIsInstance(data["observations"][0], np.ndarray)
+        restored = Episode.from_data(pickle.loads(pickle.dumps(data)))
+        np.testing.assert_array_equal(restored.observations[0], episode.observations[0])
+        self.assertEqual(restored.observations[0].dtype, episode.observations[0].dtype)
+        self.assertIsInstance(restored.infos[-1]["detail"], tuple)
+        self.assertIsInstance(restored.infos[-1]["scalar"], np.int16)
+        self.assertEqual(restored.artifacts, episode.artifacts)
+        for value in (object(), {1: "non-string key"}, np.array([object()])):
+            with self.subTest(value=value), self.assertRaises(ValueError):
+                Episode(observations=[value])
+
     def test_constructor_validates_fields_while_allowing_incomplete_rollouts(self):
         self.assertEqual(len(Episode()), 0)
         self.assertEqual(Episode(observations=[0], infos=[{}]).observations, [0])
@@ -71,7 +89,7 @@ class EpisodeStorageTests(unittest.TestCase):
                 rewards=[1],
                 terminations=[False],
                 truncations=[False],
-                infos=[{}, {2: (b"bytes", float("inf"))}],
+                infos=[{}, {"detail": (b"bytes", float("inf"))}],
                 error="act failed",
             ),
         ):
@@ -95,7 +113,20 @@ class EpisodeStorageTests(unittest.TestCase):
         episode = Episode.from_data(saved)
         self.assertEqual(episode.total_reward, 7.0)
         self.assertEqual(episode.artifacts, {"log.txt": b"hi"})
-        self.assertEqual(episode.encode(), saved)
+        self.assertEqual(episode.encode()["rewards"], [7.0])
+        policy = PolicyDefinition.from_text(
+            "from rsikit import Policy\nclass Solution(Policy):\n    async def act(self, observation):\n        return 0\n"
+        )
+        with (
+            tempfile.TemporaryDirectory() as directory,
+            Run.create(name="legacy", path=Path(directory) / "run") as run,
+        ):
+            path = run.path / "episodes" / policy.id / "0.json"
+            path.parent.mkdir(parents=True)
+            path.write_text(json.dumps(saved))
+            self.assertEqual(run.load_episode(policy, 0).total_reward, 7.0)
+            run.save_episode(policy, 0, trajectory(9))
+            self.assertEqual(run.load_episode(policy, 0).total_reward, 9.0)
 
     def test_decode_replaces_existing_episode_only_after_validation(self):
         episode = Episode(error="previous failure")
@@ -104,7 +135,7 @@ class EpisodeStorageTests(unittest.TestCase):
         self.assertEqual(episode.encode(), saved)
         self.assertIsNone(episode.error)
 
-        broken = dict(saved, actions=["list", []])
+        broken = dict(saved, actions=[])
         with self.assertRaises(ValueError):
             episode.decode(broken)
         self.assertEqual(episode.encode(), saved)
@@ -126,7 +157,7 @@ class EpisodeStorageTests(unittest.TestCase):
         ):
             with self.subTest(field=field):
                 broken = dict(data)
-                broken[field] = EpisodeEncoder.encode(value)
+                broken[field] = value
                 with self.assertRaises(ValueError):
                     Episode.from_data(broken)
 
@@ -141,8 +172,12 @@ class EpisodeStorageTests(unittest.TestCase):
                 run.save_episode(policy, 42, trajectory(artifacts={"nested/log.txt": b"ok"}))
                 self.assertEqual(run.scores(policy), {42: 9.0})  # Explicit optimizer score.
             with Run.open(path) as run:
+                self.assertTrue((path / "episodes" / policy.id / "42.pkl").is_file())
                 restored = run.load_episode(policy, 42)
                 self.assertEqual(restored.total_reward, 3.0)
+                self.assertIsInstance(restored.observations[0], np.ndarray)
+                self.assertEqual(restored.observations[0].dtype, np.float64)
+                self.assertIsInstance(restored.infos[-1]["detail"], tuple)
                 self.assertEqual(restored.artifacts, {"nested/log.txt": b"ok"})
                 self.assertEqual(run.policies()[0].id, policy.id)
                 self.assertFalse(hasattr(run, "evaluate"))

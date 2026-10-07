@@ -4,7 +4,7 @@ import argparse
 import asyncio
 from pathlib import Path
 
-from rsikit import Executor, PolicyDefinition
+from rsikit import Executor, Job, PolicyDefinition
 from rsikit.envs import CirclePackingEnv
 from rsikit.evaluation import PolicyError
 
@@ -18,9 +18,8 @@ async def main():
     policy = PolicyDefinition.from_file(args.program)
     with CirclePackingEnv() as environment:
         async with Executor() as executor:
-            async for _, _, episode in executor.evaluate(
-                [(policy.id, policy.source, 1)], environment, policy_seed=2, max_steps=1
-            ):
+            async for job in executor.execute([Job(policy, environment, seed=1, max_steps=1)]):
+                episode = job.result
                 if episode.error is not None:
                     raise PolicyError(episode.error)
                 print(episode.infos[-1])

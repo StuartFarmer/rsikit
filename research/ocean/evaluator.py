@@ -8,6 +8,7 @@ import json
 import math
 import multiprocessing as mp
 import os
+import pickle
 import resource
 import signal
 import sys
@@ -200,16 +201,16 @@ def _child(channel, directory, source, seeds, batch_size, max_steps, diagnostics
             result["worker_peak_rss_bytes"] = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss * (
                 1 if sys.platform == "darwin" else 1024
             )
-            data = json.dumps(result, allow_nan=False).encode()
+            data = pickle.dumps(result, protocol=pickle.HIGHEST_PROTOCOL)
             if len(data) > MAX_RESULT:
                 raise ValueError("Panel result exceeds 64 MiB")
         except BaseException as exc:
-            data = json.dumps(
+            data = pickle.dumps(
                 {
                     "error": traceback.format_exc()[-8000:],
                     "kind": "policy" if isinstance(exc, PolicyError) else "infrastructure",
                 }
-            ).encode()
+            )
         channel.send_bytes(data)
 
 
@@ -292,8 +293,10 @@ class PanelEvaluator:
                 if not done:
                     raise PolicyTimeout(f"Candidate panel exceeded {self.timeout * len(seeds):g}s")
                 try:
-                    result = json.loads(reading.result())
-                except (EOFError, OSError, ValueError) as exc:
+                    result = pickle.loads(reading.result())
+                    if not isinstance(result, dict):
+                        raise ValueError("Expected a panel result")
+                except (EOFError, OSError, ValueError, pickle.UnpicklingError) as exc:
                     raise InfrastructureError("Ocean worker exited without a valid result") from exc
                 if "error" in result:
                     error = PolicyError if result.get("kind") == "policy" else InfrastructureError
@@ -412,7 +415,21 @@ class PanelEvaluator:
             try:
                 event["received"] = perf_counter()
                 destination = self.output / "measurements" / f"{job_id}.json"
-                destination.write_text(json.dumps(event, allow_nan=False) + "\n")
+                # Keep native trajectories in pickle and readable measurements in JSON.
+                summary = {
+                    **event,
+                    "results": [
+                        {key: value for key, value in row.items() if key != "episode"}
+                        for row in event["results"]
+                    ],
+                }
+                if any("episode" in row for row in event["results"]):
+                    data = pickle.dumps(event, protocol=pickle.HIGHEST_PROTOCOL)
+                    if len(data) > MAX_RESULT:
+                        raise InfrastructureError("Panel result exceeds 64 MiB")
+                    destination.with_suffix(".pkl").write_bytes(data)
+                    summary["episode_file"] = f"measurements/{job_id}.pkl"
+                destination.write_text(json.dumps(summary, allow_nan=False) + "\n")
                 event["persisted"] = perf_counter()
                 event["queue_seconds"] = (
                     event["received"] if event["started"] is None else event["started"]
@@ -421,8 +438,9 @@ class PanelEvaluator:
                     0 if event["started"] is None else event["persisted"] - event["started"]
                 )
                 event["response_seconds"] = event["persisted"] - event["submitted"]
+                summary.update({key: value for key, value in event.items() if key != "results"})
                 with (self.output / "evaluations.jsonl").open("a") as log:
-                    log.write(json.dumps(event, allow_nan=False) + "\n")
+                    log.write(json.dumps(summary, allow_nan=False) + "\n")
                 self.events.append(event)
             finally:
                 if acquired:

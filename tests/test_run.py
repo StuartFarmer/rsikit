@@ -17,7 +17,7 @@ from sqlmodel import Field, SQLModel, select
 
 import rsikit.generation as generation
 from research.rewards import mean_rewards
-from rsikit import PolicyDefinition, generate
+from rsikit import Job, PolicyDefinition, generate
 from rsikit.evaluation import InfrastructureError, PolicyError
 from rsikit.policy import InvalidPolicy
 from tests.helpers import fake_executor, finish_pending, recorded_run
@@ -126,9 +126,14 @@ class RunTests(unittest.IsolatedAsyncioTestCase):
 
         async def batch(seeds):
             return [
-                item
-                async for item in self.executor.evaluate(
-                    [(str(seed), RESPONSE["implementation"], seed) for seed in seeds], self.env
+                (job.policy.id, job.seed, job.result)
+                async for job in self.executor.execute(
+                    [
+                        Job(
+                            PolicyDefinition(source=RESPONSE["implementation"]), self.env, seed=seed
+                        )
+                        for seed in seeds
+                    ]
                 )
             ]
 

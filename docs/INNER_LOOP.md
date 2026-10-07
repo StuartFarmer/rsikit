@@ -1,8 +1,9 @@
 # Inner-loop API
 
 `Evaluator` runs one episode using an existing Gymnasium environment and an
-existing async `Policy`. The caller creates, seeds, resets, and closes both
-instances, and is responsible for not reusing stateful objects accidentally.
+existing async `Policy`. The evaluator resets both instances for each call;
+the caller creates and closes them. One evaluator can serve different pairs
+and repeated evaluations with different seeds.
 For generated policies and durable batch evaluations, see [Run](RUNS.md).
 
 `rsikit.evaluation.Evaluator` collects the rollout and returns an
@@ -15,7 +16,7 @@ Episode execution returns raw trajectories. Search evaluators report neutral
 from copy import deepcopy
 
 import gymnasium as gym
-from rsikit import Evaluator, Policy
+from rsikit import Policy, evaluate
 
 
 class RandomPolicy(Policy):
@@ -26,10 +27,7 @@ class RandomPolicy(Policy):
 with gym.make("LunarLander-v3", render_mode="human") as env:
     policy = RandomPolicy(deepcopy(env.observation_space), deepcopy(env.action_space))
     try:
-        observation, info = env.reset(seed=42)
-        await policy.reset(seed=42)
-        evaluator = Evaluator(env, policy, max_steps=1000)
-        episode = await evaluator.run(observation, info=info)
+        episode = await evaluate(policy, env, seed=42, max_steps=1000)
     finally:
         await policy.close()
 
@@ -38,21 +36,28 @@ observation, reward, terminated, truncated, info = episode.final_step
 ```
 
 The code above runs inside an async function or a notebook supporting top-level
-`await`. `run()` does not call `reset()` or `close()`, even on failure or
-cancellation. Pass the observation returned by the caller's reset; supplying its
-`info` is optional. The evaluator has no seed or factory parameters. It runs the
-supplied objects directly and does not provide a sandbox.
+`await`. `evaluate()` resets the environment, records the initial observation and
+info, then resets the policy. Both receive the same `seed` exactly once. A seed is
+a nonnegative integer or `None`; `None` requests no reproducibility guarantee.
+Each call starts a new episode, so policy `reset()` must clear episode state.
+`Evaluator(max_steps=...).evaluate(policy, env, seed=...)` is the reusable class API.
+The evaluator does not call `close()`, including on failure or cancellation.
+It runs the supplied objects directly and does not provide a sandbox.
 
 Existing Gymnasium episode limits apply. `max_steps` is an optional positive
 integer that marks the last recorded transition as truncated when the rollout
-reaches that many steps. It neither resets nor wraps the supplied environment,
-and cannot extend its existing limit. Like Gymnasium's `TimeLimit`, it can set
+reaches that many steps. It does not wrap the supplied environment and cannot
+extend its existing limit. Like Gymnasium's `TimeLimit`, it can set
 truncation on the same step as termination. Use a `TimeLimit` wrapper before
 resetting if other environment wrappers also need to observe that limit.
 
+Successful episodes include `info["episode"]` in their last recorded info, with
+`r` (total reward), `l` (step count), and `t` (elapsed seconds). Existing statistics
+supplied by the environment are preserved.
+
 ## Episode histories
 
-`run()` returns an `Episode`, with these ordinary Python lists:
+`evaluate()` returns an `Episode` Pydantic `BaseModel`, with these ordinary Python lists:
 
 | Field | Length after T steps | Meaning |
 | --- | --- | --- |
@@ -62,6 +67,15 @@ resetting if other environment wrappers also need to observe that limit.
 | `terminations` | T | Task termination flags |
 | `truncations` | T | Truncation flags, including the evaluator's step cap |
 | `infos` | T + 1 | Initial info (or `{}`), then each step's diagnostic info |
+
+Construct episodes with keyword arguments. Observations, actions, and info values
+accept Python scalars (`None`, bool, int, float, str, bytes), NumPy integer/float/bool
+scalars, real numeric or boolean NumPy arrays, and nested lists, tuples, and
+string-keyed dictionaries. Object, structured, and complex arrays and arbitrary
+Python objects are rejected. Each array is limited to 256 KiB.
+Rewards must be finite Python numbers (not booleans); end flags must be booleans.
+`artifacts` is a `dict[str, bytes]`; `error` is nonblank text or `None`.
+Field types and trajectory lengths are revalidated before storage and optimizer feedback.
 
 Transition `t` is:
 
@@ -77,8 +91,8 @@ info = episode.infos[t + 1]
 
 `episode.total_reward` is the undiscounted sum of rewards; `len(episode)` is the
 number of transitions. `episode.final_step` provides the final Gymnasium tuple,
-whose reward is only the last step's reward. No `info["episode"]` key is added by
-the evaluator; use the summary properties or wrap the environment yourself.
+whose reward is only the last step's reward. Successful episodes include the
+`info["episode"]` summary described above.
 
 Observations, actions, and infos are deep-copied so reused arrays or dictionaries
 cannot rewrite earlier transitions. These values must support deep copying.
@@ -110,40 +124,86 @@ Only copied observations reach `act`; diagnostic info stays in the episode.
 Goals and feedback the policy needs during the episode belong in observations.
 No weights are trained by the evaluator.
 
+## From interactive evaluation to a sweep
+
+```python
+from rsikit import Job, evaluate, execute
+
+# Inside an async function, with caller-owned policy/environment instances:
+episode = await evaluate(policy, environment, seed=42)
+score = episode.total_reward
+jobs = [Job(policy, environment, seed=seed) for seed in range(100)]
+completed_jobs = await execute(jobs, concurrency=8)
+for job in completed_jobs:
+    print(job.seed, job.result.total_reward, job.result.error)
+```
+
+`Job` construction only stores references. Each worker gets a private copy of the
+policy/environment pair and resets both once with `job.seed`; callers need not
+reset or prove freshness first. Worker cleanup closes only the copies. Direct
+`evaluate()` uses the actual instances and leaves cleanup to the caller.
+
+Keep inputs unchanged while execution is in progress: each snapshot is taken when
+a worker slot opens. Locally defined classes and wrappers are supported by
+cloudpickle, but live connections, event loops or native resources may not be
+serializable. If interactive use retained such resources, supply fresh instances
+or implement serialization for those types. Execution never silently falls back
+to the parent process.
+
+The returned jobs are the original submitted objects, in completion order.
+`job.result` starts as `None`; `job.done` becomes true when an Episode is attached,
+including policy failures. Each job is single-use. For infrastructure failure or
+cancellation, unfinished jobs have no result; the execution call raises. Create a
+new job to retry.
+
+For large runs, persist results as they arrive instead of collecting a list:
+
+```python
+from contextlib import aclosing
+from rsikit import Executor
+
+async with Executor(concurrency=8, episode_timeout=60) as executor:
+    async with aclosing(executor.execute(jobs)) as results:
+        async for job in results:
+            persist(job)  # Your storage callback; job.result is an Episode.
+```
+
+Use new jobs for this example. `aclosing()` ensures early exits cancel and reap
+outstanding workers. An Executor shares its concurrency limit across submissions.
+
 ## Generated programs
 
 ```python
 import gymnasium as gym
-from rsikit import Executor, PolicyDefinition
+from rsikit import Job, PolicyDefinition, execute
 
 policy = PolicyDefinition.from_file("solution.py")
 with gym.make("CartPole-v1") as environment:
-    async with Executor(episode_timeout=60) as executor:
-        async for _, seed, episode in executor.evaluate(
-            [(policy.id, policy.source, 42)], environment, max_steps=100
-        ):
-            print(seed, episode.error, episode.total_reward)
+    jobs = await execute([Job(policy, environment, seed=42, max_steps=100)])
+    print(jobs[0].result.error, jobs[0].result.total_reward)
 ```
 
-Load files with `PolicyDefinition.from_file` and pass jobs to `Executor.evaluate`,
-whether evaluating one episode or a batch. The caller owns the environment template;
-each child receives its own copy. The source must export `Solution(Policy)`.
-Each job's seed resets both environment and policy by default. Optional `policy_seed`,
-`instructions`, and `max_steps` override policy seeding, task text, and the step cap.
-Explicit `policy_seed=None` leaves the policy unseeded. Options apply to every job
-in that call; candidate failures are returned in `episode.error`.
-The episode deadline defaults to 60 seconds and includes policy loading, reset,
-actions, cleanup and result preparation. Direct `Evaluator` calls have no deadline.
+Job accepts `PolicyDefinition` as well as a live Policy. Source must export
+`Solution(Policy)`; loading and construction occur inside the timed worker, so
+constructor failures remain repairable. `instructions` on a definition job can
+override the environment's task text. Instance jobs already own their instructions.
+`max_steps` is a per-job step cap. There is one seed for both objects.
+
+The episode deadline defaults to 60 seconds and includes worker loading, reset,
+actions, cleanup and result preparation. Caller-side construction and serialization
+are outside this deadline. Direct evaluation has no hard deadline.
 
 Run application modules through `scripts/run MODULE [ARGS...]` to isolate the whole
 application in Docker. Calling this Python API directly uses local processes.
 Generated code shares application credentials, network, outputs and scoring state.
 See [application execution](IN_PROCESS_SANDBOX.md).
 
-Caller-provided environment templates use cloudpickle to reach the child; its
-imports must be installed in the application image. Attempted `Episode` objects
-return over a multiprocessing connection, with a 64 MiB result ceiling. Saved
-JSON serialization lives with `Episode` and retains the existing representation.
+Inputs use cloudpickle; required imports must be installed in the application
+image. Workers return native Episode fields using pickle over a multiprocessing
+connection, with a 64 MiB result ceiling. Pickle preserves arrays, NumPy scalars,
+tuples, and binary artifacts without JSON conversion. Only load trusted worker
+outputs and run directories; pickle can execute Python code. New saved episodes
+use `.pkl`; older compatible `.json` episodes remain readable.
 
 ## Failures
 
@@ -159,7 +219,7 @@ illegal actions. Other environment errors, infrastructure errors, and cancellati
 propagate as exceptions. A process deadline returns an error episode without a
 trajectory because the terminated worker cannot return its memory.
 
-The caller owns cleanup after `Evaluator.run()`. Execution helpers clean up their
+The caller owns cleanup after `Evaluator.evaluate()`. Execution helpers clean up their
 instances and preserve the original candidate diagnostic if cleanup also fails.
 Successful and failed episodes use the same persistence API. Legacy successful
 saved episodes remain readable; failed cached episodes are retried on the next

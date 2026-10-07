@@ -1,18 +1,16 @@
 """Saved-value compatibility and full application episode checks."""
 
-import json
 import tempfile
 import unittest
 from pathlib import Path
 from unittest.mock import patch
 
 import gymnasium as gym
-import numpy as np
 from gymnasium import spaces
 
 from research.rewards import mean_rewards
-from rsikit import Executor, PolicyDefinition
-from rsikit.episode import EpisodeEncoder
+from rsikit import Executor, Job, PolicyDefinition
+from rsikit.episode import Episode
 from rsikit.evaluation import InfrastructureError, PolicyError
 from rsikit.policy import Policy
 from tests.helpers import fake_executor, finish_pending, recorded_run, run_episode
@@ -68,23 +66,25 @@ class CounterPolicy(Policy):
 
 
 class CodecSmoke(unittest.TestCase):
-    def test_round_trip_and_rejected_allocations(self):
-        value = {"a": (np.array([[1, 2]], dtype=np.int16), [True, None, "π", float("inf")]), 3: 4}
-        restored = EpisodeEncoder.decode(
-            json.loads(json.dumps(EpisodeEncoder.encode(value), allow_nan=False))
-        )
-        np.testing.assert_array_equal(restored["a"][0], value["a"][0])
-        self.assertEqual(restored["a"][0].dtype, np.int16)
-        self.assertIsInstance(restored["a"], tuple)
-        self.assertEqual(restored["a"][1], value["a"][1])
-        self.assertEqual(restored[3], 4)
+    def test_legacy_json_rejects_unsafe_allocations(self):
         for encoded in (
             ["array", "O", [1], "AAAAAAAAAAA="],
             ["array", "f8", [1_000_000], ""],
             ["array", "f8", [1], ""],
         ):
             with self.assertRaises((ValueError, TypeError)):
-                EpisodeEncoder.decode(encoded)
+                Episode.from_data(
+                    dict(
+                        observations=["list", [encoded]],
+                        actions=["list", []],
+                        rewards=["list", []],
+                        terminations=["list", []],
+                        truncations=["list", []],
+                        infos=["list", [["dict", []]]],
+                        artifacts=["dict", []],
+                        error="failed",
+                    )
+                )
 
 
 class ApplicationEpisodeTests(unittest.IsolatedAsyncioTestCase):
@@ -93,16 +93,16 @@ class ApplicationEpisodeTests(unittest.IsolatedAsyncioTestCase):
         with CounterEnv() as environment:
             async with Executor(episode_timeout=timeout) as executor:
                 results = [
-                    episode
-                    async for _, _, episode in executor.evaluate(
-                        [(policy.id, policy.source, 1)], environment, policy_seed=2, max_steps=5
+                    job.result
+                    async for job in executor.execute(
+                        [Job(policy, environment, seed=1, max_steps=5)]
                     )
                 ]
         (episode,) = results
         return episode if raw else episode.final_step
 
     async def test_state_instructions_and_examples(self):
-        local = await run_episode(CounterEnv, CounterPolicy, env_seed=1, policy_seed=2, max_steps=5)
+        local = await run_episode(CounterEnv, CounterPolicy, seed=1, max_steps=5)
         for _ in range(2):
             isolated = await self.run_source(COUNTER_SOURCE)
             self.assertEqual(isolated[:4], local[:4])
@@ -122,12 +122,9 @@ class ApplicationEpisodeTests(unittest.IsolatedAsyncioTestCase):
                 async with Executor() as executor:
                     episodes.extend(
                         [
-                            episode
-                            async for _, _, episode in executor.evaluate(
-                                [(policy.id, policy.source, 1)],
-                                environment,
-                                policy_seed=2,
-                                max_steps=limit,
+                            job.result
+                            async for job in executor.execute(
+                                [Job(policy, environment, seed=1, max_steps=limit)]
                             )
                         ]
                     )

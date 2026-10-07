@@ -10,7 +10,7 @@ from unittest.mock import Mock, patch
 
 import gymnasium as gym
 
-from rsikit import Executor, PolicyDefinition
+from rsikit import Executor, Job, PolicyDefinition
 from rsikit.evaluation import InfrastructureError, PolicyError
 
 
@@ -66,7 +66,9 @@ class ExecutionTests(unittest.IsolatedAsyncioTestCase):
                     process.join.side_effect = join
                     receiving, sending = Mock(), Mock()
                     receiving.recv_bytes.return_value = (
-                        b'{"results": [], "steps": 0}' if ocean else pickle.dumps(Episode())
+                        pickle.dumps({"results": [], "steps": 0})
+                        if ocean
+                        else pickle.dumps(Episode(error="example").encode())
                     )
                     executor._context = Mock()
                     executor._context.Process.return_value = process
@@ -80,7 +82,9 @@ class ExecutionTests(unittest.IsolatedAsyncioTestCase):
                         evaluation = (
                             executor._panel(SOURCE, [1])
                             if ocean
-                            else executor._evaluate(SOURCE, b"", 1)
+                            else executor._evaluate(
+                                Job(PolicyDefinition(source=SOURCE), ProcessEnv(), seed=1)
+                            )
                         )
                         if exits:
                             await evaluation
@@ -118,9 +122,12 @@ class ExecutionTests(unittest.IsolatedAsyncioTestCase):
 
     async def collect(self, executor, source=SOURCE, seeds=(1,), environment=None):
         return [
-            r
-            async for r in executor.evaluate(
-                [("policy", source, seed) for seed in seeds], environment or ProcessEnv()
+            (job.policy.id, job.seed, job.result)
+            async for job in executor.execute(
+                [
+                    Job(PolicyDefinition(source=source), environment or ProcessEnv(), seed=seed)
+                    for seed in seeds
+                ]
             )
         ]
 
@@ -155,23 +162,27 @@ class ExecutionTests(unittest.IsolatedAsyncioTestCase):
             policy = PolicyDefinition.from_file(path)
             with ProcessEnv() as environment:
                 async with Executor() as executor:
-                    for policy_seed, instructions in ((5, "override"), (None, "")):
+                    for seed, instructions in ((5, "override"), (None, "")):
                         results = [
-                            episode
-                            async for _, _, episode in executor.evaluate(
-                                [(policy.id, policy.source, 3)],
-                                environment,
-                                policy_seed=policy_seed,
-                                instructions=instructions,
-                                max_steps=1,
+                            job.result
+                            async for job in executor.execute(
+                                [
+                                    Job(
+                                        policy,
+                                        environment,
+                                        seed=seed,
+                                        instructions=instructions,
+                                        max_steps=1,
+                                    )
+                                ]
                             )
                         ]
                         (episode,) = results
                         self.assertEqual(
                             json.loads(episode.artifacts["state.json"])[1:],
-                            [1, policy_seed, instructions],
+                            [1, seed, instructions],
                         )
-                        self.assertEqual(episode.infos[0]["seed"], 3)
+                        self.assertEqual(episode.infos[0]["seed"], seed)
                         self.assertEqual(episode.truncations, [True])
 
     async def test_errors_and_successful_siblings(self):
@@ -190,16 +201,16 @@ class ExecutionTests(unittest.IsolatedAsyncioTestCase):
                         results = await self.collect(executor, source)
                         self.assertIsNotNone(results[0][2].error)
             good = []
-            async for result in executor.evaluate(
-                [
-                    ("bad", SOURCE.replace("return 0", "while True: pass"), 0),
-                    ("good", SOURCE, 1),
-                ],
+            bad = Job(
+                PolicyDefinition(source=SOURCE.replace("return 0", "while True: pass")),
                 ProcessEnv(),
-            ):
-                good.append(result)
-            self.assertEqual(good[0][0], "good")
-            self.assertIn("exceeded", next(ep.error for id, _, ep in good if id == "bad"))
+                seed=0,
+            )
+            good_job = Job(PolicyDefinition(source=SOURCE), ProcessEnv(), seed=1)
+            async for job in executor.execute([bad, good_job]):
+                good.append(job)
+            self.assertIs(good[0], good_job)
+            self.assertIn("exceeded", bad.result.error)
             self.assertEqual(len(await self.collect(executor)), 1)
 
     async def test_invalid_policy_methods_are_repairable(self):
@@ -212,6 +223,47 @@ class ExecutionTests(unittest.IsolatedAsyncioTestCase):
                 with self.subTest(source=source):
                     results = await self.collect(executor, source)
                     self.assertIsNotNone(results[0][2].error)
+
+    async def test_constructor_and_cleanup_failures_preserve_evidence(self):
+        class ClosingEnv(ProcessEnv):
+            def close(self):
+                Path("environment.closed").write_text("closed")
+
+        constructor_failure = (
+            SOURCE
+            + "\n    def __init__(self, *args, **kwargs):\n        raise ValueError('construction failed')\n"
+        )
+        cleanup_failure = (
+            SOURCE + "\n    async def close(self):\n        raise ValueError('cleanup failed')\n"
+        )
+        async with Executor(episode_timeout=10) as executor:
+            for source, error, length in (
+                (constructor_failure, "construction failed", 0),
+                (cleanup_failure, "cleanup failed", 2),
+                (
+                    cleanup_failure.replace("return 0", "raise ValueError('act failed')"),
+                    "act failed",
+                    0,
+                ),
+            ):
+                with self.subTest(error=error):
+                    ((_, _, episode),) = await self.collect(
+                        executor, source, environment=ClosingEnv()
+                    )
+                    self.assertIn(error, episode.error)
+                    self.assertEqual(len(episode), length)
+                    self.assertEqual(episode.artifacts["environment.closed"], b"closed")
+                    episode.encode()
+                    if error == "act failed":
+                        self.assertNotIn("cleanup failed", episode.error)
+                        self.assertIn(b"cleanup failed", episode.artifacts["episode.log"])
+
+            class BrokenEnv(ProcessEnv):
+                def step(self, action):
+                    raise RuntimeError("environment failed")
+
+            with self.assertRaisesRegex(InfrastructureError, "environment failed"):
+                await self.collect(executor, cleanup_failure, environment=BrokenEnv())
 
     async def test_cancel_and_timeout_kill_ordinary_descendants(self):
         with tempfile.TemporaryDirectory() as directory:

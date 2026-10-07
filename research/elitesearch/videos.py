@@ -22,7 +22,7 @@ import gymnasium as gym
 import numpy as np
 import yaml
 
-from rsikit import Executor
+from rsikit import Executor, Job, PolicyDefinition
 from rsikit.envs import BitcoinEnv, BlackjackEnv, PriceSeriesEnv
 from rsikit.envs.bitcoin import TRAIN_DATA, load_prices
 from rsikit.envs.bitcoin_render import BitcoinRenderer
@@ -429,8 +429,13 @@ async def export(
             concurrency=8,
             episode_timeout=experiment.get("episode_timeout", 60.0),
         ) as executor:
+            identities = {
+                Job(PolicyDefinition(source=source), env, seed=seed): pid
+                for pid, source, seed in jobs
+            }
             completed = 0
-            async for pid, seed, result in executor.evaluate(jobs, env):
+            async for job in executor.execute(identities):
+                pid, seed, result = identities[job], job.seed, job.result
                 if result.error is not None:
                     raise PolicyError(result.error)
                 expected = json.loads(unique[pid]["seed_scores"]).get(str(seed))

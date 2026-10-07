@@ -308,8 +308,12 @@ class ExperimentTests(unittest.IsolatedAsyncioTestCase):
                 await resume_experiment(output)
 
     async def test_gym_sessions_match_direct_episode_and_cache(self):
+        from copy import deepcopy
+
+        import numpy as np
+
+        from rsikit import Evaluator
         from rsikit.envs.tasks import make_environment
-        from rsikit.evaluation import _run_episode
         from rsikit.policy import load_policy
 
         for name in ("CartPole-v1", "Blackjack"):
@@ -322,16 +326,19 @@ class ExperimentTests(unittest.IsolatedAsyncioTestCase):
                     seeds=[7], workers=1, max_steps=5 if name == "CartPole-v1" else None
                 )
                 policy = PolicyDefinition.from_text(json.loads(program(0))["implementation"])
-                direct = await _run_episode(
-                    lambda: make_environment(
-                        name, max_steps=evaluation.max_steps, shoes_per_episode=1
-                    ),
-                    lambda obs, act, instructions: load_policy(
-                        policy.source, obs, act, instructions
-                    ),
-                    env_seed=7,
-                    policy_seed=7,
-                )
+                with make_environment(
+                    name, max_steps=evaluation.max_steps, shoes_per_episode=1
+                ) as env:
+                    instance = load_policy(
+                        policy.source,
+                        deepcopy(env.observation_space),
+                        deepcopy(env.action_space),
+                        env.get_wrapper_attr("instructions"),
+                    )
+                    try:
+                        direct = await Evaluator().evaluate(instance, env, seed=7)
+                    finally:
+                        await instance.close()
                 with Run.create(name="session", path=Path(directory) / "run") as run:
                     async with definition.open_evaluator(
                         options=options, evaluation=evaluation, run=run
@@ -343,7 +350,7 @@ class ExperimentTests(unittest.IsolatedAsyncioTestCase):
                         )
                         cached = await evaluate([policy], [7])
 
-                        self.assertEqual(
+                        np.testing.assert_equal(
                             cached[policy.id][7].encode(),
                             result[policy.id][7].encode(),
                         )
