@@ -75,7 +75,7 @@ class Solution(Policy):
 
     async def test_episode_feedback_retains_trajectory_before_candidate_crash(self):
         from research.ocean.evaluator import PanelEvaluator
-        from rsikit.episode import decode_episode, encode_episode
+        from rsikit.episode import Episode
 
         policy = Policy.from_text("""
 import numpy as np
@@ -97,7 +97,7 @@ class Solution(Policy):
             self.assertEqual(len(episode), 1)
             self.assertEqual(len(episode.observations), 2)
             self.assertIn("second action failed", episode.error)
-            self.assertEqual(decode_episode(encode_episode(episode)).error, episode.error)
+            self.assertEqual(Episode.from_data(episode.encode()).error, episode.error)
 
     async def test_backend_failure_propagates_instead_of_becoming_an_episode_error(self):
         from unittest.mock import AsyncMock, patch

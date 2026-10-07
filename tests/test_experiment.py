@@ -342,11 +342,10 @@ class ExperimentTests(unittest.IsolatedAsyncioTestCase):
                             episode_scores(result[policy.id]), {7: direct.total_reward}
                         )
                         cached = await evaluate([policy], [7])
-                        from rsikit.episode import encode_episode
 
                         self.assertEqual(
-                            encode_episode(cached[policy.id][7]),
-                            encode_episode(result[policy.id][7]),
+                            cached[policy.id][7].encode(),
+                            result[policy.id][7].encode(),
                         )
                         self.assertIsNotNone(run.load_episode(policy, 7))
 

@@ -11,7 +11,7 @@ from uuid import uuid4
 from sqlalchemy import JSON, Column, inspect
 from sqlmodel import Field, Session, SQLModel, create_engine, select
 
-from .episode import Episode, decode_episode, encode_episode
+from .episode import Episode
 from .policy import Policy
 from .progress import bind_run
 
@@ -222,7 +222,9 @@ class Run:
         """Save raw evidence and artifacts; fitness is supplied separately by the optimizer."""
         if type(seed) is not int:
             raise ValueError("Episode seed must be an integer")
-        data = json.dumps(encode_episode(episode), allow_nan=False).encode()
+        if not isinstance(episode, Episode):
+            raise ValueError("Expected an Episode")
+        data = json.dumps(episode.encode(), allow_nan=False).encode()
         if len(data) > 64 * 1024 * 1024:
             raise ValueError("Episode exceeds 64 MiB")
         self.save_policy(policy)
@@ -250,4 +252,4 @@ class Run:
             data = stream.read(64 * 1024 * 1024 + 1)
         if len(data) > 64 * 1024 * 1024:
             raise ValueError("Episode exceeds 64 MiB")
-        return decode_episode(json.loads(data))
+        return Episode.from_data(json.loads(data))

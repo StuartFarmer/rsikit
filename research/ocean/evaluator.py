@@ -20,7 +20,6 @@ from uuid import uuid4
 import numpy as np
 
 from rsikit import Episode
-from rsikit.episode import decode_episode, encode_episode
 from rsikit.evaluation import InfrastructureError, PolicyError, PolicyTimeout, _policy_boundary
 from rsikit.policy import InvalidPolicy, load_policy, validate_policy
 
@@ -154,7 +153,7 @@ async def rollout(
                 if record:
                     episode = episodes[panel[lane]]
                     episode.infos[-1].update(metrics=metrics, fitness=row["score"])
-                    row["episode"] = encode_episode(episode)
+                    row["episode"] = episode.encode()
                 results.append(row)
         except PolicyError as exc:
             if not record:
@@ -171,9 +170,7 @@ async def rollout(
                     episode.error = str(exc)
                     score = None
                 results.append(
-                    dict(
-                        seed=seed, score=score, steps=len(episode), episode=encode_episode(episode)
-                    )
+                    dict(seed=seed, score=score, steps=len(episode), episode=episode.encode())
                 )
         finally:
             try:
@@ -446,7 +443,7 @@ class PanelEvaluator:
 
 def episode_panel(event, seeds):
     """Decode recorded trajectories; process failures have no recoverable trajectory."""
-    episodes = {row["seed"]: decode_episode(row["episode"]) for row in event["results"]}
+    episodes = {row["seed"]: Episode.from_data(row["episode"]) for row in event["results"]}
     for seed in seeds:
         if seed not in episodes:
             episodes[seed] = Episode(error=event["error"] or "Episode did not return")

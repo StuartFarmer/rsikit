@@ -7,7 +7,7 @@ from pathlib import Path
 import numpy as np
 
 from rsikit import Episode, Policy, Run
-from rsikit import episode as codec
+from rsikit.episode import EpisodeEncoder
 
 
 def trajectory(reward=3.0, artifacts=None):
@@ -53,13 +53,13 @@ class EpisodeStorageTests(unittest.TestCase):
             getattr(episode, name)[0] = value
             with self.subTest(name=name):
                 with self.assertRaises(ValueError):
-                    codec.encode_episode(episode)
+                    episode.encode()
                 with self.assertRaises(ValueError):
                     validate_results({"p": {0: episode}}, ["p"])
         episode = trajectory()
         episode.artifacts["log"] = "text"
         with self.assertRaises(ValueError):
-            codec.encode_episode(episode)
+            episode.encode()
 
     def test_partial_failures_and_arbitrary_info_values_roundtrip(self):
         for episode in (
@@ -76,10 +76,10 @@ class EpisodeStorageTests(unittest.TestCase):
             ),
         ):
             with self.subTest(error=episode.error):
-                restored = codec.decode_episode(codec.encode_episode(episode))
+                restored = Episode.from_data(episode.encode())
                 self.assertEqual(restored, episode)
         with self.assertRaises(ValueError):
-            codec.encode_episode(Episode())
+            Episode().encode()
 
     def test_pre_migration_saved_json(self):
         # Literal old-format fixture, independent of the current encoder.
@@ -92,15 +92,27 @@ class EpisodeStorageTests(unittest.TestCase):
             "infos": ["list", [["dict", []], ["dict", []]]],
             "artifacts": ["dict", [["log.txt", ["bytes", "aGk="]]]],
         }
-        episode = codec.decode_episode(saved)
+        episode = Episode.from_data(saved)
         self.assertEqual(episode.total_reward, 7.0)
         self.assertEqual(episode.artifacts, {"log.txt": b"hi"})
-        self.assertEqual(codec.encode_episode(episode), saved)
+        self.assertEqual(episode.encode(), saved)
+
+    def test_decode_replaces_existing_episode_only_after_validation(self):
+        episode = Episode(error="previous failure")
+        saved = trajectory(artifacts={"log.txt": b"hello"}).encode()
+        self.assertIs(episode.decode(saved), episode)
+        self.assertEqual(episode.encode(), saved)
+        self.assertIsNone(episode.error)
+
+        broken = dict(saved, actions=["list", []])
+        with self.assertRaises(ValueError):
+            episode.decode(broken)
+        self.assertEqual(episode.encode(), saved)
 
     def test_codec_roundtrip_preserves_values_and_rejects_misalignment(self):
         episode = trajectory(artifacts={"log.txt": b"hello"})
-        data = codec.encode_episode(episode)
-        restored = codec.decode_episode(data)
+        data = episode.encode()
+        restored = Episode.from_data(data)
         np.testing.assert_array_equal(restored.observations[0], [0.0])
         self.assertEqual(restored.actions, [1])
         self.assertEqual(restored.rewards, [3.0])
@@ -114,9 +126,9 @@ class EpisodeStorageTests(unittest.TestCase):
         ):
             with self.subTest(field=field):
                 broken = dict(data)
-                broken[field] = codec.encode(value)
+                broken[field] = EpisodeEncoder.encode(value)
                 with self.assertRaises(ValueError):
-                    codec.decode_episode(broken)
+                    Episode.from_data(broken)
 
     def test_run_reopens_without_environment_and_keeps_checkpoint_and_episode(self):
         policy = Policy.from_text(

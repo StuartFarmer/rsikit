@@ -77,7 +77,6 @@ class EvaluatorTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(episode.actions[-1].tolist(), [2])
 
     async def test_failed_attempt_preserves_completed_steps_and_zero_step_errors(self):
-        from rsikit.episode import decode_episode, encode_episode
         from tests.test_inner_loop import CounterEnv, CounterPolicy
 
         for steps in (0, 1):
@@ -96,7 +95,7 @@ class EvaluatorTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(len(episode), steps)
             self.assertEqual(len(episode.observations), steps + 1)
             self.assertIn("candidate broke", episode.error)
-            restored = decode_episode(encode_episode(episode))
+            restored = Episode.from_data(episode.encode())
             self.assertEqual(restored.error, episode.error)
             self.assertEqual(restored.rewards, episode.rewards)
 
@@ -112,9 +111,8 @@ class EvaluatorTests(unittest.IsolatedAsyncioTestCase):
         episode = await _run_episode(lambda: env, Broken)
         self.assertIn("construction failed", episode.error)
         self.assertEqual(episode.rewards, [])
-        from rsikit.episode import decode_episode, encode_episode
 
-        self.assertEqual(decode_episode(encode_episode(episode)).error, episode.error)
+        self.assertEqual(Episode.from_data(episode.encode()).error, episode.error)
         self.assertTrue(env.closed)
 
     async def test_candidate_cleanup_failure_preserves_its_trajectory(self):

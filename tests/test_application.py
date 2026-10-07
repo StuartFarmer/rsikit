@@ -12,7 +12,7 @@ from gymnasium import spaces
 
 from research.rewards import mean_rewards
 from rsikit import run_program
-from rsikit.episode import decode, encode
+from rsikit.episode import EpisodeEncoder
 from rsikit.evaluation import InfrastructureError, PolicyError
 from rsikit.policy import Policy
 from tests.helpers import fake_executor, finish_pending, recorded_run, run_episode
@@ -70,7 +70,9 @@ class CounterPolicy(Policy):
 class CodecSmoke(unittest.TestCase):
     def test_round_trip_and_rejected_allocations(self):
         value = {"a": (np.array([[1, 2]], dtype=np.int16), [True, None, "π", float("inf")]), 3: 4}
-        restored = decode(json.loads(json.dumps(encode(value), allow_nan=False)))
+        restored = EpisodeEncoder.decode(
+            json.loads(json.dumps(EpisodeEncoder.encode(value), allow_nan=False))
+        )
         np.testing.assert_array_equal(restored["a"][0], value["a"][0])
         self.assertEqual(restored["a"][0].dtype, np.int16)
         self.assertIsInstance(restored["a"], tuple)
@@ -82,7 +84,7 @@ class CodecSmoke(unittest.TestCase):
             ["array", "f8", [1], ""],
         ):
             with self.assertRaises((ValueError, TypeError)):
-                decode(encoded)
+                EpisodeEncoder.decode(encoded)
 
 
 class ApplicationEpisodeTests(unittest.IsolatedAsyncioTestCase):

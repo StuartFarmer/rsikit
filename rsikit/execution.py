@@ -18,7 +18,7 @@ from time import perf_counter
 import cloudpickle
 import gymnasium as gym
 
-from .episode import Episode, encode_episode
+from .episode import Episode
 from .evaluation import InfrastructureError, PolicyError, PolicyTimeout, _run_episode
 from .policy import MAX_SOURCE, load_policy
 
@@ -60,7 +60,7 @@ def _run_child(channel, source, definition, seed, options, directory):
                         raise InfrastructureError("Evaluation artifacts exceed 64 MiB")
                     if path.stat().st_size:
                         episode.artifacts[str(path.relative_to(directory))] = path.read_bytes()
-            if len(json.dumps(encode_episode(episode)).encode()) > MAX_RESULT:
+            if len(json.dumps(episode.encode()).encode()) > MAX_RESULT:
                 raise InfrastructureError("Saved episode exceeds 64 MiB")
             result = episode
         except BaseException as exc:
