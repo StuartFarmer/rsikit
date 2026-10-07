@@ -6,6 +6,8 @@ import unittest
 from dataclasses import replace
 from pathlib import Path
 
+import numpy as np
+
 from research.alphaevolve.paper.database import Candidate, Database
 from rsikit.policy import Policy
 
@@ -16,6 +18,25 @@ def candidate(value, score, niche=0, stability=0):
 
 
 class PopulationTests(unittest.TestCase):
+    def test_candidate_constructor_and_registration_reject_invalid_fields(self):
+        good = candidate(1, 2)
+        for values in (
+            {"score": True},
+            {"score": np.bool_(True)},
+            {"score": float("nan")},
+            {"metrics": {"reward": "2"}},
+            {"features": {"x": float("inf")}},
+            {"seed_scores": {True: 2}},
+            {"feedback": 3},
+        ):
+            with self.subTest(values=values), self.assertRaises(ValueError):
+                replace(good, **values)
+        db = self.database(islands=1)
+        good.metrics["reward"] = float("nan")
+        with self.assertRaises(ValueError):
+            db.register(good, 0)
+        self.assertEqual(db.all(), [])
+
     def database(self, **kwargs):
         db = Database(features={"x": (0, 10, 5)}, **kwargs)
         self.addCleanup(db.close)
@@ -123,17 +144,17 @@ class PopulationTests(unittest.TestCase):
                 Database(**kwargs)
         db = self.database(islands=1)
         good = candidate(1, 2)
-        for bad in [
-            replace(good, score=3),
-            replace(good, metrics={"other": 2}),
-            replace(good, features={}),
-            replace(good, features={"x": 0, "extra": 1}),
-            replace(good, features={"x": float("inf")}),
-            replace(good, metrics={"reward": 2, "stability": float("nan")}),
-            replace(good, seed_scores={1: float("nan")}),
+        for values in [
+            {"score": 3},
+            {"metrics": {"other": 2}},
+            {"features": {}},
+            {"features": {"x": 0, "extra": 1}},
+            {"features": {"x": float("inf")}},
+            {"metrics": {"reward": 2, "stability": float("nan")}},
+            {"seed_scores": {1: float("nan")}},
         ]:
-            with self.subTest(bad=bad), self.assertRaises(ValueError):
-                db.register(bad, 0)
+            with self.subTest(values=values), self.assertRaises(ValueError):
+                db.register(replace(good, **values), 0)
         self.assertEqual(db.all(), [])
         with self.assertRaises(ValueError):
             db.sample(random.Random(1))

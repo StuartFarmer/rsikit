@@ -3,6 +3,8 @@
 import asyncio
 import unittest
 
+import numpy as np
+
 from research.alphaevolve.paper import EvaluationResult
 from research.alphaevolve.paper.evaluation import (
     EvaluationStage,
@@ -14,6 +16,21 @@ from tests.helpers import episodes
 
 
 class EvaluationTests(unittest.IsolatedAsyncioTestCase):
+    async def test_mutated_callback_results_and_thresholds_are_revalidated(self):
+        result = EvaluationResult(metrics={"reward": 2})
+        result.accepted = 1
+
+        async def measured(policy):
+            return result
+
+        with self.assertRaises(ValueError):
+            await evaluate_cascade(object(), [EvaluationStage(measured)])
+        result.accepted = True
+        stage = EvaluationStage(measured, {"reward": 1})
+        stage.thresholds["reward"] = True
+        with self.assertRaises(ValueError):
+            await evaluate_cascade(object(), [stage])
+
     async def test_stage_failure_skips_thresholds_and_remaining_stages(self):
         async def broken(policy):
             return EvaluationResult(failure="invalid action")
@@ -72,6 +89,7 @@ class EvaluationTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_validation_and_infrastructure_errors(self):
         for kwargs in [
+            {"metrics": {"x": np.bool_(True)}},
             {"metrics": {"x": float("nan")}},
             {"metrics": {"": 2}},
             {"metrics": {4: 2}},

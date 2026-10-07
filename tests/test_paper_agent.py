@@ -349,6 +349,34 @@ class PaperAgentTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(agent._pending), 2)
         self.assertEqual(agent.completed, 0)
 
+    async def test_direct_result_entry_points_revalidate_mutated_acceptance_and_failure(self):
+        agent = paper.AlphaEvolve(
+            "task",
+            ScriptedProvider([program(0), program(1)]),
+            config=paper.Config(islands=1, mode="rewrite", meta_interval=0),
+        )
+        self.addCleanup(agent.close)
+        result = paper.EvaluationResult(metrics={"reward": 10})
+        result.failure = "execution failed"
+        seed = Policy.from_text(program(0).implementation, name="Initial")
+        with self.assertRaises(ValueError):
+            agent.register_initial(seed, result)
+        self.assertEqual(agent.database.all(), [])
+
+        first, second = await agent.generate(n=2)
+        result.failure = None
+        result.accepted = "yes"
+        results = {first.id: paper.EvaluationResult(metrics={"reward": 2}), second.id: result}
+        with self.assertRaises(ValueError):
+            agent.update_results(results)
+        self.assertEqual(agent.database.all(), [])
+        self.assertEqual(len(agent._pending), 2)
+        result.accepted = True
+        result.failure = "execution failed"
+        agent.update_results(results)
+        self.assertEqual([c.policy.id for c in agent.database.all()], [first.id])
+        self.assertEqual(agent._pending, {})
+
     async def test_evaluated_seed_and_rejected_child(self):
         agent = paper.AlphaEvolve(
             "task",

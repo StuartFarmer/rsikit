@@ -23,6 +23,64 @@ def trajectory(reward=3.0, artifacts=None):
 
 
 class EpisodeStorageTests(unittest.TestCase):
+    def test_constructor_validates_fields_while_allowing_incomplete_rollouts(self):
+        self.assertEqual(len(Episode()), 0)
+        self.assertEqual(Episode(observations=[0], infos=[{}]).observations, [0])
+        for values in (
+            {"observations": ()},
+            {"rewards": [True]},
+            {"rewards": [np.bool_(True)]},
+            {"rewards": ["1"]},
+            {"rewards": [float("nan")]},
+            {"terminations": [1]},
+            {"infos": [None]},
+            {"artifacts": {"log": "text"}},
+            {"error": " \n"},
+        ):
+            with self.subTest(values=values), self.assertRaises(ValueError):
+                Episode(**values)
+
+    def test_mutated_fields_are_revalidated_at_storage_and_feedback_boundaries(self):
+        from rsikit.optimization import validate_results
+
+        for name, value in (
+            ("rewards", float("nan")),
+            ("rewards", np.bool_(True)),
+            ("terminations", 1),
+            ("infos", None),
+        ):
+            episode = trajectory()
+            getattr(episode, name)[0] = value
+            with self.subTest(name=name):
+                with self.assertRaises(ValueError):
+                    codec.encode_episode(episode)
+                with self.assertRaises(ValueError):
+                    validate_results({"p": {0: episode}}, ["p"])
+        episode = trajectory()
+        episode.artifacts["log"] = "text"
+        with self.assertRaises(ValueError):
+            codec.encode_episode(episode)
+
+    def test_partial_failures_and_arbitrary_info_values_roundtrip(self):
+        for episode in (
+            Episode(error="initialization failed"),
+            Episode(observations=[0], infos=[{}], error="reset failed"),
+            Episode(
+                observations=[0, 1],
+                actions=[0],
+                rewards=[1],
+                terminations=[False],
+                truncations=[False],
+                infos=[{}, {2: (b"bytes", float("inf"))}],
+                error="act failed",
+            ),
+        ):
+            with self.subTest(error=episode.error):
+                restored = codec.decode_episode(codec.encode_episode(episode))
+                self.assertEqual(restored, episode)
+        with self.assertRaises(ValueError):
+            codec.encode_episode(Episode())
+
     def test_pre_migration_saved_json(self):
         # Literal old-format fixture, independent of the current encoder.
         saved = {

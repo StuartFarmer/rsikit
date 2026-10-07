@@ -16,18 +16,21 @@ from contextlib import closing, contextmanager, suppress
 from datetime import date
 from hashlib import sha256
 from pathlib import Path
+from zipfile import ZIP_DEFLATED, ZipFile
 
 import gymnasium as gym
 import numpy as np
 import yaml
 
-from rsikit.evaluation import PolicyError
 from rsikit import Executor
 from rsikit.envs import BitcoinEnv, BlackjackEnv, PriceSeriesEnv
 from rsikit.envs.bitcoin import TRAIN_DATA, load_prices
 from rsikit.envs.bitcoin_render import BitcoinRenderer
 from rsikit.envs.blackjack_render import BlackjackRenderer
 from rsikit.envs.price_series_render import PriceSeriesRenderer
+from rsikit.envs.render_theme import FONTS, FPS, HEIGHT, RENDER_VERSION, WIDTH
+from rsikit.envs.svg_frame import rasterize
+from rsikit.evaluation import PolicyError
 
 
 def evaluation_panel(
@@ -131,6 +134,7 @@ def render_policy(job):
             PriceSeriesEnv(**job["environment"]),
             policy_name=job["name"],
             split=job["split"],
+            policy_id=job["policy_id"],
         )
     elif job.get("env") == "Bitcoin":
         renderer = BitcoinRenderer(
@@ -139,13 +143,24 @@ def render_policy(job):
             ),
             policy_name=job["name"],
             split=job["split"],
+            policy_id=job["policy_id"],
         )
     else:
         renderer = BlackjackRenderer(
-            BlackjackEnv(shoes_per_episode=job["shoes"]), policy_name=job["name"]
+            BlackjackEnv(shoes_per_episode=job["shoes"]),
+            policy_name=job["name"],
+            split=job.get("split", "training"),
+            policy_id=job["policy_id"],
         )
     with renderer as env:
-        with FFMPEG_VideoWriter(str(temporary), (1280, 720), 30, threads=1) as writer:
+        vector_temporary = path.with_suffix(".tmp.svg.zip")
+        with (
+            FFMPEG_VideoWriter(str(temporary), (WIDTH, HEIGHT), FPS, threads=1) as writer,
+            ZipFile(vector_temporary, "w", compression=ZIP_DEFLATED) as vectors,
+        ):
+            for asset in sorted(FONTS.iterdir()):
+                if asset.is_file():
+                    vectors.write(asset, f"fonts/{asset.name}")
             for seed in job["seeds"]:
                 history = None if price_series else env.points
                 env.reset(seed=seed)
@@ -160,7 +175,9 @@ def render_policy(job):
                         np.array(action) if price_series else action
                     )
                     reward += earned
-                    writer.write_frame(env.render())
+                    svg = env.render_svg(embed_fonts=False)
+                    vectors.writestr(f"frames/{total_steps:08}.svg", svg)
+                    writer.write_frame(rasterize(svg))
                     total_steps += 1
                 if not done or truncated or not math.isclose(reward, trace["reward"], abs_tol=1e-8):
                     raise ValueError("Replay does not match a complete episode trace")
@@ -184,19 +201,43 @@ def render_policy(job):
                         "reward": reward,
                     }
                 )
+            vectors.writestr(
+                "timeline.json",
+                json.dumps(
+                    {
+                        "render_version": RENDER_VERSION,
+                        "fps": FPS,
+                        "frames": total_steps,
+                        "initial_frame": False,
+                        "policy_id": job["policy_id"],
+                        "segments": [
+                            {
+                                key: segment[key]
+                                for key in ("seed", "first_frame", "frames", "reward")
+                            }
+                            for segment in segments
+                        ],
+                    },
+                    indent=2,
+                ),
+            )
+        path.with_suffix(".svg").write_text(env.render_svg(), encoding="utf-8")
         if price_series:
             Image.fromarray(env.render()).save(path.with_suffix(".png"))
     with VideoFileClip(str(temporary)) as clip:
-        assert clip.size == [1280, 720] and clip.fps == 30
-        assert abs(clip.duration - total_steps / 30) < 0.02
+        assert clip.size == [WIDTH, HEIGHT] and clip.fps == FPS
+        assert abs(clip.duration - total_steps / FPS) < 0.02
         Image.fromarray(clip.get_frame(clip.duration / 2)).save(path.with_suffix(".jpg"))
     temporary.replace(path)
+    vector_temporary.replace(path.with_suffix(".svg.zip"))
     return {
         "policy_id": job["policy_id"],
         "name": job["name"],
         "video": str(path),
         "frames": total_steps,
-        "duration_seconds": total_steps / 30,
+        "duration_seconds": total_steps / FPS,
+        "svg_frames": str(path.with_suffix(".svg.zip")),
+        "snapshot": str(path.with_suffix(".svg")),
         "total_reward": total_reward,
         "segments": segments,
     }
@@ -223,6 +264,8 @@ def write_index(output, report):
                 f"<p>{len(row['segments'])} seeds · {row['frames']:,} actions · "
                 f"{row['duration_seconds']:.1f} seconds · "
                 f'<a href="{video}" download>Download MP4</a>'
+                + f' · <a href="{Path(video).with_suffix(".svg.zip")}" download>SVG frames</a>'
+                + f' · <a href="{Path(video).with_suffix(".svg")}">Final SVG (last seed)</a>'
                 + (f' · <a href="{snapshot}">Final chart (last seed)</a>' if price_series else "")
                 + "</p></article>"
             )
@@ -328,6 +371,17 @@ async def export(
     )
     # A separate cache identity prevents training traces from masquerading as validation.
     cache_key = sha256(json.dumps(context, sort_keys=True).encode()).hexdigest()[:16]
+    render_key = sha256(
+        json.dumps(
+            {
+                "evidence": cache_key,
+                "render_version": RENDER_VERSION,
+                "resolution": [WIDTH, HEIGHT],
+                "fps": FPS,
+            },
+            sort_keys=True,
+        ).encode()
+    ).hexdigest()[:16]
     verify_search = split == "training" and not (data_path or start_date or end_date)
     if verify_search and experiment["env"] == "PriceSeries":
         saved_dataset = json.loads((source / "dataset.json").read_text())
@@ -397,7 +451,7 @@ async def export(
     render_jobs = []
     rendered = {}
     for pid, row in unique.items():
-        cached = output / "policies" / cache_key / f"{pid}.json"
+        cached = output / "policies" / render_key / f"{pid}.json"
         if cached.exists():
             rendered[pid] = json.loads(cached.read_text())
         else:
@@ -410,7 +464,7 @@ async def export(
                     "shoes": shoes,
                     "seeds": seeds,
                     "traces": str((traces / pid).resolve()),
-                    "video": str((output / "policies" / cache_key / f"{pid}.mp4").resolve()),
+                    "video": str((output / "policies" / render_key / f"{pid}.mp4").resolve()),
                 }
             )
     with ProcessPoolExecutor(max_workers=workers) as pool:
@@ -425,8 +479,9 @@ async def export(
             )
     report = {
         **context,
-        "fps": 30,
-        "resolution": [1280, 720],
+        "fps": FPS,
+        "resolution": [WIDTH, HEIGHT],
+        "render_version": RENDER_VERSION,
         "initial_frame": False,
         "videos": [],
     }
@@ -440,6 +495,8 @@ async def export(
         path = directory / f"rank-{row['rank']:02}-policy-{row['id']:03}.mp4"
         shutil.copy2(result["video"], path)
         shutil.copy2(Path(result["video"]).with_suffix(".jpg"), path.with_suffix(".jpg"))
+        for suffix in (".svg", ".svg.zip"):
+            shutil.copy2(Path(result["video"]).with_suffix(suffix), path.with_suffix(suffix))
         if experiment["env"] in ("Bitcoin", "PriceSeries"):
             shutil.copy2(Path(result["video"]).with_suffix(".png"), path.with_suffix(".png"))
         report["videos"].append(
@@ -450,6 +507,8 @@ async def export(
                 "organism_id": row["id"],
                 "search_mean": row["score"],
                 "video": str(path.relative_to(output)),
+                "svg_frames": str(path.with_suffix(".svg.zip").relative_to(output)),
+                "snapshot": str(path.with_suffix(".svg").relative_to(output)),
             }
         )
     write_index(output, report)

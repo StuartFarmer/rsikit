@@ -13,7 +13,8 @@ from dataclasses import dataclass, field
 from statistics import fmean
 from typing import Literal
 
-from pydantic import BaseModel, Field, ValidationError
+from pydantic import BaseModel, ConfigDict, Field, ValidationError
+from pydantic.dataclasses import dataclass as validated_dataclass
 from rich.table import Column
 from slick import parse, render
 from slick.providers import Provider, ProviderError
@@ -58,25 +59,21 @@ class PromptIdea:
         return self.reward / max(1, self.uses)
 
 
-@dataclass(frozen=True)
+@validated_dataclass(
+    frozen=True, config=ConfigDict(strict=True, extra="forbid", allow_inf_nan=False)
+)
 class Config:
-    batch_size: int = 10
-    proposals: int = 250
-    generation_concurrency: int = 4
-    islands: int = 4
-    inspirations: int = 3
-    exploration: float = 0.2
-    reset_interval: int = 100
-    meta_interval: int = 0
+    batch_size: int = Field(default=10, ge=1)
+    proposals: int = Field(default=250, ge=0)
+    generation_concurrency: int = Field(default=4, ge=1)
+    islands: int = Field(default=4, ge=1)
+    inspirations: int = Field(default=3, ge=0)
+    exploration: float = Field(default=0.2, ge=0, le=1)
+    reset_interval: int = Field(default=100, ge=0)
+    meta_interval: int = Field(default=0, ge=0)
     mode: Literal["diff", "rewrite"] = "diff"
-    generation_timeout: float | None = None
-    max_repairs: int = 2
-
-    def __post_init__(self):
-        for name, minimum in (("batch_size", 1), ("proposals", 0), ("generation_concurrency", 1)):
-            value = getattr(self, name)
-            if type(value) is not int or value < minimum:
-                raise ValueError(f"{name} must be an integer >= {minimum}")
+    generation_timeout: float | None = Field(default=None, gt=0)
+    max_repairs: int = Field(default=2, ge=0)
 
 
 class AlphaEvolve(Optimizer):

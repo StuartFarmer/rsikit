@@ -205,28 +205,38 @@ episode length; historical scores are not comparable to the new episode totals.
 
 ## Table preview
 
-The optional Pillow renderer produces a 1280×720 RGB frame with the table,
-individual hands and wagers, last action, and cumulative net points per action.
-It draws directly at 1280×720, without supersampling. Each frame is one action;
+The optional renderer produces a canonical SVG frame with the table, individual
+hands and wagers, last action, and cumulative net points per action. `render_svg()`
+returns a standalone SVG with bundled Latin Modern fonts; `render()` rasterizes
+that SVG through resvg to a 1280×720 RGB frame for Gymnasium/video. Each frame is one action;
 playback is 30 frames and 30 actions per second (`render_fps=30`), with no repeated
 or intermediate animation frames.
 Generate the initial design preview with:
 
 ```sh
 ./scripts/run examples.blackjack_screen --output runs/blackjack-screen.png
+./scripts/run examples.blackjack_screen --output runs/blackjack-screen.svg
 ```
 
 This saves `runs/blackjack-screen.png` on the host from a real baseline
 replay: seed 301, action 68, two split hands, and +3 net points. Use `--seed`,
 `--steps`, and `--output` to select another frame. Install the `video` extra
-if Pillow is unavailable.
+for SVG-to-video rendering; no system fonts or TeX installation are needed.
 
 `BlackjackRenderer(BlackjackEnv())` wraps only visual runs; ordinary training
 keeps the original environment. Its private card identities preserve the exact
 shuffle and do not enter observations. The dealer's hole stays hidden until
 revealed by the game. The chart tracks settled reward, so wagers and hits leave
-it flat until the round finishes. Card art is from Kenney's Playing Cards Pack,
-distributed under CC0; the license is included with the bundled assets.
+it flat until the round finishes. Cards, suits, labels, and charts are vector
+geometry/text; unrevealed card identities are absent from the SVG as well as the video.
+
+Saved policy exports include a final `.svg` snapshot and a `.svg.zip` archive
+alongside each MP4. The archive contains `frames/00000000.svg` onward, shared
+`fonts/`, and `timeline.json` with 30 fps and seed segment boundaries. Extract the
+whole archive to preserve relative font paths. Frame zero is the first post-action
+state. Frames retain stable scene IDs for future web animation; no browser player
+or animation runtime is required during training. Theme-version changes rerender
+media while retaining verified action traces.
 
 ## All-seed generation videos
 

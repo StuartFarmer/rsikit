@@ -416,9 +416,11 @@ class RunTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(active, 0)
 
     async def test_invalid_results_artifact_paths_and_startup_failure_remain_pending(self):
+        mutated = trajectory()
+        mutated.rewards[0] = float("nan")
         with self.create() as (run, rollouts):
             for outcome, diagnostic in [
-                (trajectory(float("nan")), "finite"),
+                (mutated, "finite"),
                 (trajectory(1.0, {"../../../../outside": b"bad"}), "Artifact path"),
             ]:
                 self.evaluation.evaluate.return_value = outcome

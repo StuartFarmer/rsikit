@@ -1,37 +1,34 @@
 """Trusted evaluator callbacks and maximized-threshold cascades (paper §2.4)."""
 
-import math
 from collections.abc import Awaitable, Callable, Sequence
-from dataclasses import dataclass, field
+from dataclasses import field
 from numbers import Real
 from statistics import fmean
-from typing import Any
+from typing import Annotated, Any
+
+from pydantic import BeforeValidator, ConfigDict, Field, StrictInt, TypeAdapter
+from pydantic.dataclasses import dataclass
 
 from research.rewards import episode_error, episode_scores, measure_rewards
 from rsikit import Episode
 
 
-def _numbers(values, *, seeds=False):
-    if not isinstance(values, dict):
-        raise ValueError("Evaluation values must be a dictionary")
-    for name, value in values.items():
-        valid_name = (
-            isinstance(name, int) and not isinstance(name, bool)
-            if seeds
-            else isinstance(name, str) and bool(name.strip())
-        )
-        if not valid_name:
-            raise ValueError("Evaluation names must be nonempty strings; seed IDs must be integers")
-        if isinstance(value, bool) or not isinstance(value, Real) or not math.isfinite(value):
-            raise ValueError(
-                "EvaluationResults must contain finite per-seed scores"
-                if seeds
-                else "Evaluation values must be finite numbers"
-            )
-    return dict(values)
+def _real_number(value):
+    if isinstance(value, bool) or not isinstance(value, Real):
+        raise ValueError("Evaluation values must be real numbers")
+    return value
 
 
-@dataclass
+NonemptyText = Annotated[str, Field(strict=True, pattern=r"\S")]
+FiniteNumber = Annotated[
+    float, BeforeValidator(_real_number), Field(strict=True, allow_inf_nan=False)
+]
+NamedValues = Annotated[dict[NonemptyText, FiniteNumber], Field(strict=True)]
+SeedScores = Annotated[dict[StrictInt, FiniteNumber], Field(strict=True)]
+NAMED_VALUES = TypeAdapter(NamedValues)
+
+
+@dataclass(config=ConfigDict(strict=True, extra="forbid"))
 class EvaluationResult:
     """Measured evidence, screening rejection, or candidate execution failure.
 
@@ -41,38 +38,24 @@ class EvaluationResult:
     intermediate evaluations; optimizers validate their required measurements.
     """
 
-    metrics: dict[str, float] = field(default_factory=dict)
-    features: dict[str, float] = field(default_factory=dict)
+    metrics: NamedValues = field(default_factory=dict)
+    features: NamedValues = field(default_factory=dict)
     feedback: str = ""
-    seed_scores: dict[int, float] = field(default_factory=dict)
+    seed_scores: SeedScores = field(default_factory=dict)
     accepted: bool = True
-    failure: str | None = None
+    failure: NonemptyText | None = None
 
     def __post_init__(self):
-        self.metrics = _numbers(self.metrics)
-        self.features = _numbers(self.features)
-        self.seed_scores = _numbers(self.seed_scores, seeds=True)
-        if not isinstance(self.feedback, str):
-            raise ValueError("Evaluation feedback must be text")
-        if not isinstance(self.accepted, bool):
-            raise ValueError("Evaluation acceptance must be boolean")
         if self.failure is not None:
-            if not isinstance(self.failure, str) or not self.failure.strip():
-                raise ValueError("Evaluation failure must be nonempty text")
             self.accepted = False
 
 
-@dataclass
+@dataclass(config=ConfigDict(strict=True, extra="forbid"))
 class EvaluationStage:
     """Run evaluate(policy); each named objective must meet its lower bound."""
 
     evaluate: Callable[[Any], Awaitable[EvaluationResult]]
-    thresholds: dict[str, float] = field(default_factory=dict)
-
-    def __post_init__(self):
-        if not callable(self.evaluate):
-            raise ValueError("Evaluation stage requires a callable evaluator")
-        self.thresholds = _numbers(self.thresholds)
+    thresholds: NamedValues = field(default_factory=dict)
 
 
 async def evaluate_cascade(
@@ -91,6 +74,7 @@ async def evaluate_cascade(
     stages = tuple(stages)
     if not stages or any(not isinstance(stage, EvaluationStage) for stage in stages):
         raise ValueError("A cascade requires at least one valid EvaluationStage")
+    stages = tuple(EvaluationStage(**vars(stage)) for stage in stages)
     if feedback_evaluator is not None and not callable(feedback_evaluator):
         raise ValueError("Feedback evaluator must be callable")
     result = EvaluationResult(accepted=False)
@@ -98,6 +82,7 @@ async def evaluate_cascade(
     def combine(next_result, thresholds):
         if not isinstance(next_result, EvaluationResult):
             raise ValueError("Evaluators must return EvaluationResult")
+        next_result = EvaluationResult(**vars(next_result))
         metrics = {**result.metrics, **next_result.metrics}
         missing = thresholds.keys() - metrics.keys()
         if missing and next_result.failure is None:
@@ -142,7 +127,7 @@ async def assess(
     if bool(screening_seeds) != (screening_min_reward is not None):
         raise ValueError("screening_seeds and screening_min_reward must be supplied together")
     if screening_min_reward is not None:
-        _numbers({"screening_min_reward": screening_min_reward})
+        NAMED_VALUES.validate_python({"screening_min_reward": screening_min_reward})
     unknown = set(features) - {"mean_reward", "reward_std"}
     if unknown:
         raise ValueError(f"Unsupported Gym descriptors: {', '.join(sorted(unknown))}")

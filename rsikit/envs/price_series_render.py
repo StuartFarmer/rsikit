@@ -11,8 +11,8 @@ class PriceSeriesRenderer(BitcoinRenderer):
     step_label = "bar"
     value_key = "value"
 
-    def __init__(self, env, *, policy_name="Baseline agent", split="training"):
-        super().__init__(env, policy_name=policy_name, split=split)
+    def __init__(self, env, *, policy_name="Baseline agent", split="training", policy_id=""):
+        super().__init__(env, policy_name=policy_name, split=split, policy_id=policy_id)
         self.title = self.price_label = self.allocation_label = env.unwrapped.asset_name
 
     def _date_label(self, observation):

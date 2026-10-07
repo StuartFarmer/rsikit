@@ -25,7 +25,10 @@ def main():
             if terminated or truncated:
                 break
         args.output.parent.mkdir(parents=True, exist_ok=True)
-        Image.fromarray(env.render()).save(args.output)
+        if args.output.suffix.lower() == ".svg":
+            args.output.write_text(env.render_svg(), encoding="utf-8")
+        else:
+            Image.fromarray(env.render()).save(args.output)
         print(
             f"{args.output}: seed={args.seed}, action={len(env.points) - 1}, net points={env.points[-1]:+g}"
         )

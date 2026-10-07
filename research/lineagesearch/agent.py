@@ -13,11 +13,12 @@ import math
 import random
 from collections import Counter
 from collections.abc import Awaitable, Callable, Sequence
-from dataclasses import asdict, dataclass
+from dataclasses import asdict
 from statistics import fmean, stdev
 from typing import Annotated
 
-from pydantic import BaseModel, Field, StrictInt, StringConstraints, ValidationError
+from pydantic import BaseModel, ConfigDict, Field, StrictInt, StringConstraints, ValidationError
+from pydantic.dataclasses import dataclass
 from rich.table import Column
 from slick import parse, render
 from slick.providers import Provider
@@ -37,29 +38,25 @@ logger = logging.getLogger(__name__)
 Text = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1)]
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, config=ConfigDict(strict=True, extra="forbid", allow_inf_nan=False))
 class Config:
-    families: int = 10
-    initial_per_family: int = 10
-    batch_size: int = 10
-    frontier_per_family: int | None = None
-    cull_percent: float = 90.0
-    exploration: float = 0.2
-    bonus_batches: int = 2
-    patience: int = 3
-    min_delta: float = 0.0
-    uncertainty: float = 2.0
-    max_attempts: int = 500
-    generation_concurrency: int = 100
-    generation_timeout: float = 120
-    discovery_attempts: int = 3
-    max_repairs: int = 2
-    decomposition_k: int = 3
-    decomposition_max_votes: int = 40
-
-    def __post_init__(self):
-        if not 0 <= self.cull_percent < 100:
-            raise ValueError("cull_percent must be between 0 (inclusive) and 100 (exclusive)")
+    families: int = Field(default=10, ge=1)
+    initial_per_family: int = Field(default=10, ge=1)
+    batch_size: int = Field(default=10, ge=1)
+    frontier_per_family: int | None = Field(default=None, ge=1)
+    cull_percent: float = Field(default=90.0, ge=0, lt=100)
+    exploration: float = Field(default=0.2, ge=0, le=1)
+    bonus_batches: int = Field(default=2, ge=0)
+    patience: int = Field(default=3, ge=1)
+    min_delta: float = Field(default=0.0, ge=0)
+    uncertainty: float = Field(default=2.0, ge=0)
+    max_attempts: int = Field(default=500, ge=0)
+    generation_concurrency: int = Field(default=100, ge=1)
+    generation_timeout: float = Field(default=120, gt=0)
+    discovery_attempts: int = Field(default=3, ge=1)
+    max_repairs: int = Field(default=2, ge=0)
+    decomposition_k: int = Field(default=3, ge=1)
+    decomposition_max_votes: int = Field(default=40, ge=1)
 
 
 class FamilyBrief(BaseModel, extra="forbid"):

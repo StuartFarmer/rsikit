@@ -4,7 +4,7 @@ import logging
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from typing import Protocol
 
-from .episode import Episode, _validate_episode
+from .episode import Episode
 from .policy import Policy
 
 
@@ -35,7 +35,7 @@ def validate_results(results, pending, *, seed_panel=None):
         for seed, episode in episodes.items():
             if type(seed) is not int or not isinstance(episode, Episode):
                 raise ValueError("Expected integer seeds and Episode values")
-            _validate_episode(vars(episode))
+            episode.validate_complete()
         if episodes and all(episode.error is None for episode in episodes.values()):
             if panel is not None and set(episodes) != panel:
                 raise ValueError("All candidates must use the same seed panel")

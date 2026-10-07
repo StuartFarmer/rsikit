@@ -1,9 +1,12 @@
 """Published AlphaEvolve mechanisms with explicitly documented local archive rules."""
 
 import json
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, field
 from statistics import fmean, pstdev
+from typing import Annotated
 
+from pydantic import BeforeValidator, Field
+from pydantic.dataclasses import dataclass
 from slick import parse, render
 
 from research.rewards import episode_scores
@@ -14,7 +17,7 @@ from ..improved.agent import AlphaEvolve as Baseline
 from ..original.agent import Config as BaselineConfig
 from ..original.agent import Guidance, PromptIdea
 from .database import Candidate, Database
-from .evaluation import EvaluationResult, _numbers
+from .evaluation import NAMED_VALUES, EvaluationResult
 
 
 def _saved_candidate(candidate):
@@ -31,29 +34,19 @@ def _restored_candidate(saved):
 @dataclass(frozen=True)
 class Config(BaselineConfig):
     objective: str = "reward"
-    features: dict[str, tuple[float, float, int]] = field(default_factory=dict)
-    elite_fraction: float = 0.2
-    exploration: float = 0.3
-    reset_interval: int = 0
-    migration_interval: int = 100
-    migration_count: int = 1
-    meta_interval: int = 25
-
-    def __post_init__(self):
-        super().__post_init__()
-        if self.reset_interval:
-            raise ValueError("The paper variant uses migration_interval, not champion resets")
-        for value in (
-            self.migration_interval,
-            self.migration_count,
-            self.meta_interval,
-            self.inspirations,
-            self.max_repairs,
-        ):
-            if isinstance(value, bool) or not isinstance(value, int) or value < 0:
-                raise ValueError("Intervals and counts must be nonnegative integers")
-        if self.mode not in ("diff", "rewrite"):
-            raise ValueError("Mode must be diff or rewrite")
+    features: dict[
+        str,
+        Annotated[
+            tuple[float, float, int],
+            BeforeValidator(lambda value: tuple(value) if isinstance(value, list) else value),
+        ],
+    ] = field(default_factory=dict)
+    elite_fraction: float = Field(default=0.2, gt=0, le=1)
+    exploration: float = Field(default=0.3, ge=0, le=1)
+    reset_interval: int = Field(default=0, ge=0, le=0)
+    migration_interval: int = Field(default=100, ge=0)
+    migration_count: int = Field(default=1, ge=0)
+    meta_interval: int = Field(default=25, ge=0)
 
 
 class AlphaEvolve(Baseline):
@@ -192,6 +185,7 @@ class AlphaEvolve(Baseline):
         """Seed the archive with a caller-evaluated program (all islands by default)."""
         evolution_regions(policy._implementation)
         validate_policy(policy)
+        result = EvaluationResult(**vars(result))
         if not result.accepted:
             raise ValueError("Initial program must pass evaluation")
         candidate = self._candidate(policy, result)
@@ -219,11 +213,13 @@ class AlphaEvolve(Baseline):
 
     def update_results(self, results):
         # Validate the batch before consuming pending proposals.
+        results = dict(results)
         schemas = set()
         for policy_id, result in results.items():
             records = self._pending[policy_id]
             if not isinstance(result, EvaluationResult):
                 raise TypeError("Expected EvaluationResult")
+            results[policy_id] = result = EvaluationResult(**vars(result))
             if result.accepted and self.config.objective not in result.metrics:
                 raise ValueError(f"Missing objective metric: {self.config.objective}")
             if result.accepted:
@@ -274,7 +270,9 @@ class AlphaEvolve(Baseline):
         metrics = {"reward": mean, "worst_reward": min(values), "stability": -std}
         features = {"mean_reward": mean, "reward_std": std}
         for name, target in (("metrics", metrics), ("features", features)):
-            measured = [_numbers(ep.infos[-1].get(name, {})) for ep in episodes.values()]
+            measured = [
+                NAMED_VALUES.validate_python(ep.infos[-1].get(name, {})) for ep in episodes.values()
+            ]
             names = set().union(*(values.keys() for values in measured))
             if any(set(values) != names for values in measured):
                 raise ValueError(f"All seeds must report the same {name}")

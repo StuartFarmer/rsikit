@@ -14,7 +14,9 @@ class SearchTests(unittest.IsolatedAsyncioTestCase):
         from tests.test_episode_storage import trajectory
 
         self.assertEqual(validate_results({"p": {0: trajectory(3)}}, ["p"]), {0})
-        for result in ({True: trajectory()}, {0: 3}, {0: trajectory(float("nan"))}):
+        mutated = trajectory()
+        mutated.rewards[0] = float("nan")
+        for result in ({True: trajectory()}, {0: 3}, {0: mutated}):
             with self.subTest(result=result), self.assertRaises(ValueError):
                 validate_results({"p": result}, ["p"])
 

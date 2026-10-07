@@ -26,3 +26,9 @@ videos/
 .env
 .env.*
 !.env.example
+paper_workspace
+docs
+.superpowers/
+accompanying/
+research/
+data/

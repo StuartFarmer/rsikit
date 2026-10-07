@@ -6,6 +6,7 @@ import tempfile
 import unittest
 from contextlib import closing
 from pathlib import Path
+from unittest.mock import patch
 
 import numpy as np
 import yaml
@@ -100,6 +101,25 @@ class PriceSeriesRenderTests(unittest.IsolatedAsyncioTestCase):
             self.assertIn("EUR/USD", page)
             self.assertIn("Final chart", page)
             self.assertNotIn("shoe(s)", page)
+            # A theme update replaces rendered artifacts, without executing policies again.
+            executions = (root / "videos/executions.jsonl").read_bytes()
+            traces = {p: p.read_bytes() for p in (root / "videos/traces").rglob("*.json")}
+            self.assertIn("render_version", report)
+            cached_videos = set((root / "videos/policies").rglob("*.mp4"))
+            with patch("research.elitesearch.videos.RENDER_VERSION", "test-theme-update"):
+                await export(root, root / "videos", top=1, workers=1, generation=1)
+                refreshed = json.loads((root / "videos/manifest.json").read_text())
+                self.assertEqual(refreshed["render_version"], "test-theme-update")
+                self.assertEqual(refreshed["videos"][0]["total_reward"], 3000)
+                new_videos = set((root / "videos/policies").rglob("*.mp4")) - cached_videos
+                self.assertEqual(len(new_videos), 1)
+                rendered_at = {p: p.stat().st_mtime_ns for p in new_videos}
+                await export(root, root / "videos", top=1, workers=1, generation=1)
+                self.assertEqual(rendered_at, {p: p.stat().st_mtime_ns for p in new_videos})
+            self.assertEqual((root / "videos/executions.jsonl").read_bytes(), executions)
+            self.assertEqual(
+                {p: p.read_bytes() for p in (root / "videos/traces").rglob("*.json")}, traces
+            )
             # Replay can use a consistent host snapshot instead of the live database.
             snapshot = root / "snapshot.sqlite"
             (root / "run.sqlite").rename(snapshot)

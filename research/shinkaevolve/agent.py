@@ -14,7 +14,8 @@ from dataclasses import dataclass
 from decimal import Decimal
 from typing import Literal
 
-from pydantic import BaseModel, Field, StrictBool, ValidationError
+from pydantic import BaseModel, ConfigDict, Field, StrictBool, ValidationError
+from pydantic.dataclasses import dataclass as validated_dataclass
 from rich.table import Column
 from slick import parse, render
 from slick.providers import Provider, ProviderError
@@ -40,34 +41,31 @@ from .records import Evaluation, Generation
 logger = logging.getLogger(__name__)
 
 
-@dataclass(frozen=True)
+@validated_dataclass(
+    frozen=True, config=ConfigDict(strict=True, extra="forbid", allow_inf_nan=False)
+)
 class Config:
-    batch_size: int = 25
-    generations: int = 10
-    generation_concurrency: int = 4
-    islands: int = 2
-    archive_size: int = 40
-    elite_ratio: float = 0.3
-    top_k: int = 2
-    inspirations: int = 4
+    batch_size: int = Field(default=25, ge=1)
+    generations: int = Field(default=10, ge=0)
+    generation_concurrency: int = Field(default=4, ge=1)
+    islands: int = Field(default=2, ge=1)
+    archive_size: int = Field(default=40, ge=1)
+    elite_ratio: float = Field(default=0.3, ge=0, le=1)
+    top_k: int = Field(default=2, ge=1)
+    inspirations: int = Field(default=4, ge=0)
     parent_selection: Literal["weighted", "uniform", "best", "power"] = "weighted"
-    selection_pressure: float = 10.0
-    power_alpha: float = 1.0
-    exploration: float = 1.0
+    selection_pressure: float = Field(default=10.0, ge=0)
+    power_alpha: float = Field(default=1.0, ge=0)
+    exploration: float = Field(default=1.0, ge=0)
     patch_types: tuple[tuple[str, float], ...] = (("diff", 0.45), ("full", 0.45), ("cross", 0.1))
-    max_proposals: int = 3
-    max_repairs: int = 2
-    novelty_threshold: float = 0.95
-    meta_interval: int = 10
-    max_recommendations: int = 5
-    migration_interval: int = 10
-    migration_rate: float = 0.1
-    generation_timeout: float | None = None
-
-    def __post_init__(self):
-        for name, minimum in (("batch_size", 1), ("generations", 0), ("generation_concurrency", 1)):
-            if type(getattr(self, name)) is not int or getattr(self, name) < minimum:
-                raise ValueError(f"{name} must be an integer >= {minimum}")
+    max_proposals: int = Field(default=3, ge=1)
+    max_repairs: int = Field(default=2, ge=0)
+    novelty_threshold: float = Field(default=0.95, ge=-1, le=1)
+    meta_interval: int = Field(default=10, ge=0)
+    max_recommendations: int = Field(default=5, ge=0)
+    migration_interval: int = Field(default=10, ge=0)
+    migration_rate: float = Field(default=0.1, ge=0, le=1)
+    generation_timeout: float | None = Field(default=None, gt=0)
 
 
 class Novelty(BaseModel, extra="forbid"):

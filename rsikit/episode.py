@@ -2,13 +2,26 @@
 
 import base64
 import math
-from dataclasses import dataclass, field
-from typing import Any
+from dataclasses import field
+from typing import Annotated, Any
 
 import numpy as np
+from pydantic import BeforeValidator, ConfigDict, Field, TypeAdapter
+from pydantic.dataclasses import dataclass
 
 
-@dataclass
+def _reward(value):
+    # Strict float validation also accepts float-convertible objects, including NumPy booleans.
+    if type(value) not in (int, float):
+        raise ValueError("Episode rewards must be ordinary numbers")
+    return value
+
+
+@dataclass(
+    config=ConfigDict(
+        strict=True, extra="forbid", allow_inf_nan=False, revalidate_instances="always"
+    )
+)
 class Episode:
     """An attempted rollout, including its partial trajectory and candidate error.
 
@@ -22,12 +35,30 @@ class Episode:
 
     observations: list[Any] = field(default_factory=list)
     actions: list[Any] = field(default_factory=list)
-    rewards: list[float] = field(default_factory=list)
+    rewards: list[Annotated[int | float, BeforeValidator(_reward)]] = field(default_factory=list)
     terminations: list[bool] = field(default_factory=list)
     truncations: list[bool] = field(default_factory=list)
-    infos: list[dict[str, Any]] = field(default_factory=list)
+    infos: list[dict[Any, Any]] = field(default_factory=list)
     artifacts: dict[str, bytes] = field(default_factory=dict)
-    error: str | None = None
+    error: Annotated[str, Field(pattern=r"\S")] | None = None
+
+    def validate_complete(self) -> "Episode":
+        """Validate current fields and trajectory, including post-construction mutations."""
+        _EPISODE.validate_python(self)
+        length = len(self)
+        if (not length and self.error is None) or any(
+            len(track) != length for track in (self.actions, self.terminations, self.truncations)
+        ):
+            raise ValueError("Episode transitions are not aligned")
+        initial = len(self.observations)
+        if initial != len(self.infos) or (
+            initial != length + 1 and not (self.error is not None and length == initial == 0)
+        ):
+            raise ValueError("Episode must include its initial observation and info")
+        ends = list(zip(self.terminations, self.truncations))
+        if any(a or b for a, b in ends[:-1]) or (self.error is None and not any(ends[-1])):
+            raise ValueError("Episode must end exactly at its last transition")
+        return self
 
     def __len__(self) -> int:
         return len(self.rewards)
@@ -48,6 +79,7 @@ class Episode:
         )
 
 
+_EPISODE = TypeAdapter(Episode)
 MAX_ARRAY_BYTES = 262_144
 
 
@@ -133,7 +165,7 @@ def encode_episode(episode):
     """Stable data-only representation for saved episodes."""
     if not isinstance(episode, Episode):
         raise ValueError("Expected an Episode")
-    _validate_episode(vars(episode))
+    episode.validate_complete()
     return {
         name: encode(value)
         for name, value in vars(episode).items()
@@ -155,37 +187,4 @@ def decode_episode(data):
         raise ValueError("Malformed episode fields")
     values = {name: decode(value) for name, value in data.items()}
     values.setdefault("error", None)
-    _validate_episode(values)
-    return Episode(**values)
-
-
-def _validate_episode(values):
-    if any(not isinstance(values[name], list) for name in set(values) - {"artifacts", "error"}):
-        raise ValueError("Episode tracks must be lists")
-    error = values.get("error")
-    if error is not None and (not isinstance(error, str) or not error.strip()):
-        raise ValueError("Episode error must be nonempty text")
-    length = len(values["rewards"])
-    if (not length and error is None) or any(
-        len(values[name]) != length for name in ("actions", "terminations", "truncations")
-    ):
-        raise ValueError("Episode transitions are not aligned")
-    initial = len(values["observations"])
-    if initial != len(values["infos"]) or (
-        initial != length + 1 and not (error is not None and length == initial == 0)
-    ):
-        raise ValueError("Episode must include its initial observation and info")
-    if any(type(r) not in (int, float) or not math.isfinite(r) for r in values["rewards"]):
-        raise ValueError("Episode rewards must be finite numbers")
-    ends = list(zip(values["terminations"], values["truncations"]))
-    if any(type(flag) is not bool for pair in ends for flag in pair):
-        raise ValueError("Episode end flags must be boolean")
-    if any(a or b for a, b in ends[:-1]) or (error is None and not any(ends[-1])):
-        raise ValueError("Episode must end exactly at its last transition")
-    if any(not isinstance(info, dict) for info in values["infos"]):
-        raise ValueError("Episode infos must be dictionaries")
-    artifacts = values["artifacts"]
-    if not isinstance(artifacts, dict) or any(
-        not isinstance(k, str) or not isinstance(v, bytes) for k, v in artifacts.items()
-    ):
-        raise ValueError("Episode artifacts must map paths to bytes")
+    return Episode(**values).validate_complete()

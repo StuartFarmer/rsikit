@@ -9,10 +9,10 @@ import logging
 import math
 import random
 from collections.abc import Awaitable, Callable, Sequence
-from dataclasses import dataclass
 from statistics import fmean
 
-from pydantic import ValidationError
+from pydantic import ConfigDict, Field, ValidationError, model_validator
+from pydantic.dataclasses import dataclass
 from rich.table import Column
 from slick import parse, render
 from slick.providers import Provider
@@ -36,18 +36,24 @@ from .records import Generation, Organism
 logger = logging.getLogger(__name__)
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, config=ConfigDict(strict=True, extra="forbid", allow_inf_nan=False))
 class Config:
-    elite_size: int = 10
-    population_size: int = 50
-    generations: int = 20
-    new_fraction: float = 0.2
-    remix_fraction: float = 0.4
-    remix_parents: int = 3
-    generation_concurrency: int = 100
-    generation_timeout: float = 120
-    max_repairs: int = 2
+    elite_size: int = Field(default=10, ge=1)
+    population_size: int = Field(default=50, ge=1)
+    generations: int = Field(default=20, ge=0)
+    new_fraction: float = Field(default=0.2, ge=0, le=1)
+    remix_fraction: float = Field(default=0.4, ge=0, le=1)
+    remix_parents: int = Field(default=3, ge=2)
+    generation_concurrency: int = Field(default=100, ge=1)
+    generation_timeout: float = Field(default=120, gt=0)
+    max_repairs: int = Field(default=2, ge=0)
     target_score: float | None = None
+
+    @model_validator(mode="after")
+    def valid_fractions(self):
+        if self.new_fraction + self.remix_fraction > 1:
+            raise ValueError("new_fraction + remix_fraction must not exceed 1")
+        return self
 
 
 class EliteSearch:
@@ -129,8 +135,6 @@ class EliteSearch:
         seed: int = 0,
         on_checkpoint: Callable[[EliteSearch], None] | None = None,
     ):
-        if config.target_score is not None and not math.isfinite(config.target_score):
-            raise ValueError("target_score must be finite")
         self.healer = SelfHealer(task, provider, context=context, libraries=self.libraries)
         self.task, self.context, self.provider = task, context, provider
         self.evaluate, self.config, self.on_checkpoint = evaluate, config, on_checkpoint

@@ -1,25 +1,38 @@
-"""Optional Pillow table renderer; wrap a BlackjackEnv only when making visuals."""
+"""SVG performance frames; wrap a BlackjackEnv only when making visuals."""
 
 import math
 from copy import deepcopy
-from functools import cached_property, lru_cache
-from pathlib import Path
 
 import gymnasium as gym
 import numpy as np
-from PIL import Image, ImageDraw, ImageFont
 
 from .blackjack import _value
+from .render_theme import (
+    BLUE,
+    FPS,
+    GREEN,
+    GRID,
+    HIGHLIGHT,
+    INK,
+    MUTED,
+    NEGATIVE_FILL,
+    POSITIVE_FILL,
+    RED,
+    RULE,
+    SURFACE,
+)
+from .svg_frame import SvgFrame, rasterize
 
-WIDTH, HEIGHT = 1280, 720
-ASSETS = Path(__file__).with_name("data") / "blackjack"
-INK = "#1F2933"
-MUTED = "#52616B"
-ACCENT = "#284B63"
-GREEN = "#18705B"
-RED = "#B44949"
-SUITS = ("hearts", "diamonds", "clubs", "spades")
-RANKS = ("A", *[f"{n:02}" for n in range(2, 11)], "J", "Q", "K")
+RANKS = ("A", *[str(n) for n in range(2, 11)], "J", "Q", "K")
+# Unit-square suit geometry keeps the canonical card entirely vector.
+SUITS = (
+    "M .5 .9 L .08 .46 C -.2 .08 .32 -.1 .5 .22 C .68 -.1 1.2 .08 .92 .46 Z",
+    "M .5 0 L 1 .5 L .5 1 L 0 .5 Z",
+    "M .43 .68 C -.12 1 -.16 .22 .3 .38 C .03 -.13 .97 -.13 .7 .38 "
+    "C 1.16 .22 1.12 1 .57 .68 L .7 1 L .3 1 Z",
+    "M .5 0 C .36 .22 -.16 .46 .08 .74 C .2 .86 .38 .76 .44 .68 "
+    "L .3 1 L .7 1 L .56 .68 C .62 .76 .8 .86 .92 .74 C 1.16 .46 .64 .22 .5 0 Z",
+)
 
 
 class _Card(int):
@@ -34,11 +47,6 @@ class _Card(int):
         return int(self), self.identity
 
 
-@lru_cache(maxsize=24)
-def _font(size):
-    return ImageFont.load_default(size=size)
-
-
 class BlackjackRenderer(gym.Wrapper):
     """One deterministic RGB frame per action, with a cumulative reward timeline.
 
@@ -47,11 +55,12 @@ class BlackjackRenderer(gym.Wrapper):
     """
 
     render_mode = "rgb_array"
-    metadata = {"render_modes": ["rgb_array"], "render_fps": 30}
+    metadata = {"render_modes": ["rgb_array"], "render_fps": FPS}
 
-    def __init__(self, env, *, policy_name="Baseline agent"):
+    def __init__(self, env, *, policy_name="Baseline agent", split="training", policy_id=""):
         super().__init__(env)
         self.policy_name = policy_name
+        self.split, self.policy_id = split, policy_id
         self.seed = None
         self.points = [0.0]
         self._dealt = self._settled = self._sat_out = False
@@ -108,166 +117,120 @@ class BlackjackRenderer(gym.Wrapper):
                 self._detail += f"   /   {len(game._hands)} hands in play"
         return result
 
-    @cached_property
-    def _background(self):
-        image = Image.new("RGB", (WIDTH, HEIGHT), "#FAFAF8")
-        draw = ImageDraw.Draw(image)
-        draw.line((28, 76, 1252, 76), fill="#CAD3D5")
-        draw.rounded_rectangle((24, 86, 1256, 504), 118, fill="#EDF3F1", outline="#A6B8B1", width=2)
-        draw.rounded_rectangle((24, 550, 1256, 704), 18, fill="#FFFFFF", outline="#CAD3D5")
-        return image
-
     @staticmethod
-    @lru_cache(maxsize=106)
-    def _card_image(identity, width):
-        name = (
-            "card_back.png"
-            if identity is None
-            else f"card_{SUITS[identity // 13]}_{RANKS[identity % 13]}.png"
-        )
-        with Image.open(ASSETS / name) as source:
-            card = source.convert("RGBA")
-        card = card.crop(card.getbbox())
-        return card.resize((width, round(width * 60 / 42)), Image.Resampling.NEAREST)
+    def _draw_card(frame, x, y, identity, width, id):
+        height = width * 10 / 7
+        with frame.group(id, transform=f"translate({x} {y})"):
+            frame.rect((0, 0, width, height), SURFACE, RULE, radius=3)
+            if identity is None:
+                frame.rect((5, 5, width - 5, height - 5), HIGHLIGHT, BLUE)
+                frame.text(width / 2, height / 2, "?", 24, BLUE, "mm", face="serif")
+                return
+            suit, rank = divmod(identity, 13)
+            color = RED if suit < 2 else INK
+            frame.text(7, 6, RANKS[rank], 20, color, face="serif")
+            frame.text(width - 7, height - 24, RANKS[rank], 16, color, "rt", face="serif")
+            size = width * 0.34
+            frame.add(
+                "path",
+                d=SUITS[suit],
+                fill=color,
+                transform=f"translate({(width - size) / 2} {(height - size) / 2}) scale({size})",
+            )
 
     def render(self):
-        image = self._background.copy()
-        draw = ImageDraw.Draw(image)
+        return rasterize(self.render_svg(embed_fonts=False))
+
+    def render_svg(self, *, embed_fonts=True):
+        """Return a vector frame; embed fonts for standalone viewing by default."""
+        frame = SvgFrame("Blackjack policy performance")
+        text = frame.text
         game = self.unwrapped
-        step = len(self.points) - 1
-        score = self.points[-1]
-
-        def text(x, y, value, size=12, fill=INK, anchor="lt"):
-            draw.text(
-                (x, y),
-                str(value),
-                font=_font(max(12, size)),
-                fill=fill,
-                anchor=anchor,
-                stroke_width=0.5,
-                stroke_fill=fill,
-            )
-
-        def box(bounds, radius=10, fill=None, outline=None, width=1):
-            draw.rounded_rectangle(
-                bounds,
-                radius,
-                fill=fill,
-                outline=outline,
-                width=width,
-            )
-
-        def card(x, y, identity, width=84):
-            height = round(width * 60 / 42)
-            box((x + 2, y + 4, x + width + 2, y + height + 4), 3, fill="#CDD8D3")
-            image.paste(
-                self._card_image(identity, width),
-                (round(x), round(y)),
-                self._card_image(identity, width),
-            )
-
-        def chip(x, y, wager):
-            draw.ellipse(
-                (x - 13, y - 13, x + 13, y + 13),
-                fill="#FFFFFF",
-                outline="#728891",
-                width=2,
-            )
-            draw.ellipse(
-                (x - 9, y - 9, x + 9, y + 9),
-                outline="#B4C1C6",
-                width=1,
-            )
-            text(x, y, wager, 12, INK, "mm")
-
-        text(30, 22, "BLACKJACK", 26)
+        step, score = len(self.points) - 1, self.points[-1]
+        round_number = max(1, game._rounds + int(game._phase == 1))
+        shoe = game._shoe_number - int(self._settled and game._shuffled)
+        identity = f"   /   policy {self.policy_id[:12]}" if self.policy_id else ""
+        frame.header(
+            "Blackjack",
+            self.policy_name,
+            f"{self.split.upper()}   /   seed {self.seed}   /   shoe {shoe}   /   "
+            f"round {round_number}   /   action {step}{identity}",
+            f"{score:+.1f}",
+            "Net points",
+            GREEN if score >= 0 else RED,
+        )
+        text(32, 154, "Table rules", 18, face="serif")
+        text(32, 183, f"{game.decks} decks  /  pays 3 : 2", 16, MUTED)
         text(
             32,
-            54,
-            f"{self.policy_name}   /   {game.decks} decks   /   {'H17' if game.hit_soft_17 else 'S17'}",
-            12,
+            210,
+            "Dealer hits soft 17" if game.hit_soft_17 else "Dealer stands on soft 17",
+            16,
             MUTED,
         )
-        round_number = max(1, game._rounds + int(game._phase == 1))
-        text(770, 26, "ROUND", 10, MUTED)
-        text(770, 42, f"{round_number:02}", 20)
-        text(986, 26, "SEED / SHOE", 10, MUTED)
-        shoe = game._shoe_number - int(self._settled and game._shuffled)
-        text(986, 44, f"{self.seed} / {shoe}", 16)
-        text(873, 26, "ACTION", 10, MUTED)
-        text(873, 42, f"{step:03}", 20)
-        text(1250, 23, f"{score:+.1f}", 32, GREEN if score >= 0 else RED, "rt")
-        text(1250, 59, "NET POINTS", 10, MUTED, "rt")
-
-        text(640, 115, "DEALER", 11, ACCENT, "mt")
-        text(148, 180, "BLACKJACK", 18, ACCENT)
-        text(148, 205, "PAYS 3 : 2", 12, MUTED)
-        text(
-            148,
-            242,
-            "Dealer stands on soft 17" if not game.hit_soft_17 else "Dealer hits soft 17",
-            11,
-            MUTED,
-        )
-        for offset in (8, 4, 0):
-            card(1080 + offset, 151 - offset, None, 63)
-        text(1116, 252, "SHOE", 10, ACCENT, "mt")
-
+        text(1248, 154, "Dealer", 18, BLUE, "rt", face="serif")
         if self._dealt:
             hands, dealer = game._hands, game._dealer
             reveal = self._settled and any(_value(hand)[0] <= 21 for hand in hands)
             shown = [c.identity for c in dealer] if reveal else [dealer[0].identity, None]
-            spacing = min(92, 480 / max(1, len(shown)))
-            start = 640 - (84 + spacing * (len(shown) - 1)) / 2
-            for i, identity in enumerate(shown):
-                card(start + spacing * i, 137, identity)
-            total = (
-                str(_value(dealer)[0])
-                if reveal
-                else f"{int(dealer[0]) if dealer[0] != 1 else 'A'} + ?"
-            )
-            text(640, 267, total, 16, INK, "mt")
-            lane = min(350, 1080 / len(hands))
+            spacing = min(76, 460 / max(1, len(shown)))
+            start = 640 - (64 + spacing * (len(shown) - 1)) / 2
+            with frame.group("dealer"):
+                for i, card in enumerate(shown):
+                    self._draw_card(frame, start + spacing * i, 148, card, 64, f"dealer-card-{i}")
+                total = (
+                    str(_value(dealer)[0])
+                    if reveal
+                    else f"{int(dealer[0]) if dealer[0] != 1 else 'A'} + ?"
+                )
+                text(640, 252, total, 20, INK, "mt", face="serif", id="dealer-total")
+            lane = min(440, 1216 / len(hands))
             start = 640 - lane * len(hands) / 2
             for i, hand in enumerate(hands):
                 x = start + lane * i
                 active = not self._settled and i == game._active
-                box(
-                    (x + 6, 302, x + lane - 6, 475),
-                    17,
-                    "#E2ECF2" if active else "#F8FAF9",
-                    ACCENT if active else "#C2CFCA",
-                    width=2 if active else 1,
-                )
-                label = "OTHER PLAYER" if self._sat_out else f"HAND {i + 1:02}"
-                text(x + 22, 316, label, 11, ACCENT if active else MUTED)
-                value, soft = _value(hand)
-                total = str(value) + (" SOFT" if soft else "") if len(hand) > 1 else "WAITING"
-                text(x + lane - 23, 314, total, 16, INK, "rt")
-                width = 63 if len(hands) == 4 else 84
-                spacing = min(width + 8, (lane - 55 - width) / max(1, len(hand) - 1))
-                for j, item in enumerate(hand):
-                    card(x + 23 + j * spacing, 341, item.identity, width)
-                chip(x + lane - 32, 449, game._bets[i])
-                if active:
-                    text(x + lane / 2, 486, "YOUR TURN", 10, ACCENT, "mt")
+                with frame.group(f"hand-{i + 1}"):
+                    frame.rect(
+                        (x + 6, 296, x + lane - 6, 472), HIGHLIGHT if active else SURFACE, RULE
+                    )
+                    if active:
+                        frame.rect((x + 6, 296, x + lane - 6, 299), BLUE)
+                    label = "Other player" if self._sat_out else f"Hand {i + 1}"
+                    text(x + 22, 313, label, 18, BLUE if active else MUTED, face="bold")
+                    value, soft = _value(hand)
+                    total = str(value) + (" soft" if soft else "") if len(hand) > 1 else "Waiting"
+                    text(x + lane - 22, 313, total, 20, INK, "rt", face="serif")
+                    width = 58 if len(hands) == 4 else 70
+                    spacing = min(width + 10, (lane - 48 - width) / max(1, len(hand) - 1))
+                    for j, card in enumerate(hand):
+                        self._draw_card(
+                            frame,
+                            x + 22 + j * spacing,
+                            344,
+                            card.identity,
+                            width,
+                            f"hand-{i + 1}-card-{j}",
+                        )
+                    text(x + lane - 22, 448, f"Wager {game._bets[i]}", 16, MUTED, "rt")
+                    if active:
+                        text(x + 22, 448, "To act", 16, BLUE)
         else:
-            text(640, 220, "A fresh shoe", 26, INK, "mt")
-            text(640, 260, "Waiting for the first wager", 14, MUTED, "mt")
+            text(640, 236, "A fresh shoe", 30, INK, "mt", face="serif")
+            text(640, 285, "Waiting for the first wager", 18, MUTED, "mt")
 
-        text(34, 521, "LAST ACTION", 10, MUTED)
-        text(163, 517, self._action, 18, ACCENT)
-        text(280, 521, self._detail, 12, MUTED)
-        if self._settled:
-            outcome = "SITTING OUT" if self._sat_out else f"ROUND {self._reward:+g}"
-            text(1246, 519, outcome, 14, GREEN if self._reward >= 0 else RED, "rt")
-        elif self._dealt:
-            text(1246, 521, f"Hand {game._active + 1} to act", 12, MUTED, "rt")
-
-        text(44, 567, "NET POINTS", 13)
-        text(158, 569, "Cumulative reward  /  every agent action", 11, MUTED)
-        text(1234, 565, f"{score:+.1f}", 22, GREEN if score >= 0 else RED, "rt")
-        left, right, top, bottom = 77, 1218, 605, 674
+        with frame.group("last-action"):
+            text(32, 495, "Last action", 16, MUTED)
+            text(146, 491, self._action, 22, BLUE, face="bold")
+            text(288, 495, self._detail, 16, MUTED, max_width=675)
+            if self._settled:
+                outcome = "Sitting out" if self._sat_out else f"Round {self._reward:+g}"
+                text(1248, 493, outcome, 20, GREEN if self._reward >= 0 else RED, "rt")
+            elif self._dealt:
+                text(1248, 495, f"Hand {game._active + 1} to act", 16, MUTED, "rt")
+        frame.line([(32, 528), (1248, 528)], RULE)
+        text(32, 543, "Cumulative reward", 20, face="serif")
+        text(1248, 547, "Net points / agent actions", 16, MUTED, "rt")
+        left, right, top, bottom = 86, 1224, 586, 660
         low, high = min(-1, min(self.points)), max(1, max(self.points))
         tick = max(1, math.ceil((high - low) / 4))
         low, high = math.floor(low / tick) * tick, math.ceil(high / tick) * tick
@@ -275,46 +238,30 @@ class BlackjackRenderer(gym.Wrapper):
         def y(value):
             return bottom - (value - low) / (high - low) * (bottom - top)
 
-        zero = y(0)
-        for value in range(low, high + 1, tick):
-            py = y(value)
-            draw.line(
-                (left, py, right, py),
-                fill="#9CAEB1" if value == 0 else "#E1E6E8",
-                width=1,
+        with frame.group("reward"):
+            zero = y(0)
+            for value in range(low, high + 1, tick):
+                py = y(value)
+                frame.line([(left, py), (right, py)], MUTED if value == 0 else GRID)
+                text(left - 14, py, f"{value:+g}" if value else "0", 15, MUTED, "rm")
+            for index in dict.fromkeys(round(step * i / 4) for i in range(5)):
+                px = left + (right - left) * index / max(1, step)
+                text(px, bottom + 12, index, 15, MUTED, "mt")
+            for i in range(1, len(self.points)):
+                x1 = left + (right - left) * (i - 1) / max(1, step)
+                x2 = left + (right - left) * i / max(1, step)
+                before, after = self.points[i - 1 : i + 1]
+                frame.rect(
+                    (x1, min(zero, y(before)), x2, max(zero, y(before))),
+                    POSITIVE_FILL if before >= 0 else NEGATIVE_FILL,
+                )
+                frame.line([(x1, y(before)), (x2, y(before))], GREEN if before >= 0 else RED, 2)
+                frame.line([(x2, y(before)), (x2, y(after))], GREEN if after >= 0 else RED, 2)
+            frame.circle(
+                right if step else left,
+                y(score),
+                4,
+                GREEN if score >= 0 else RED,
+                id="reward-current",
             )
-            text(left - 14, py, f"{value:+g}" if value else "0", 10, MUTED, "rm")
-        for i in range(5):
-            index = round(step * i / 4)
-            px = left + (right - left) * i / 4
-            text(px, bottom + 10, index, 10, MUTED, "mt")
-        for i in range(1, len(self.points)):
-            x1 = left + (right - left) * (i - 1) / max(1, step)
-            x2 = left + (right - left) * i / max(1, step)
-            before, after = self.points[i - 1 : i + 1]
-            color = GREEN if before >= 0 else RED
-            draw.rectangle(
-                (
-                    x1,
-                    min(zero, y(before)),
-                    x2,
-                    max(zero, y(before)),
-                ),
-                fill="#E0EEE8" if before >= 0 else "#F5E4E4",
-            )
-            draw.line(
-                (x1, y(before), x2, y(before)),
-                fill=color,
-                width=2,
-            )
-            draw.line(
-                (x2, y(before), x2, y(after)),
-                fill=GREEN if after >= 0 else RED,
-                width=2,
-            )
-        px = right if step else left
-        draw.ellipse(
-            (px - 4, y(score) - 4, px + 4, y(score) + 4),
-            fill=GREEN if score >= 0 else RED,
-        )
-        return np.asarray(image).copy()
+        return frame.svg(embed_fonts=embed_fonts)
