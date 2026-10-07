@@ -20,7 +20,7 @@ from research.rollouts import Rollouts
 from rsikit import Episode, Executor, Run
 from rsikit.envs import BitcoinEnv, BlackjackEnv, CirclePackingEnv
 from rsikit.evaluation import PolicyError
-from rsikit.policy import Policy
+from rsikit.policy import PolicyDefinition
 
 PACKING = """
 import numpy as np
@@ -117,7 +117,7 @@ async def scheduling(samples):
                             await asyncio.sleep(0.005)
                             source = PACKING + f"\n# candidate {i}\n"
                             arrived[source] = perf_counter()
-                            await queue.put(Policy.from_text(source, name=str(i)))
+                            await queue.put(PolicyDefinition.from_text(source, name=str(i)))
                         await queue.put(None)
 
                     async def consume():

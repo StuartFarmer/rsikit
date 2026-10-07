@@ -4,7 +4,7 @@ from typing import Annotated
 
 from pydantic import BaseModel, Field, StringConstraints
 
-from rsikit.policy import InvalidPolicy, Policy
+from rsikit.policy import InvalidPolicy, PolicyDefinition
 
 
 class _PolicyResponse(BaseModel, extra="forbid"):
@@ -12,8 +12,10 @@ class _PolicyResponse(BaseModel, extra="forbid"):
     description: Annotated[str, StringConstraints(strip_whitespace=True, min_length=1)]
     implementation: str = Field(min_length=1)
 
-    def to_policy(self) -> type[Policy]:
-        return Policy.from_text(self.implementation, name=self.name, description=self.description)
+    def to_policy(self) -> PolicyDefinition:
+        return PolicyDefinition.from_text(
+            self.implementation, name=self.name, description=self.description
+        )
 
 
 class InvalidCandidate(InvalidPolicy):

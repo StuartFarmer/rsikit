@@ -12,7 +12,7 @@ from sqlalchemy import JSON, Column, inspect
 from sqlmodel import Field, Session, SQLModel, create_engine, select
 
 from .episode import Episode
-from .policy import Policy
+from .policy import PolicyDefinition
 from .progress import bind_run
 
 
@@ -168,24 +168,26 @@ class Run:
             destination = self.path / "exports" / f"{policy.id}_{_slug(policy.name)}.py"
             if not destination.exists():
                 destination.parent.mkdir(exist_ok=True)
-                Policy.from_text(
+                PolicyDefinition.from_text(
                     policy.implementation, name=policy.name, description=policy.description
                 ).to_file(destination)
 
-    def policies(self) -> list[type[Policy]]:
+    def policies(self) -> list[PolicyDefinition]:
         with self.database() as session:
             return [
-                Policy.from_text(row.implementation, name=row.name, description=row.description)
+                PolicyDefinition.from_text(
+                    row.implementation, name=row.name, description=row.description
+                )
                 for row in session.exec(select(_StoredPolicy))
             ]
 
-    def scores(self, policy: type[Policy]) -> dict[int, float | None]:
+    def scores(self, policy: PolicyDefinition) -> dict[int, float | None]:
         with self.database() as session:
             row = session.get(_StoredPolicy, policy.id)
             return {} if row is None else {int(seed): score for seed, score in row.scores.items()}
 
     def save_policy(
-        self, policy: type[Policy], *, scores: dict[int, float | None] | None = None
+        self, policy: PolicyDefinition, *, scores: dict[int, float | None] | None = None
     ) -> None:
         """Persist source and optimizer-supplied measurements without evaluating anything."""
         if scores is not None and any(
@@ -201,9 +203,9 @@ class Run:
                     id=policy.id,
                     name=policy.name,
                     description=policy.description,
-                    implementation=policy._implementation,
+                    implementation=policy.source,
                 )
-            elif (stored.name, stored.implementation) != (policy.name, policy._implementation):
+            elif (stored.name, stored.implementation) != (policy.name, policy.source):
                 raise ValueError("A stored policy cannot change under the same ID")
             stored.scores = {**stored.scores, **{str(k): v for k, v in (scores or {}).items()}}
             db.add(stored)
@@ -218,7 +220,7 @@ class Run:
             raise ValueError("Output path must stay inside the run")
         return destination
 
-    def save_episode(self, policy: type[Policy], seed: int, episode: Episode) -> None:
+    def save_episode(self, policy: PolicyDefinition, seed: int, episode: Episode) -> None:
         """Save raw evidence and artifacts; fitness is supplied separately by the optimizer."""
         if type(seed) is not int:
             raise ValueError("Episode seed must be an integer")
@@ -242,7 +244,7 @@ class Run:
             temporary.write_bytes(value)
             temporary.replace(destination)
 
-    def load_episode(self, policy: type[Policy], seed: int) -> Episode | None:
+    def load_episode(self, policy: PolicyDefinition, seed: int) -> Episode | None:
         if type(seed) is not int:
             raise ValueError("Episode seed must be an integer")
         path = self._output_path(Path("episodes") / policy.id / f"{seed}.json")

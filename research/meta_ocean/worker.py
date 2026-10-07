@@ -9,7 +9,7 @@ import traceback
 import gymnasium as gym
 import numpy as np
 
-from rsikit import load_policy
+from rsikit.policy import load_policy
 
 MAX_MESSAGE = 8 * 1024 * 1024
 INPUT = sys.stdin

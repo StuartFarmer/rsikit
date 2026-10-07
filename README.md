@@ -16,10 +16,11 @@ Install the shared library with `pip install rsikit` (Python 3.10+).
 Research algorithms and examples require a clone of this repository.
 This is an experimental release; APIs may change.
 
-- `Policy`: the solution type: load with `from_text` / `from_file`, save with
-  `to_text` / `to_file`, and execute through `reset`, `act`, and `close`.
-- `generate`: returns a named `Policy` subclass from the LLM.
-- `rsikit.policy.validate_policy`: explicitly checks generated source without executing it.
+- `Policy`: the runtime ABC with `reset`, `act`, and `close`.
+- `PolicyDefinition`: immutable source and metadata; load with `from_text` /
+  `from_file`, save with `to_text` / `to_file`, and check source with `validate()`.
+- `PolicyEncoder`: encodes/decodes definitions and owns static source validation.
+- `generate`: returns a named `PolicyDefinition` from the LLM.
 - `Evaluator`: rolls out existing environment and policy instances.
 - `Episode`: records observations, actions, rewards, flags, infos, and artifacts.
 - `Optimizer`: the `propose()` / `update(episodes)` protocol, with `done` and `best`, implemented by all six optimizers.
@@ -44,7 +45,6 @@ from slick.providers import OpenRouterAPI
 
 import rsikit.generation as generation
 from rsikit import Executor, Run, generate
-from rsikit.policy import validate_policy
 from research.rollouts import Rollouts
 from research.rewards import mean_rewards
 
@@ -58,7 +58,7 @@ policy = await generate(
     "velocity. Action 0 pushes left and 1 pushes right. Maximize surviving steps.",
     provider=provider,
 )
-validate_policy(policy)
+policy.validate()
 executor = Executor(concurrency=4)
 with gym.make("CartPole-v1", max_episode_steps=500) as environment:
     async with executor, Run.create(name="cartpole-comparison") as run:

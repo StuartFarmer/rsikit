@@ -4,7 +4,7 @@ Task: {{ instance.task }}
 Background and evaluator contract: {{ instance.context }}
 
 Evaluated program:
-{{ parent.policy._implementation }}
+{{ parent.policy.source }}
 Score (maximized): {{ parent.score }}
 
 Existing search instructions, average positive offspring improvement, and uses:

@@ -16,7 +16,7 @@ from research.ocean.maze import Maze, verify_splits
 )
 class MazeTests(unittest.IsolatedAsyncioTestCase):
     async def test_memory_policy_is_independent_of_batch_width_and_seed_order(self):
-        source = policies("maze")[-1]._implementation
+        source = policies("maze")[-1].source
         kwargs = dict(env_name="maze", score_key="return", max_steps=450)
         scalar = await rollout(source, [7, 9, 11], batch_size=1, **kwargs)
         batch = await rollout(source, [7, 9, 11], batch_size=2, **kwargs)

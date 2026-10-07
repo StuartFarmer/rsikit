@@ -21,7 +21,7 @@ import numpy as np
 
 from rsikit import Episode
 from rsikit.evaluation import InfrastructureError, PolicyError, PolicyTimeout, _policy_boundary
-from rsikit.policy import InvalidPolicy, load_policy, validate_policy
+from rsikit.policy import InvalidPolicy, load_policy
 
 from .environment import factory, metadata
 
@@ -379,13 +379,13 @@ class PanelEvaluator:
             self.running += 1
             event["started"] = perf_counter()
             try:
-                validate_policy(policy)
+                policy.validate()
                 source_path = self.output / "policies" / f"{policy.id}.py"
                 if not source_path.exists():
                     policy.to_file(source_path)
                 operation = self._reference if self.mode == "reference" else self._panel
                 result = await asyncio.wait_for(
-                    operation(policy._implementation, seeds, record=record),
+                    operation(policy.source, seeds, record=record),
                     self.timeout * len(seeds),
                 )
                 rows = result["results"]

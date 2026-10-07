@@ -237,7 +237,7 @@ class EvolverTrial(Trial):
                         healer.repair("", str(source), response["error"], record=call),
                         self.config.generation_timeout,
                     )
-                source = source_text(repaired._implementation)
+                source = source_text(repaired.source)
                 response = await super().handle(dict(op="evaluate", value=source))
             except BudgetExceeded as exc:
                 response = dict(error=f"BudgetExceeded: repair stopped: {exc}")
@@ -468,7 +468,7 @@ def _benchmark_episode(score, report, *, error=None):
 async def execute_baseline(config, trial, context, slots):
     async def evaluate(candidates):
         async def measure(policy):
-            response = await Trial.handle(trial, dict(op="evaluate", value=policy._implementation))
+            response = await Trial.handle(trial, dict(op="evaluate", value=policy.source))
             if "error" in response:
                 return policy.id, {seed: Episode(error=response["error"]) for seed in trial.seeds}
             if response["score"] > trial.best:
@@ -607,7 +607,7 @@ async def run_trial(config, source, path, replicate, environment, slots, *, mode
         if source is not None:
             (path / "evolver.py").write_text(source)
         model = model if model is not None else provider(config, path / "model_calls.jsonl")
-        starter = policies(environment)[0]._implementation
+        starter = policies(environment)[0].source
         count = max((int(p.stem.split("-")[1]) for p in path.glob("panel-*.json")), default=0)
 
         async def evaluate(candidate, seeds):
@@ -830,7 +830,7 @@ async def _campaign(config, path, baselines, *, baseline_root=None):
             directory = path / "development" / policy.id / "1"
             result = await benchmark(
                 config,
-                policy._implementation,
+                policy.source,
                 directory,
                 config.development,
                 baseline_for("development", config),
@@ -919,7 +919,7 @@ async def _campaign(config, path, baselines, *, baseline_root=None):
             path / "selection.json",
             dict(
                 policy_id=winner.id,
-                controller_hash=digest(winner._implementation),
+                controller_hash=digest(winner.source),
                 scorecard=scorecards[winner.id],
             ),
         )
@@ -940,7 +940,7 @@ async def _campaign(config, path, baselines, *, baseline_root=None):
             )
             summary["heldout"][phase] = await benchmark(
                 phase_config,
-                winner._implementation,
+                winner.source,
                 path / phase,
                 getattr(config, phase),
                 baseline_for(phase, phase_config),

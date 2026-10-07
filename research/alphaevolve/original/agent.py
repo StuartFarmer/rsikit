@@ -22,7 +22,7 @@ from slick.providers import Provider, ProviderError
 from research.rewards import episode_error, episode_scores
 from rsikit.generation import WORKER_LIBRARIES
 from rsikit.optimization import Optimizer, validate_results
-from rsikit.policy import InvalidPolicy, Policy, validate_policy
+from rsikit.policy import InvalidPolicy, PolicyDefinition
 
 from ..generation import (
     InvalidCandidate,
@@ -43,7 +43,7 @@ class Guidance(BaseModel, extra="forbid"):
 
 @dataclass(frozen=True)
 class _Candidate:
-    policy: type[Policy]
+    policy: PolicyDefinition
     score: float
     seed_scores: dict[int, float] = field(default_factory=dict)
 
@@ -211,10 +211,10 @@ class AlphaEvolve(Optimizer):
         )
 
     @property
-    def best(self) -> type[Policy] | None:
+    def best(self) -> PolicyDefinition | None:
         return None if self._best is None else self._best.policy
 
-    async def initialize(self, proposal: int, *, provider, record=None) -> type[Policy]:
+    async def initialize(self, proposal: int, *, provider, record=None) -> PolicyDefinition:
         """Create an initial named policy without a hand-written seed program."""
         schema = _PolicyResponse.model_json_schema()
         context = render(
@@ -234,7 +234,7 @@ class AlphaEvolve(Optimizer):
         *,
         provider,
         record=None,
-    ) -> type[Policy]:
+    ) -> PolicyDefinition:
         schema = Mutation.model_json_schema()
         context = render(
             "original/prompts/mutate.j2",
@@ -249,8 +249,8 @@ class AlphaEvolve(Optimizer):
         if record is not None:
             record["raw"] = raw
         mutation = parse(raw, Mutation)
-        return Policy.from_text(
-            apply_edits(parent.policy._implementation, mutation.edits),
+        return PolicyDefinition.from_text(
+            apply_edits(parent.policy.source, mutation.edits),
             name=mutation.name,
             description=mutation.description,
         )
@@ -264,7 +264,7 @@ class AlphaEvolve(Optimizer):
         *,
         provider,
         record=None,
-    ) -> type[Policy]:
+    ) -> PolicyDefinition:
         schema = _PolicyResponse.model_json_schema()
         context = render(
             "original/prompts/rewrite.j2",
@@ -280,7 +280,7 @@ class AlphaEvolve(Optimizer):
             record["raw"] = raw
         return parse(raw, _PolicyResponse).to_policy()
 
-    async def _repair_valid(self, record, reference, failed, diagnostic) -> type[Policy]:
+    async def _repair_valid(self, record, reference, failed, diagnostic) -> PolicyDefinition:
         # Adapt main's check/repair/recheck loop; count all repairs for this proposal.
         repairs = record.setdefault("repairs", [])
         provider = self.models[record["model"]][0]
@@ -306,14 +306,14 @@ class AlphaEvolve(Optimizer):
                     ),
                     self.config.generation_timeout,
                 )
-                content = proposal._implementation
+                content = proposal.source
                 call["implementation"] = content
                 if content == failed:
                     raise InvalidCandidate("Repair returned the unchanged implementation")
                 if reference:
                     check_rewrite(reference, content)
                 evolution_regions(content)
-                validate_policy(proposal)
+                proposal.validate()
                 call["valid"] = True
                 return proposal
             except (InvalidPolicy, ValidationError) as exc:
@@ -325,8 +325,8 @@ class AlphaEvolve(Optimizer):
         raise InvalidCandidate(f"Repair exhausted after {len(repairs)} repairs: {diagnostic}")
 
     async def repair(
-        self, policy: type[Policy], diagnostic: str, *, _records=None
-    ) -> type[Policy] | None:
+        self, policy: PolicyDefinition, diagnostic: str, *, _records=None
+    ) -> PolicyDefinition | None:
         """Repair an unevaluated policy after a episode failure, preserving its ancestry.
 
         The same budget covers generation and runtime repairs. The caller evaluates
@@ -350,11 +350,9 @@ class AlphaEvolve(Optimizer):
         for row in records:
             self._log_candidate(row, status="repairing")
         parent = record["parent"]
-        reference = policy._implementation if parent is None else parent.policy._implementation
+        reference = policy.source if parent is None else parent.policy.source
         try:
-            replacement = await self._repair_valid(
-                record, reference, policy._implementation, diagnostic
-            )
+            replacement = await self._repair_valid(record, reference, policy.source, diagnostic)
         except InvalidPolicy as exc:
             detach()
             for row in records:
@@ -388,7 +386,7 @@ class AlphaEvolve(Optimizer):
         generated = parse(raw, Guidance)
         return generated.instruction
 
-    async def generate(self, n: int = 1, *, concurrency: int = 4) -> list[type[Policy]]:
+    async def generate(self, n: int = 1, *, concurrency: int = 4) -> list[PolicyDefinition]:
         """Attempt n proposals and return survivors after bounded repair.
 
         Proposals are neither executed nor saved. Only a successfully returned
@@ -436,7 +434,7 @@ class AlphaEvolve(Optimizer):
             and self._attempt_offset + len(self.attempts) >= self.config.proposals
         )
 
-    async def propose(self) -> list[type[Policy]]:
+    async def propose(self) -> list[PolicyDefinition]:
         if self._proposing or self._round:
             raise RuntimeError("Previous proposal round is still outstanding")
         if self._proposal_error is not None:
@@ -661,18 +659,18 @@ class AlphaEvolve(Optimizer):
                 arguments = (parent, inspirations, guidance, failures)
             logger.info("Requesting policy %s via %s", attempt_id, operation.__name__)
             self.generation_calls += 1
-            reference = "" if parent is None else parent.policy._implementation
+            reference = "" if parent is None else parent.policy.source
             try:
                 proposal = await asyncio.wait_for(
                     operation(*arguments, provider=provider, record=record),
                     self.config.generation_timeout,
                 )
-                content = proposal._implementation
+                content = proposal.source
                 record["content"] = content
                 if parent is not None:
                     check_rewrite(reference, content)
                 evolution_regions(content)
-                validate_policy(proposal)
+                proposal.validate()
                 policy = proposal
             except (InvalidPolicy, ValidationError) as exc:
                 if isinstance(exc, ValidationError) and "raw" not in record:

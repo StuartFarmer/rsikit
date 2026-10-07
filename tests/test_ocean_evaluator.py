@@ -6,7 +6,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from rsikit import Policy
+from rsikit import PolicyDefinition
 
 
 class OceanEvaluatorTests(unittest.IsolatedAsyncioTestCase):
@@ -16,9 +16,9 @@ class OceanEvaluatorTests(unittest.IsolatedAsyncioTestCase):
 
         policy = policies()[1]
         seeds = [19, 0, 11]
-        scalar = await rollout(policy._implementation, seeds, 3, 40, trace=True)
-        batch = await rollout(policy._implementation, seeds, 3, 40, trace=True)
-        reverse = await rollout(policy._implementation, seeds[::-1], 3, 40, trace=True)
+        scalar = await rollout(policy.source, seeds, 3, 40, trace=True)
+        batch = await rollout(policy.source, seeds, 3, 40, trace=True)
+        reverse = await rollout(policy.source, seeds[::-1], 3, 40, trace=True)
         self.assertEqual(scalar["results"], batch["results"])
         self.assertEqual(scalar["results"], reverse["results"][::-1])
         self.assertEqual(scalar["steps"], sum(r["steps"] for r in scalar["results"]))
@@ -36,14 +36,14 @@ class OceanEvaluatorTests(unittest.IsolatedAsyncioTestCase):
         from research.ocean.baselines import policies
         from research.ocean.evaluator import PanelEvaluator
 
-        invalid = Policy.from_text("""
+        invalid = PolicyDefinition.from_text("""
 import numpy as np
 from rsikit import Policy
 class Solution(Policy):
     async def act(self, observation):
         return np.full(len(observation), np.nan)
 """)
-        hanging = Policy.from_text("""
+        hanging = PolicyDefinition.from_text("""
 from rsikit import Policy
 class Solution(Policy):
     async def act(self, observation):
@@ -77,7 +77,7 @@ class Solution(Policy):
         from research.ocean.evaluator import PanelEvaluator
         from rsikit.episode import Episode
 
-        policy = Policy.from_text("""
+        policy = PolicyDefinition.from_text("""
 import numpy as np
 from rsikit import Policy
 class Solution(Policy):
@@ -104,7 +104,7 @@ class Solution(Policy):
 
         from research.ocean.evaluator import PanelEvaluator
 
-        policy = Policy.from_text(
+        policy = PolicyDefinition.from_text(
             "from rsikit import Policy\nclass Solution(Policy):\n    async def act(self, observation): return 0\n"
         )
         with (
@@ -122,7 +122,7 @@ class Solution(Policy):
 
         for seeds in ([], [1, 1], [-1], [2**32], [True]):
             with self.assertRaises(ValueError):
-                await rollout(policies()[0]._implementation, seeds, 1, 1)
+                await rollout(policies()[0].source, seeds, 1, 1)
         with tempfile.TemporaryDirectory() as directory:
             async with PanelEvaluator(directory, timeout=5, max_steps=2000) as evaluator:
                 task = asyncio.create_task(evaluator.submit(policies()[0], list(range(32))))

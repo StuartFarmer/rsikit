@@ -2,7 +2,7 @@ Propose a new search instruction that encourages useful, distinct program improv
 Task: {{ instance.task }}
 Context: {{ instance.context }}
 Current program:
-{{ parent.policy._implementation }}
+{{ parent.policy.source }}
 Metrics: {{ parent.metrics | tojson }}
 Descriptors: {{ parent.features | tojson }}
 Evaluation output: {{ parent.feedback }}

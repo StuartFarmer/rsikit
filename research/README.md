@@ -37,7 +37,7 @@ remains available through its original config: `python -m research.meta_ocean --
 
 Shared modules available to every algorithm and runner:
 
-- `rsikit.policy.validate_policy`: explicit source checks after policy generation.
+- `PolicyDefinition.validate()`: explicit source checks after policy generation.
 - `rsikit.Evaluator` and `rsikit.Episode`: rollout execution and raw trajectories.
 - `rsikit.Optimizer`, `Episode`, and `search`: one external propose/evaluate/update loop
   across all six implementations. See [the contract](../docs/INNER_LOOP.md#one-optimization-loop).
@@ -45,11 +45,11 @@ Shared modules available to every algorithm and runner:
 - `research.rewards`: cumulative-reward fitness callbacks and per-seed measurements.
   Evaluators return raw episodes by policy and seed. AlphaEvolve builds its richer
   `EvaluationResult` in update; screening stays in evaluator composition.
-- `rsikit.Policy.from_text` / `from_file` and `to_text` / `to_file`: canonical solution
+- `rsikit.PolicyDefinition.from_text` / `from_file` and `to_text` / `to_file`: canonical solution
   loading and saving, preserving source and identity without host execution.
 - `rsikit.envs.tasks`: environment presets and `make_environment`.
 - `rsikit.progress`: automatic Run-scoped logging and the shared Rich dashboard; optimizers emit domain events and declare optional leaderboard columns.
-- `rsikit`: `Policy`, `Run`, and `Executor` with Docker evaluation.
+- `rsikit`: `Policy`, `PolicyDefinition`, `Run`, and `Executor` with Docker evaluation.
 
 Each optimizer composes its own `SelfHealer` in `healing.py`, with task context,
 provider, and a local repair prompt. It proposes a repair; the optimizer owns
@@ -58,11 +58,11 @@ the original variant's healer. Prompt operations use Slick's `render` and `parse
 with the provider's `acall`; raw responses go into optimizer attempt records
 before parsing, including malformed responses.
 
-Generation and healing operations return `type[Policy]`. Their private response
+Generation and healing operations return `PolicyDefinition`. Their private response
 schemas and mutation contracts live in each algorithm's `generation.py`.
 Optimizers validate generated policy source explicitly before accepting proposals;
-loading a policy does not validate it. AlphaEvolve, ShinkaEvolve, and LineageSearch
-own their protected-region rules. EliteSearch edits the whole organism and gives
+loading validates metadata but retains invalid Python for repair. AlphaEvolve,
+ShinkaEvolve, and LineageSearch own their protected-region rules. EliteSearch edits the whole organism and gives
 evolution-marker comments no special meaning.
 
 The dependency boundary is checked with

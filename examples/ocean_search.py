@@ -27,7 +27,7 @@ from research.experiment import _evidence
 from research.ocean.environment import BREAKOUT_CONTEXT, CONTEXT
 from research.providers import BudgetExceeded, BudgetProvider, UsageOpenRouter
 from research.rewards import episode_error, episode_scores
-from rsikit import Policy, Run
+from rsikit import PolicyDefinition, Run
 
 
 def save_json(path, value):
@@ -181,7 +181,7 @@ async def run_search(agent, provider, evaluator, run, *, manifest=None):
             (r for r in agent.organisms if r.score is not None), key=lambda r: (-r.score, r.id)
         )[:5]
         candidates = [
-            Policy.from_text(r.implementation, name=r.name, description=r.description)
+            PolicyDefinition.from_text(r.implementation, name=r.name, description=r.description)
             for r in ranked
         ]
         checkpoint(agent)

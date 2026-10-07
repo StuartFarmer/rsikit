@@ -167,14 +167,14 @@ implement the structural `rsikit.Optimizer` protocol:
 
 ```python
 from collections.abc import Mapping
-from rsikit import Episode, Policy
+from rsikit import Episode, PolicyDefinition
 
 
-async def propose() -> list[type[Policy]]: ...
+async def propose() -> list[PolicyDefinition]: ...
 def update(results: Mapping[str, Mapping[int, Episode]]) -> None: ...
 
 
-# Read-only properties: done: bool; best: type[Policy] | None
+# Read-only properties: done: bool; best: PolicyDefinition | None
 ```
 
 Configure an optimizer using its algorithm's `Config`, then pass the same evaluator

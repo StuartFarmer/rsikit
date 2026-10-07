@@ -19,7 +19,7 @@ import yaml
 from pydantic import BaseModel, ConfigDict, Field
 
 from research.rewards import episode_error, episode_scores
-from rsikit import Policy, Run
+from rsikit import PolicyDefinition, Run
 
 
 class Options(BaseModel):
@@ -178,7 +178,7 @@ async def _experiment(config, *, resume=False):
         if search
         else None
     )
-    policies = [Policy.from_file(p) for p in config.get("policies", [])]
+    policies = [PolicyDefinition.from_file(p) for p in config.get("policies", [])]
     if len({p.id for p in policies}) != len(policies):
         raise ValueError("Duplicate policy files/IDs")
     if search and not os.environ.get("OPENROUTER_API_KEY"):

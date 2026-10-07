@@ -22,7 +22,7 @@ class ResumeTests(unittest.IsolatedAsyncioTestCase):
     async def test_budget_exhausted_baseline_audits_incumbent_instead_of_failing(self):
         from research.meta_ocean import runner
 
-        source = policies()[0]._implementation
+        source = policies()[0].source
 
         class Model:
             async def acall(self, prompt):
@@ -63,7 +63,7 @@ class ResumeTests(unittest.IsolatedAsyncioTestCase):
     async def test_recover_saved_budget_failure_runs_only_the_missing_audit(self):
         from research.meta_ocean import elitetable, runner
 
-        source = policies()[0]._implementation
+        source = policies()[0].source
         slots = {key: asyncio.Semaphore(1) for key in ("trials", "models", "evaluations")}
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory)
@@ -100,7 +100,7 @@ class ResumeTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(read_json(path / "summary.json.interrupted-1")["score"], 0)
 
     def test_source_extraction_is_unambiguous_and_bounded(self):
-        source = policies()[0]._implementation
+        source = policies()[0].source
         self.assertEqual(source_text(source), source)
         fenced = f"A policy:\n```python\n{source}\n```\nExplanation."
         self.assertEqual(source_text(fenced), source.rstrip() + "\n")
@@ -266,7 +266,7 @@ class ResumeTests(unittest.IsolatedAsyncioTestCase):
     async def test_completed_trial_and_pending_audit_do_not_repeat_search(self):
         from research.meta_ocean import elitetable, runner
 
-        source = policies()[0]._implementation
+        source = policies()[0].source
         slots = {name: asyncio.Semaphore(1) for name in ("trials", "models", "evaluations")}
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory)
@@ -295,7 +295,7 @@ class ResumeTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(await run_trial(Config(), None, path, 0, "g2048", slots), result)
 
     def test_interrupted_evaluations_remain_charged(self):
-        source = policies()[0]._implementation
+        source = policies()[0].source
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory)
             append_json(path / "oracle.jsonl", dict(event="evaluation_admitted", number=1))

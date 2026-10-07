@@ -11,7 +11,7 @@ from numbers import Real
 from pydantic import ConfigDict, TypeAdapter
 from pydantic.dataclasses import dataclass
 
-from rsikit.policy import Policy
+from rsikit.policy import PolicyDefinition
 
 from .evaluation import FiniteNumber, NamedValues, SeedScores
 
@@ -20,7 +20,7 @@ from .evaluation import FiniteNumber, NamedValues, SeedScores
     frozen=True, config=ConfigDict(strict=True, extra="forbid", revalidate_instances="always")
 )
 class Candidate:
-    policy: type[Policy]
+    policy: PolicyDefinition
     score: FiniteNumber
     metrics: NamedValues
     features: NamedValues
@@ -156,13 +156,6 @@ class Database:
         """Check registration inputs against saved configuration without changing state."""
         self._island(island)
         self._validate(candidate)
-        policy = candidate.policy
-        try:
-            restored = Policy.from_text(policy._implementation, name=policy.name)
-            if restored.id != policy.id:
-                raise ValueError("policy id must match its name and implementation")
-        except (AttributeError, SyntaxError, TypeError) as error:
-            raise ValueError("candidate policy needs valid stored source, name, and id") from error
         if (
             parent_id is not None
             and self._connection.execute(
@@ -197,7 +190,7 @@ class Database:
     def register(self, candidate: Candidate, island, parent_id=None) -> Candidate:
         """Register without executing source; duplicate syntax keeps its canonical evaluation."""
         self.validate(candidate, island, parent_id)
-        source = candidate.policy._implementation
+        source = candidate.policy.source
         syntax = hashlib.sha256(
             ast.dump(ast.parse(source), include_attributes=False).encode()
         ).hexdigest()
@@ -235,7 +228,7 @@ class Database:
 
     def _decode(self, row):
         if row["id"] not in self._policies:
-            self._policies[row["id"]] = Policy.from_text(
+            self._policies[row["id"]] = PolicyDefinition.from_text(
                 row["source"], name=row["name"], description=row["description"]
             )
         return Candidate(

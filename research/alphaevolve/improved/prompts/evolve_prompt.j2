@@ -4,7 +4,7 @@ Task: {{ instance.task }}
 Background and evaluator contract: {{ instance.context }}
 
 Evaluated program:
-{{ parent.policy._implementation }}
+{{ parent.policy.source }}
 Score (maximized): {{ parent.score }}
 Per-seed rewards: {{ parent.seed_scores | tojson }}
 

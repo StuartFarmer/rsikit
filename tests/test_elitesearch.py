@@ -16,7 +16,7 @@ from slick.providers import ProviderError
 from sqlmodel import select
 
 from research.elitesearch import Config, EliteSearch, Generation, Organism
-from rsikit import Policy
+from rsikit import PolicyDefinition
 from tests.helpers import episodes, fake_executor, recorded_run
 from tests.providers import ScriptedProvider
 from tests.test_run import FakeEvaluation
@@ -180,7 +180,7 @@ class EliteSearchTests(unittest.IsolatedAsyncioTestCase):
         )
         await agent.run()
         self.assertEqual(len(evaluated), 2)
-        self.assertIn("OFFSET = 1", evaluated[-1]._implementation)
+        self.assertIn("OFFSET = 1", evaluated[-1].source)
         self.assertEqual(agent.elites[0].name, "Changed")
 
     async def test_failed_edit_retains_organism_metadata(self):
@@ -389,7 +389,7 @@ class EliteSearchTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(summary["elite_ids"], [1])
             self.assertEqual(summary["heldout"]["scores"], {"99": 7})
             self.assertEqual(
-                Policy.from_file(output / "best.py")._implementation,
+                PolicyDefinition.from_file(output / "best.py").source,
                 json.loads(program(0))["implementation"],
             )
             self.assertIn("Elite leaderboard", terminal.getvalue())

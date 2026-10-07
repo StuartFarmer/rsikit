@@ -1,6 +1,6 @@
 """Eight reviewed, deterministic policies; none are claimed to be LLM-generated."""
 
-from rsikit import Policy
+from rsikit import PolicyDefinition
 
 SOURCE = """import numpy as np
 from rsikit import Policy
@@ -63,7 +63,7 @@ def policies(env_name="g2048"):
     """Return frozen source variants, from legal priority to bounded two-ply search."""
     if env_name != "g2048":
         result = [
-            Policy.from_text(
+            PolicyDefinition.from_text(
                 """import numpy as np
 from rsikit import Policy
 class Solution(Policy):
@@ -76,7 +76,7 @@ class Solution(Policy):
         ]
         if env_name in ("breakout", "maze"):
             result.append(
-                Policy.from_text(
+                PolicyDefinition.from_text(
                     BREAKOUT_REFERENCE if env_name == "breakout" else MAZE_REFERENCE,
                     name="ball-tracker" if env_name == "breakout" else "depth-first-explorer",
                     description="Frozen deterministic reference; independent state per row",
@@ -94,7 +94,7 @@ class Solution(Policy):
         ("board-two-ply", (0.2, 10, 5, 1), True, (0, 0, 0, 0)),
     ]
     return [
-        Policy.from_text(
+        PolicyDefinition.from_text(
             SOURCE.replace("WEIGHTS", repr(weights))
             .replace("PRIORITY", repr(priority))
             .replace("LOOKAHEAD", repr(lookahead)),

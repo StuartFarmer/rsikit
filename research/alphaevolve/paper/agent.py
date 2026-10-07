@@ -10,7 +10,7 @@ from pydantic.dataclasses import dataclass
 from slick import parse, render
 
 from research.rewards import episode_scores
-from rsikit.policy import Policy, validate_policy
+from rsikit.policy import PolicyDefinition
 
 from ..generation import Mutation, _PolicyResponse, apply_edits, evolution_regions
 from ..improved.agent import AlphaEvolve as Baseline
@@ -26,7 +26,7 @@ def _saved_candidate(candidate):
 
 def _restored_candidate(saved):
     values = dict(saved)
-    values["policy"] = Policy.from_text(values["policy"])
+    values["policy"] = PolicyDefinition.from_text(values["policy"])
     values["seed_scores"] = {int(k): v for k, v in values["seed_scores"].items()}
     return Candidate(**values)
 
@@ -94,7 +94,7 @@ class AlphaEvolve(Baseline):
                 for saved in round_state["attempts"]:
                     row = dict(saved)
                     if row.get("policy") is not None:
-                        row["policy"] = Policy.from_text(row["policy"])
+                        row["policy"] = PolicyDefinition.from_text(row["policy"])
                     if row.get("parent") is not None:
                         row["parent"] = _restored_candidate(row["parent"])
                     row["inspirations"] = [
@@ -183,8 +183,8 @@ class AlphaEvolve(Baseline):
 
     def register_initial(self, policy, result: EvaluationResult, *, island=None):
         """Seed the archive with a caller-evaluated program (all islands by default)."""
-        evolution_regions(policy._implementation)
-        validate_policy(policy)
+        evolution_regions(policy.source)
+        policy.validate()
         result = EvaluationResult(**vars(result))
         if not result.accepted:
             raise ValueError("Initial program must pass evaluation")
@@ -307,7 +307,7 @@ class AlphaEvolve(Baseline):
 
     async def mutate(
         self, parent, inspirations, guidance, failures, *, provider, record=None
-    ) -> type[Policy]:
+    ) -> PolicyDefinition:
         schema = Mutation.model_json_schema()
         context = render(
             "paper/prompts/mutate.j2",
@@ -323,15 +323,15 @@ class AlphaEvolve(Baseline):
         if record is not None:
             record["raw"] = raw
         mutation = parse(raw, Mutation)
-        return Policy.from_text(
-            apply_edits(parent.policy._implementation, mutation.edits),
+        return PolicyDefinition.from_text(
+            apply_edits(parent.policy.source, mutation.edits),
             name=mutation.name,
             description=mutation.description,
         )
 
     async def rewrite(
         self, parent, inspirations, guidance, failures, *, provider, record=None
-    ) -> type[Policy]:
+    ) -> PolicyDefinition:
         schema = _PolicyResponse.model_json_schema()
         context = render(
             "paper/prompts/rewrite.j2",

@@ -9,11 +9,11 @@ from pathlib import Path
 import numpy as np
 
 from research.alphaevolve.paper.database import Candidate, Database
-from rsikit.policy import Policy
+from rsikit.policy import PolicyDefinition
 
 
 def candidate(value, score, niche=0, stability=0):
-    policy = Policy.from_text(f"class Solution:\n    value = {value}\n", name=str(value))
+    policy = PolicyDefinition.from_text(f"class Solution:\n    value = {value}\n", name=str(value))
     return Candidate(policy, score, {"reward": score, "stability": stability}, {"x": niche})
 
 
@@ -83,7 +83,9 @@ class PopulationTests(unittest.TestCase):
     def test_dedup_ignores_comments_names_and_does_not_replace_evaluation(self):
         db = self.database(islands=2)
         original = db.register(candidate(1, 10), 0)
-        renamed = Policy.from_text("# comment\nclass Solution:\n    value=1\n", name="new name")
+        renamed = PolicyDefinition.from_text(
+            "# comment\nclass Solution:\n    value=1\n", name="new name"
+        )
         duplicate = db.register(replace(candidate(1, 999), policy=renamed), 1)
         self.assertEqual(duplicate, original)
         self.assertEqual(duplicate.policy.id, original.policy.id)
@@ -93,14 +95,14 @@ class PopulationTests(unittest.TestCase):
 
     def test_validation_and_storage_do_not_execute_source(self):
         db = self.database(islands=1)
-        policy = Policy.from_text(
+        policy = PolicyDefinition.from_text(
             "raise RuntimeError('never execute')\nclass Solution: pass", name="untrusted"
         )
         item = replace(candidate(1, 2), policy=policy)
         db.validate(item, 0)
         self.assertEqual(db.all(), [])
         db.register(item, 0)
-        self.assertEqual(db.best.policy._implementation, policy._implementation)
+        self.assertEqual(db.best.policy.source, policy.source)
 
     def test_reopening_restores_history_cells_feedback_seeds_and_state(self):
         with tempfile.TemporaryDirectory() as directory:

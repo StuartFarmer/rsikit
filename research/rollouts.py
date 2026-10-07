@@ -36,7 +36,7 @@ class Rollouts:
                 for seed in seeds:
                     episode = self.run.load_episode(policy, seed)
                     if episode is None or episode.error is not None:
-                        jobs.append((policy.id, policy._implementation, seed))
+                        jobs.append((policy.id, policy.source, seed))
                     else:
                         yield policy.id, seed, episode
             requested = {(policy_id, seed) for policy_id, _, seed in jobs}

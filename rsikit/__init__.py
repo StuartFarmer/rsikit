@@ -5,7 +5,7 @@ from .evaluation import Evaluator
 from .execution import Executor, run_program
 from .generation import generate
 from .optimization import Optimizer, search
-from .policy import Policy
+from .policy import Policy, PolicyDefinition, PolicyEncoder
 from .run import Run
 
 __all__ = [
@@ -14,6 +14,8 @@ __all__ = [
     "Executor",
     "Optimizer",
     "Policy",
+    "PolicyDefinition",
+    "PolicyEncoder",
     "Run",
     "generate",
     "run_program",

@@ -98,7 +98,7 @@ class GenerationTests(unittest.IsolatedAsyncioTestCase):
             active -= 1
             return dict(score=10, scores=[10] * 10, steps=10)
 
-        source = policies()[0]._implementation
+        source = policies()[0].source
         with tempfile.TemporaryDirectory() as directory:
             trial = EvolverTrial(
                 Config(generation_size=2, inner_max_repairs=0),
@@ -148,7 +148,7 @@ class GenerationTests(unittest.IsolatedAsyncioTestCase):
                 await asyncio.sleep(0)
                 return prompt.rsplit("\n\nSub-evolver request:\n", 1)[-1] + " response", []
 
-        source = policies()[0]._implementation
+        source = policies()[0].source
 
         async def evaluate(source, seeds):
             return dict(score=0, scores=[0] * 10, steps=10)
@@ -196,7 +196,7 @@ class GenerationTests(unittest.IsolatedAsyncioTestCase):
                 await _campaign(Config(), Path(directory), {})
 
     async def test_host_enforces_five_repairs_without_optimizer_cooperation(self):
-        source = policies()[0]._implementation
+        source = policies()[0].source
         failed = source + "\n# broken_marker\n"
 
         class Model:
@@ -266,7 +266,7 @@ class GenerationTests(unittest.IsolatedAsyncioTestCase):
             trial = EvolverTrial(
                 Config(generation_size=1),
                 Path(directory),
-                policies()[0]._implementation,
+                policies()[0].source,
                 None,
                 model,
                 0,
@@ -561,7 +561,7 @@ class Solution(Policy):
     async def act(self, observation):
         return [{broken!r}]
 """
-        source = policies()[0]._implementation
+        source = policies()[0].source
 
         class RepairModel:
             async def acall(self, prompt):

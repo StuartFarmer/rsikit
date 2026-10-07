@@ -500,14 +500,14 @@ class ApplicationEpisodeTests(unittest.IsolatedAsyncioTestCase):
         from rich.console import Console
 
         from examples.replay import record_best
-        from rsikit.policy import Policy
+        from rsikit.policy import PolicyDefinition
         from tests.test_episode_storage import trajectory
         from tests.test_run import RESPONSE, FakeEvaluation
 
         if find_spec("moviepy") is None or find_spec("pygame") is None:
             self.skipTest("Install .[video] for video checks")
         policies = [
-            Policy.from_text(RESPONSE["implementation"], name=name)
+            PolicyDefinition.from_text(RESPONSE["implementation"], name=name)
             for name in ("Low", "Best", "Failed")
         ]
         evaluation = FakeEvaluation()

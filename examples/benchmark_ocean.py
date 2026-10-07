@@ -35,7 +35,7 @@ from collections import Counter
 from datetime import datetime, timezone
 from pathlib import Path
 
-from rsikit.policy import Policy
+from rsikit.policy import PolicyDefinition
 
 
 def save(path, value):
@@ -97,7 +97,7 @@ def load_trace(path, policies):
         if "policy" not in row and "policy_id" not in row:
             raise ValueError("Each arrival needs a policy or policy_id")
         if "policy" in row:
-            policy = Policy.from_file(path.parent / row["policy"])
+            policy = PolicyDefinition.from_file(path.parent / row["policy"])
             if "policy_id" in row and row["policy_id"] != policy.id:
                 raise ValueError("Trace policy_id does not match saved policy source")
         else:
@@ -116,7 +116,7 @@ async def correctness(args, policies):
     ) as reference:
         for policy in policies:
             base = await rollout(
-                policy._implementation,
+                policy.source,
                 range(args.seeds),
                 args.batch_size,
                 args.max_steps,
@@ -145,7 +145,7 @@ async def correctness(args, policies):
                 if reverse:
                     seeds.reverse()
                 actual = await rollout(
-                    policy._implementation,
+                    policy.source,
                     seeds,
                     width,
                     args.max_steps,
@@ -461,7 +461,9 @@ async def main(argv=None):
     from research.ocean.environment import metadata as upstream_metadata
 
     policies = (
-        [Policy.from_file(path) for path in args.policy] if args.policy else baselines(args.env)
+        [PolicyDefinition.from_file(path) for path in args.policy]
+        if args.policy
+        else baselines(args.env)
     )
     build_start = time.monotonic()
     upstream = upstream_metadata(args.env)
@@ -528,9 +530,7 @@ async def main(argv=None):
         if args.policy or args.trace
         else "reviewed baselines; not LLM-generated",
         policies=[
-            dict(
-                id=p.id, name=p.name, sha256=hashlib.sha256(p._implementation.encode()).hexdigest()
-            )
+            dict(id=p.id, name=p.name, sha256=hashlib.sha256(p.source.encode()).hexdigest())
             for p in unique_policies
         ],
         trace_metadata=metadata,

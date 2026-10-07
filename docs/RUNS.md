@@ -10,7 +10,7 @@ from rsikit import Executor, Run
 from research.rollouts import Rollouts
 from research.rewards import mean_rewards
 
-# Inside an async function; policies are Policy definitions from generate/from_file.
+# Inside an async function; policies are PolicyDefinition objects from generate/from_file.
 with gym.make("CartPole-v1", max_episode_steps=500) as environment:
     async with Executor(concurrency=4) as executor, Run.create(name="comparison") as run:
         rollouts = Rollouts(environment, executor, run)
@@ -63,9 +63,9 @@ Rich renders in the main application process. Episode prints are saved as
 ## Storage and analysis
 
 ```python
-from rsikit import Policy, Run
+from rsikit import PolicyDefinition, Run
 
-policy = Policy.from_file("solution.py")
+policy = PolicyDefinition.from_file("solution.py")
 with Run.create(name="experiment") as run:
     run.save_policy(policy)
     run.save_episode(policy, 42, episode)
@@ -78,8 +78,10 @@ with Run.open(run.path) as restored:
     print(restored.scores(policy))
 ```
 
-`Policy.from_text`/`from_file` load source without validating or executing it.
-Optimizers explicitly call `rsikit.policy.validate_policy(policy)` after
+`PolicyDefinition.from_text`/`from_file` validate metadata without executing source.
+Definitions expose the exact Python as `.source` and derive `.id` from name and source.
+They are immutable; construct a new definition to change their fields.
+Optimizers explicitly call `policy.validate()` after
 generation; this checks syntax and the construction interface without execution.
 `to_text` and `to_file` preserve its name, description, source and ID, including
 invalid proposals retained for diagnosis. Run exports definitions to

@@ -12,7 +12,7 @@ import yaml
 from research.cli import load_component, parse_config
 from research.experiment import EvaluationConfig
 from research.rewards import episode_scores
-from rsikit import Policy, Run
+from rsikit import PolicyDefinition, Run
 from tests.helpers import episodes
 from tests.providers import ScriptedProvider
 from tests.test_elitesearch import program
@@ -321,13 +321,13 @@ class ExperimentTests(unittest.IsolatedAsyncioTestCase):
                 evaluation = EvaluationConfig(
                     seeds=[7], workers=1, max_steps=5 if name == "CartPole-v1" else None
                 )
-                policy = Policy.from_text(json.loads(program(0))["implementation"])
+                policy = PolicyDefinition.from_text(json.loads(program(0))["implementation"])
                 direct = await _run_episode(
                     lambda: make_environment(
                         name, max_steps=evaluation.max_steps, shoes_per_episode=1
                     ),
                     lambda obs, act, instructions: load_policy(
-                        policy._implementation, obs, act, instructions
+                        policy.source, obs, act, instructions
                     ),
                     env_seed=7,
                     policy_seed=7,
@@ -363,7 +363,7 @@ class ExperimentTests(unittest.IsolatedAsyncioTestCase):
                 )
                 policy = policies(name)[0]
                 direct = await rollout(
-                    policy._implementation,
+                    policy.source,
                     [7],
                     batch_size=2,
                     max_steps=4,
@@ -539,7 +539,7 @@ class ExperimentTests(unittest.IsolatedAsyncioTestCase):
             ):
                 summary = await run_experiment(config)
             self.assertEqual(summary["status"], "budget_exhausted", summary)
-            self.assertEqual(Policy.from_file(root / "run/winner.py").name, "Policy 1")
+            self.assertEqual(PolicyDefinition.from_file(root / "run/winner.py").name, "Policy 1")
             self.assertEqual(
                 (root / "run/panels.txt").read_text().splitlines(), ["[7]", "[100]", "[200]"]
             )
@@ -548,7 +548,7 @@ class ExperimentTests(unittest.IsolatedAsyncioTestCase):
         from research.experiment import select_winner
 
         policies = [
-            Policy.from_text(json.loads(program(i))["implementation"], name=f"Policy {i}")
+            PolicyDefinition.from_text(json.loads(program(i))["implementation"], name=f"Policy {i}")
             for i in range(2)
         ]
         with (
@@ -641,7 +641,7 @@ class ExperimentTests(unittest.IsolatedAsyncioTestCase):
         from research.experiment import run_experiment
 
         source = """from pydantic import BaseModel, ConfigDict
-from rsikit import Policy
+from rsikit import PolicyDefinition
 class Options(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True)
     repeats: int = 2
@@ -651,7 +651,7 @@ class Options(BaseModel):
             """def add_arguments(parser):
     parser.add_argument("--repeats", type=int)
 async def optimize(*, task, provider, evaluate, run, options, seed):
-    p = Policy.from_text("from rsikit import Policy\\nclass Solution(Policy):\\n    async def act(self, observation): return 0\\n")
+    p = PolicyDefinition.from_text("from rsikit import Policy\\nclass Solution(Policy):\\n    async def act(self, observation): return 0\\n")
     for _ in range(options["repeats"]):
         await evaluate([p])
     return [p]

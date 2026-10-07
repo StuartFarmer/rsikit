@@ -25,10 +25,10 @@ from slick.providers import Provider
 from sqlmodel import SQLModel
 
 from research.rewards import episode_error, episode_scores
-from rsikit import Episode, Policy, search
+from rsikit import Episode, PolicyDefinition, search
 from rsikit.generation import WORKER_LIBRARIES
 from rsikit.optimization import validate_results
-from rsikit.policy import InvalidPolicy, validate_policy
+from rsikit.policy import InvalidPolicy
 
 from .generation import InvalidCandidate, _PolicyResponse, check_rewrite, evolution_regions
 from .healing import SelfHealer
@@ -98,7 +98,7 @@ class LineageSearch:
         self,
         task: str,
         provider: Provider,
-        evaluate: Callable[[Sequence[type[Policy]]], Awaitable[dict[str, dict[int, Episode]]]]
+        evaluate: Callable[[Sequence[PolicyDefinition]], Awaitable[dict[str, dict[int, Episode]]]]
         | None = None,
         *,
         context: str = "",
@@ -113,7 +113,7 @@ class LineageSearch:
         self.study = Study(task=task, context=context, config={**asdict(config), "seed": seed})
         self.families: list[Family] = []
         self.trials: list[Trial] = []
-        self._policies: dict[int, type[Policy]] = {}
+        self._policies: dict[int, PolicyDefinition] = {}
         self._sources: set[str] = set()
         self._seed_panel: set[int] | None = None
         self._call_slots: asyncio.Semaphore | None = None
@@ -125,7 +125,7 @@ class LineageSearch:
         self._bonus_remaining = 0
 
     @property
-    def best(self) -> type[Policy] | None:
+    def best(self) -> PolicyDefinition | None:
         incumbents = [self.trials[f.best_id - 1] for f in self.families if f.best_id is not None]
         return self._policies[max(incumbents, key=lambda t: t.score).id] if incumbents else None
 
@@ -258,7 +258,9 @@ class LineageSearch:
             raise InvalidCandidate("Vote must identify one of the numbered proposals")
         return generated.candidate - 1
 
-    async def implement(self, data: dict, approach: dict, *, provider, record=None) -> type[Policy]:
+    async def implement(
+        self, data: dict, approach: dict, *, provider, record=None
+    ) -> PolicyDefinition:
         schema = _PolicyResponse.model_json_schema()
         context = render("implement.j2", instance=self, schema=schema, data=data, approach=approach)
         raw, _ = await provider.acall(context)
@@ -510,9 +512,9 @@ class LineageSearch:
         row.policy_id = None
         self._policies.pop(row.id, None)
         row.name, row.description = policy.name, policy.description
-        row.implementation = policy._implementation
+        row.implementation = policy.source
         evolution_regions(row.implementation)
-        validate_policy(policy)
+        policy.validate()
         if parent is not None:
             check_rewrite(parent.implementation, row.implementation)
         key = ast.dump(ast.parse(row.implementation), include_attributes=False)

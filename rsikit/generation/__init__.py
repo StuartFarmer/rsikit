@@ -8,7 +8,7 @@ from uuid import uuid4
 from pydantic import BaseModel, Field
 from slick import prompt
 
-from rsikit.policy import Policy
+from rsikit.policy import PolicyDefinition
 
 WORKER_LIBRARIES = (Path(__file__).parent / "prompts" / "libraries.txt").read_text(encoding="utf-8")
 
@@ -22,9 +22,9 @@ class _Response(BaseModel, extra="forbid"):
 @prompt(template="generate_policy.j2", output_type=_Response)
 async def _generate(
     task: str, *, libraries: str = WORKER_LIBRARIES, generated: _Response
-) -> type[Policy]:
+) -> PolicyDefinition:
     """Return a Policy definition; the caller chooses where its implementation executes."""
-    policy = Policy.from_text(
+    policy = PolicyDefinition.from_text(
         generated.implementation, name=generated.name, description=generated.description
     )
     logging.getLogger(__name__).info(
@@ -36,7 +36,7 @@ async def _generate(
     return policy
 
 
-async def generate(task: str, *, libraries: str = WORKER_LIBRARIES, **kwargs) -> type[Policy]:
+async def generate(task: str, *, libraries: str = WORKER_LIBRARIES, **kwargs) -> PolicyDefinition:
     """Generate a policy and report its attempt through ordinary Run logging."""
     logger = logging.getLogger(__name__)
     attempt = uuid4().hex

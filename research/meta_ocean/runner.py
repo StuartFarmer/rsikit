@@ -114,7 +114,7 @@ async def run_trial(config, source, path, replicate, *, environment="g2048", mod
     path.mkdir(parents=True, exist_ok=False)
     (path / "controller.py").write_text(source)
     model = model if model is not None else provider(config, path / "model_calls.jsonl")
-    starter = policies(environment)[0]._implementation
+    starter = policies(environment)[0].source
     count = 0
 
     async def evaluate(candidate, seeds):
@@ -206,7 +206,7 @@ async def calibrate(config, path):
             policy.to_file(directory / f"{name}.py")
             result = await evaluate_policy(
                 config,
-                policy._implementation,
+                policy.source,
                 seeds,
                 directory / f"{name}.json",
                 environment=environment,

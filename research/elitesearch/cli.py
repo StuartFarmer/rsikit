@@ -11,7 +11,7 @@ from sqlalchemy import inspect
 from sqlmodel import select
 
 from research.providers import CALL, BudgetExceeded
-from rsikit import Policy, search
+from rsikit import PolicyDefinition, search
 
 from .agent import Config, EliteSearch
 from .records import Generation, Organism
@@ -156,7 +156,9 @@ async def optimize(*, task, provider, evaluate, run, options, seed):
             key=lambda row: (-row.score, row.id),
         )
         policies = [
-            Policy.from_text(row.implementation, name=row.name, description=row.description)
+            PolicyDefinition.from_text(
+                row.implementation, name=row.name, description=row.description
+            )
             for row in ranked
         ]
         return list({p.id: p for p in policies}.values())

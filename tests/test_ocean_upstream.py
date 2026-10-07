@@ -106,7 +106,7 @@ class UpstreamOceanTests(unittest.IsolatedAsyncioTestCase):
 
         for name, score in (("g2048", "merge_score"), ("breakout", "score")):
             with self.subTest(env=name):
-                source = policies(name)[0]._implementation
+                source = policies(name)[0].source
                 kwargs = dict(max_steps=1100, trace=True, env_name=name, score_key=score)
                 scalar = await rollout(source, [7, 9, 11], batch_size=1, **kwargs)
                 batch = await rollout(source, [7, 9, 11], batch_size=2, **kwargs)

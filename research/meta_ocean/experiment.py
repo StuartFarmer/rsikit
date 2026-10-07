@@ -13,8 +13,8 @@ from pydantic import Field, model_validator
 
 from research.experiment import Options, save_json
 from research.providers import BudgetExceeded, BudgetProvider, UsageOpenRouter
-from rsikit import Policy
-from rsikit.policy import MAX_SOURCE, validate_policy
+from rsikit import PolicyDefinition
+from rsikit.policy import MAX_SOURCE
 
 
 def progress(message, **payload):
@@ -235,8 +235,8 @@ class Trial:
                 progress(f"{self.path}: evaluation {number}/{self.config.evaluations}")
                 try:
                     source = source_text(value)
-                    policy = Policy.from_text(source)
-                    validate_policy(policy)
+                    policy = PolicyDefinition.from_text(source)
+                    policy.validate()
                     (self.path / f"proposal-{number}.py").write_text(source)
                     result = await self.evaluate(source, self.seeds)
                     self.transitions += result["steps"]

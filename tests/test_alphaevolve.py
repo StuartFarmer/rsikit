@@ -24,7 +24,7 @@ from research.alphaevolve.generation import (
 from research.alphaevolve.improved import AlphaEvolve, Config, InvalidCandidate
 from research.alphaevolve.original.agent import Guidance
 from research.rewards import mean_rewards
-from rsikit import Policy
+from rsikit import PolicyDefinition
 from tests.helpers import fake_executor, recorded_run
 from tests.providers import ScriptedProvider
 from tests.test_episode_storage import trajectory
@@ -142,7 +142,7 @@ class AlphaEvolveTests(unittest.IsolatedAsyncioTestCase):
             for generation in range(2):
                 policies = await agent.generate(n=10)
                 self.assertEqual(len(policies), 10)
-                self.assertTrue(all(issubclass(p, Policy) for p in policies))
+                self.assertTrue(all(isinstance(p, PolicyDefinition) for p in policies))
                 self.assertEqual(len(run.policies()), generation * 10)
                 self.assertEqual(len(list(run.path.rglob("*.py"))), generation * 10)
                 scores = await mean_rewards(rollouts, policies)

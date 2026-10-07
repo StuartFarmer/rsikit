@@ -11,7 +11,7 @@ from unittest.mock import AsyncMock, patch
 from slick import prompts
 
 from research.elitesearch import Config
-from rsikit import Policy, Run
+from rsikit import PolicyDefinition, Run
 from tests.helpers import episodes
 from tests.providers import ScriptedProvider
 from tests.test_elitesearch import program
@@ -350,13 +350,15 @@ class OceanSearchTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(summary["repairs"], 1)
                 self.assertTrue((run.path / "arrival_trace.json").exists())
                 self.assertNotIn("Policy 0", raw.calls[1])
-                self.assertEqual(Policy.from_file(run.path / "winner.py").name, "Policy 1")
+                self.assertEqual(
+                    PolicyDefinition.from_file(run.path / "winner.py").name, "Policy 1"
+                )
 
     async def test_validation_selects_once_before_test_and_failure_uses_fallback(self):
         from examples.ocean_search import select_winner
 
         policies = [
-            Policy.from_text(json.loads(program(i))["implementation"], name=f"Policy {i}")
+            PolicyDefinition.from_text(json.loads(program(i))["implementation"], name=f"Policy {i}")
             for i in range(3)
         ]
         panels = []
@@ -383,8 +385,8 @@ class OceanSearchTests(unittest.IsolatedAsyncioTestCase):
     async def test_incomplete_validation_is_not_averaged_and_tail_includes_repairs(self):
         from examples.ocean_search import active_seconds, generation_tails, select_winner
 
-        candidate = Policy.from_text(json.loads(program(0))["implementation"])
-        fallback = Policy.from_text(json.loads(program(1))["implementation"])
+        candidate = PolicyDefinition.from_text(json.loads(program(0))["implementation"])
+        fallback = PolicyDefinition.from_text(json.loads(program(1))["implementation"])
 
         async def evaluate(policies, seeds):
             return {p.id: episodes({next(iter(seeds)): 999}) for p in policies}

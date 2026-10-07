@@ -772,7 +772,7 @@ class LineageTests(unittest.IsolatedAsyncioTestCase):
         child = agent.trials[1]
         self.assertEqual(child.parent_id, 1)
         self.assertEqual(child.repairs, 1)
-        self.assertIn("UNCHANGED = 1", agent.best._implementation)
+        self.assertIn("UNCHANGED = 1", agent.best.source)
         self.assertIn("UNCHANGED = 2", child.revisions[0]["implementation"])
         self.assertIn("immutable", child.revisions[0]["error"])
 

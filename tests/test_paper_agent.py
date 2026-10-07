@@ -12,7 +12,7 @@ from research import alphaevolve
 from research.alphaevolve import paper
 from research.alphaevolve.generation import Mutation
 from research.alphaevolve.original.agent import Guidance
-from rsikit.policy import Policy
+from rsikit.policy import PolicyDefinition
 from tests.helpers import episodes
 from tests.providers import ScriptedProvider
 from tests.test_alphaevolve import program
@@ -165,7 +165,7 @@ class PaperAgentTests(unittest.IsolatedAsyncioTestCase):
         )
         self.addCleanup(agent.close)
         first, second = await agent.propose()
-        restored = Policy.from_text(first.to_text())
+        restored = PolicyDefinition.from_text(first.to_text())
         agent.update({restored.id: episodes({0: 3, 1: 7}), second.id: episodes({0: 8, 1: 8})})
         candidates = {c.policy.id: c for c in agent.database.all()}
         self.assertEqual(
@@ -259,7 +259,7 @@ class PaperAgentTests(unittest.IsolatedAsyncioTestCase):
         await paper.search(agent, evaluate, proposals=1, evaluation_batch_size=1)
 
         self.assertEqual(len(evaluated), 2)
-        self.assertEqual(agent.best._implementation, program(1).implementation)
+        self.assertEqual(agent.best.source, program(1).implementation)
         self.assertEqual([c.policy.id for c in agent.database.all()], [evaluated[1].id])
         self.assertEqual((agent.completed, agent.repair_calls), (1, 1))
         self.assertEqual(agent._pending, {})
@@ -322,7 +322,7 @@ class PaperAgentTests(unittest.IsolatedAsyncioTestCase):
             config=paper.Config(islands=1, mode="rewrite", meta_interval=0),
         )
         self.addCleanup(agent.close)
-        seed = Policy.from_text(program(0).implementation, name="Initial")
+        seed = PolicyDefinition.from_text(program(0).implementation, name="Initial")
         agent.register_initial(seed, paper.EvaluationResult(metrics={"reward": 1}))
         child = (await agent.generate())[0]
         agent.update_results({child.id: paper.EvaluationResult(metrics={"reward": 100})})
@@ -358,7 +358,7 @@ class PaperAgentTests(unittest.IsolatedAsyncioTestCase):
         self.addCleanup(agent.close)
         result = paper.EvaluationResult(metrics={"reward": 10})
         result.failure = "execution failed"
-        seed = Policy.from_text(program(0).implementation, name="Initial")
+        seed = PolicyDefinition.from_text(program(0).implementation, name="Initial")
         with self.assertRaises(ValueError):
             agent.register_initial(seed, result)
         self.assertEqual(agent.database.all(), [])
@@ -384,7 +384,7 @@ class PaperAgentTests(unittest.IsolatedAsyncioTestCase):
             config=paper.Config(mode="rewrite", meta_interval=0),
         )
         self.addCleanup(agent.close)
-        seed = Policy.from_text(program(0).implementation, name="Initial")
+        seed = PolicyDefinition.from_text(program(0).implementation, name="Initial")
         agent.register_initial(seed, paper.EvaluationResult(metrics={"reward": 1}))
         self.assertTrue(all(island.policy.id == seed.id for island in agent.islands))
         child = (await agent.generate())[0]

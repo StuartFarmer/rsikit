@@ -23,7 +23,7 @@ from research.alphaevolve.original.agent import Guidance
 from research.alphaevolve.paper.evaluation import assess
 from research.rewards import episode_scores, mean_rewards
 from rsikit.evaluation import PolicyError
-from rsikit.policy import Policy
+from rsikit.policy import PolicyDefinition
 from rsikit.progress import show_scores
 from tests.helpers import fake_executor, recorded_run
 from tests.providers import ScriptedProvider
@@ -322,7 +322,9 @@ class VariantTests(unittest.IsolatedAsyncioTestCase):
                 return trajectory(float(source.split("return ")[1].split()[0]) + seed, {})
 
             evaluation.evaluate.side_effect = evaluate
-            policies = [Policy.from_text(program(i).implementation, name=str(i)) for i in (0, 10)]
+            policies = [
+                PolicyDefinition.from_text(program(i).implementation, name=str(i)) for i in (0, 10)
+            ]
             with recorded_run(
                 name="cascade",
                 environment=environment,
@@ -355,7 +357,9 @@ class VariantTests(unittest.IsolatedAsyncioTestCase):
                 return trajectory(float(seed), {})
 
             evaluation.evaluate.side_effect = evaluate
-            policies = [Policy.from_text(program(i).implementation, name=str(i)) for i in (0, 1)]
+            policies = [
+                PolicyDefinition.from_text(program(i).implementation, name=str(i)) for i in (0, 1)
+            ]
             with recorded_run(
                 name="screening",
                 environment=environment,

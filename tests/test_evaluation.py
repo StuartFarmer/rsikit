@@ -20,7 +20,9 @@ SOURCE = "from rsikit import Policy\nclass Solution(Policy):\n    async def act(
 
 class EvaluationTests(unittest.IsolatedAsyncioTestCase):
     def setUp(self):
-        self.assertTrue(hasattr(rsikit.Policy, "from_text"), "Expose public policy construction")
+        self.assertTrue(
+            hasattr(rsikit.PolicyDefinition, "from_text"), "Expose public policy construction"
+        )
         directory = tempfile.TemporaryDirectory()
         self.addCleanup(directory.cleanup)
         self.environment = gym.make("CartPole-v1")
@@ -34,8 +36,8 @@ class EvaluationTests(unittest.IsolatedAsyncioTestCase):
             self.environment, fake_executor(evaluation=self.evaluation, concurrency=2), self.run
         )
         self.addCleanup(self.run.close)
-        self.good = rsikit.Policy.from_text(SOURCE, name="Good")
-        self.bad = rsikit.Policy.from_text(SOURCE + "# fails\n", name="Bad")
+        self.good = rsikit.PolicyDefinition.from_text(SOURCE, name="Good")
+        self.bad = rsikit.PolicyDefinition.from_text(SOURCE + "# fails\n", name="Bad")
 
     async def test_policy_failure_preserves_successful_siblings_and_cached_episodes(self):
         async def evaluate(source, environment, seed):
@@ -56,7 +58,7 @@ class EvaluationTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.evaluation.evaluate.await_count, 5)
 
     async def test_screening_handles_failure_rejection_and_success_separately(self):
-        low = rsikit.Policy.from_text(SOURCE + "# low\n", name="Low")
+        low = rsikit.PolicyDefinition.from_text(SOURCE + "# low\n", name="Low")
 
         async def evaluate(source, environment, seed):
             if source.endswith("# fails\n"):

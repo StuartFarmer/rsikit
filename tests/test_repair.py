@@ -121,7 +121,7 @@ class RepairTests(unittest.IsolatedAsyncioTestCase):
         provider = ScriptedProvider([duplicate, still_duplicate, program(2)])
         agent = AlphaEvolve("task", provider, config=Config(max_repairs=2))
         policies = await agent.generate()
-        self.assertEqual([p._implementation for p in policies], [program(2).implementation])
+        self.assertEqual([p.source for p in policies], [program(2).implementation])
         self.assertEqual(agent.repair_calls, 2)
         self.assertIn("exactly one top-level Solution class", provider.calls[1])
         self.assertIn("exactly one top-level Solution class", provider.calls[2])
@@ -294,7 +294,7 @@ class RepairTests(unittest.IsolatedAsyncioTestCase):
         initial = (await agent.generate())[0]
         agent.update_scores({initial.id: 0})
         child = (await agent.generate())[0]
-        self.assertEqual(child._implementation, program(2).implementation)
+        self.assertEqual(child.source, program(2).implementation)
         self.assertIn(SOURCE, provider.calls[-1])
         self.assertIn("immutable", provider.calls[-1])
         self.assertEqual(agent.repair_calls, 2)
@@ -400,7 +400,7 @@ class RepairTests(unittest.IsolatedAsyncioTestCase):
         with gym.make("CartPole-v1") as env:
             with self.assertRaisesRegex(InfrastructureError, "Docker stopped"):
                 async for _ in fake_executor(evaluation=evaluation, concurrency=2).evaluate(
-                    [(policy.id, policy._implementation, seed) for seed in (0, 1)], env
+                    [(policy.id, policy.source, seed) for seed in (0, 1)], env
                 ):
                     pass
 

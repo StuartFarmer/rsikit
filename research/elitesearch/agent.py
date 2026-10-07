@@ -18,10 +18,10 @@ from slick import parse, render
 from slick.providers import Provider
 
 from research.rewards import episode_error, episode_scores
-from rsikit import Episode, Policy, search
+from rsikit import Episode, PolicyDefinition, search
 from rsikit.generation import WORKER_LIBRARIES
 from rsikit.optimization import validate_results
-from rsikit.policy import InvalidPolicy, validate_policy
+from rsikit.policy import InvalidPolicy
 
 from .generation import (
     InvalidCandidate,
@@ -127,7 +127,7 @@ class EliteSearch:
         self,
         task: str,
         provider: Provider,
-        evaluate: Callable[[Sequence[type[Policy]]], Awaitable[dict[str, dict[int, Episode]]]]
+        evaluate: Callable[[Sequence[PolicyDefinition]], Awaitable[dict[str, dict[int, Episode]]]]
         | None = None,
         *,
         context: str = "",
@@ -145,13 +145,13 @@ class EliteSearch:
         self.reason = "ready"
         self._round = {}
         self._proposing = False
-        self._policies: dict[int, type[Policy]] = {}
+        self._policies: dict[int, PolicyDefinition] = {}
         self._sources: set[str] = set()
         self._seed_panel: set[int] | None = None
         self._call_slots = asyncio.Semaphore(config.generation_concurrency)
 
     @property
-    def best(self) -> type[Policy] | None:
+    def best(self) -> PolicyDefinition | None:
         return self._policies[self.elites[0].id] if self.elites else None
 
     def records(self):
@@ -198,7 +198,7 @@ class EliteSearch:
                         raise ValueError("Invalid checkpoint scores")
                     self._seed_panel = panel
                 if row.policy_id is not None:
-                    policy = Policy.from_text(
+                    policy = PolicyDefinition.from_text(
                         row.implementation, name=row.name, description=row.description
                     )
                     if policy.id != row.policy_id:
@@ -211,7 +211,7 @@ class EliteSearch:
                     if revision.get("policy_id") is not None
                 )
                 for implementation in implementations:
-                    validate_policy(Policy.from_text(implementation))
+                    PolicyDefinition.from_text(implementation).validate()
                     self._sources.add(ast.dump(ast.parse(implementation), include_attributes=False))
             if generation.status == "completed":
                 ranked = self._rank(rows)
@@ -232,7 +232,7 @@ class EliteSearch:
 
     async def invent(
         self, proposal: int, elites: list[Organism], *, provider, record=None
-    ) -> type[Policy]:
+    ) -> PolicyDefinition:
         schema = _PolicyResponse.model_json_schema()
         context = render(
             "new.j2",
@@ -247,7 +247,7 @@ class EliteSearch:
             record["raw"] = raw
         return parse(raw, _PolicyResponse).to_policy()
 
-    async def edit(self, parent: Organism, *, provider, record=None) -> type[Policy]:
+    async def edit(self, parent: Organism, *, provider, record=None) -> PolicyDefinition:
         schema = Mutation.model_json_schema()
         context = render(
             "edit.j2",
@@ -262,13 +262,13 @@ class EliteSearch:
         mutation = parse(raw, Mutation)
         if record is not None:
             record.update(name=mutation.name, description=mutation.description)
-        return Policy.from_text(
+        return PolicyDefinition.from_text(
             apply_edits(parent.implementation, mutation.edits),
             name=mutation.name,
             description=mutation.description,
         )
 
-    async def remix(self, parents: list[Organism], *, provider, record=None) -> type[Policy]:
+    async def remix(self, parents: list[Organism], *, provider, record=None) -> PolicyDefinition:
         schema = _PolicyResponse.model_json_schema()
         context = render(
             "remix.j2",
@@ -377,8 +377,8 @@ class EliteSearch:
             try:
                 proposal = await self._call(row, operation, *args)
                 row.name, row.description = proposal.name, proposal.description
-                row.implementation = proposal._implementation
-                validate_policy(proposal)
+                row.implementation = proposal.source
+                proposal.validate()
                 if reference:
                     check_rewrite(reference, row.implementation)
                 key = ast.dump(ast.parse(row.implementation), include_attributes=False)

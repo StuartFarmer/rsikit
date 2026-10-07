@@ -34,7 +34,7 @@ class MetaProgressTests(unittest.TestCase):
             return {}
 
         async def rollout(source, seeds, *args, **kwargs):
-            score = 10 if source == policies()[0]._implementation else 20
+            score = 10 if source == policies()[0].source else 20
             rows = [dict(score=score, steps=1) for _ in seeds]
             kwargs["_on_batch"](rows[:1])
             self.assertIn("1/2 games", (output / "run.log").read_text())
@@ -165,18 +165,16 @@ class TrialTests(unittest.IsolatedAsyncioTestCase):
             output_price=1,
         )
         with tempfile.TemporaryDirectory() as directory:
-            trial = Trial(
-                Config(), Path(directory), policies()[0]._implementation, evaluate, model, 0
-            )
+            trial = Trial(Config(), Path(directory), policies()[0].source, evaluate, model, 0)
             with self.assertRaises(asyncio.CancelledError):
-                await trial.handle(dict(op="evaluate", value=policies()[0]._implementation))
+                await trial.handle(dict(op="evaluate", value=policies()[0].source))
             row = trial.finish("cancelled")
             self.assertEqual(row["evaluations"], 1)
             self.assertEqual(row["successful_evaluations"], 0)
             self.assertTrue(row["incomplete_transitions_unknown"])
 
     async def test_failed_and_duplicate_submissions_cost_credits_and_keep_commit(self):
-        starter = policies()[0]._implementation
+        starter = policies()[0].source
         submitted = []
 
         async def evaluate(source, seeds):
@@ -370,7 +368,7 @@ def search(**kwargs):
         from research.meta_ocean.sandbox import RemotePolicy
         from research.ocean.evaluator import rollout
 
-        source = policies()[0]._implementation
+        source = policies()[0].source
         result = await rollout(
             source,
             list(range(10)),
@@ -419,7 +417,7 @@ class CampaignSmokeTests(unittest.TestCase):
                     if "Ocean Breakout:" in prompt
                     else "g2048"
                 )
-                return policies(environment)[-1]._implementation, []
+                return policies(environment)[-1].source, []
 
         def model(config, path, *, editor=False):
             return BudgetProvider(

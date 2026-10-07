@@ -22,10 +22,10 @@ from slick.providers import Provider, ProviderError
 from sqlmodel import SQLModel
 
 from research.rewards import episode_error, episode_scores
-from rsikit import Policy
+from rsikit import PolicyDefinition
 from rsikit.generation import WORKER_LIBRARIES
 from rsikit.optimization import validate_results
-from rsikit.policy import InvalidPolicy, validate_policy
+from rsikit.policy import InvalidPolicy
 
 from .generation import (
     InvalidCandidate,
@@ -79,7 +79,7 @@ class Recommendations(BaseModel, extra="forbid"):
 
 @dataclass(frozen=True)
 class _Candidate:
-    policy: type[Policy]
+    policy: PolicyDefinition
     score: float
 
     def evidence(self) -> dict:
@@ -87,7 +87,7 @@ class _Candidate:
             id=self.policy.id,
             name=self.policy.name,
             description=self.policy.description,
-            implementation=self.policy._implementation,
+            implementation=self.policy.source,
             score=self.score,
         )
 
@@ -119,7 +119,7 @@ class ShinkaEvolve:
         self.initial: _Candidate | None = None
         self._best: _Candidate | None = None
         self._archive: dict[str, _Candidate] = {}
-        self._policies: dict[str, type[Policy]] = {}
+        self._policies: dict[str, PolicyDefinition] = {}
         self._pending: dict[str, list[Evaluation]] = {}
         self._round = {}
         self._repairs = {}
@@ -208,10 +208,10 @@ class ShinkaEvolve:
         )
 
     @property
-    def best(self) -> type[Policy] | None:
+    def best(self) -> PolicyDefinition | None:
         return None if self._best is None else self._best.policy
 
-    async def initialize(self, proposal: int, *, provider, record=None) -> type[Policy]:
+    async def initialize(self, proposal: int, *, provider, record=None) -> PolicyDefinition:
         schema = _PolicyResponse.model_json_schema()
         context = render("initialize.j2", instance=self, schema=schema, proposal=proposal)
         raw, _ = await provider.acall(context)
@@ -219,20 +219,20 @@ class ShinkaEvolve:
             record["raw"] = raw
         return parse(raw, _PolicyResponse).to_policy()
 
-    async def diff(self, data: dict, *, provider, record=None) -> type[Policy]:
+    async def diff(self, data: dict, *, provider, record=None) -> PolicyDefinition:
         schema = Mutation.model_json_schema()
         context = render("diff.j2", instance=self, schema=schema, data=data)
         raw, _ = await provider.acall(context)
         if record is not None:
             record["raw"] = raw
         mutation = parse(raw, Mutation)
-        return Policy.from_text(
+        return PolicyDefinition.from_text(
             apply_edits(data["parents"][0]["implementation"], mutation.edits),
             name=mutation.name,
             description=mutation.description,
         )
 
-    async def rewrite(self, data: dict, *, provider, record=None) -> type[Policy]:
+    async def rewrite(self, data: dict, *, provider, record=None) -> PolicyDefinition:
         schema = _PolicyResponse.model_json_schema()
         context = render("full.j2", instance=self, schema=schema, data=data)
         raw, _ = await provider.acall(context)
@@ -240,7 +240,7 @@ class ShinkaEvolve:
             record["raw"] = raw
         return parse(raw, _PolicyResponse).to_policy()
 
-    async def crossover(self, data: dict, *, provider, record=None) -> type[Policy]:
+    async def crossover(self, data: dict, *, provider, record=None) -> PolicyDefinition:
         schema = _PolicyResponse.model_json_schema()
         context = render("cross.j2", instance=self, schema=schema, data=data)
         raw, _ = await provider.acall(context)
@@ -357,7 +357,7 @@ class ShinkaEvolve:
                 patch = "full"
         return island, model, patch, parents, inspirations
 
-    async def generate(self, n: int = 1, *, concurrency: int = 4) -> list[type[Policy]]:
+    async def generate(self, n: int = 1, *, concurrency: int = 4) -> list[PolicyDefinition]:
         """Attempt n candidates, with bounded resampling and repair; return survivors."""
         if n < 0 or concurrency < 1:
             raise ValueError("n must be nonnegative and concurrency must be positive")
@@ -420,7 +420,7 @@ class ShinkaEvolve:
         )
         self.evaluations.append(row)
         self._log_candidate(row)
-        reference = parents[0].policy._implementation if parents else ""
+        reference = parents[0].policy.source if parents else ""
         failures = []
         try:
             for _ in range(self.config.max_proposals):
@@ -457,17 +457,17 @@ class ShinkaEvolve:
                             attempt=row.attempt,
                             call=call,
                         )
-                        content = proposal._implementation
+                        content = proposal.source
                         if reference:
                             check_rewrite(reference, content)
                         evolution_regions(content)
-                        validate_policy(proposal)
+                        proposal.validate()
                         policy = proposal
                     except InvalidPolicy as exc:
                         failed = content or call.get("raw", "")
                         policy = await self._repair_valid(row, reference, failed, str(exc))
-                    await self.check_novelty(policy._implementation, self.islands[island], row)
-                    key = (island, policy._implementation)
+                    await self.check_novelty(policy.source, self.islands[island], row)
+                    key = (island, policy.source)
                     if key in proposed:
                         raise InvalidCandidate(
                             "Duplicate program in this island's generation batch"
@@ -504,7 +504,7 @@ class ShinkaEvolve:
             logger.error("Policy proposal %s failed: %s", row.attempt, row.error)
             raise
 
-    async def _repair_valid(self, row, reference, failed, diagnostic) -> type[Policy]:
+    async def _repair_valid(self, row, reference, failed, diagnostic) -> PolicyDefinition:
         while row.repairs < self.config.max_repairs:
             row.repairs += 1
             self.repair_calls += 1
@@ -526,13 +526,13 @@ class ShinkaEvolve:
                     attempt=row.attempt,
                     call=call,
                 )
-                content = proposal._implementation
+                content = proposal.source
                 if content == failed:
                     raise InvalidCandidate("Repair returned the unchanged implementation")
                 if reference:
                     check_rewrite(reference, content)
                 evolution_regions(content)
-                validate_policy(proposal)
+                proposal.validate()
                 return proposal
             except InvalidPolicy as exc:
                 failed = call.get("raw", failed)
@@ -546,8 +546,8 @@ class ShinkaEvolve:
                 self._log_candidate(row)
 
     async def repair(
-        self, policy: type[Policy], diagnostic: str, *, _records=None
-    ) -> type[Policy] | None:
+        self, policy: PolicyDefinition, diagnostic: str, *, _records=None
+    ) -> PolicyDefinition | None:
         rows = list(self._pending[policy.id]) if _records is None else _records
         for row in rows:
             row.status, row.error = "failed", diagnostic
@@ -565,16 +565,10 @@ class ShinkaEvolve:
                 self._pending.pop(policy.id, None)
 
         row = max(rows, key=lambda item: item.repairs)
-        reference = (
-            self._policies[row.parents[0]]._implementation
-            if row.parents
-            else policy._implementation
-        )
+        reference = self._policies[row.parents[0]].source if row.parents else policy.source
         try:
-            replacement = await self._repair_valid(
-                row, reference, policy._implementation, diagnostic
-            )
-            await self.check_novelty(replacement._implementation, self.islands[row.island], row)
+            replacement = await self._repair_valid(row, reference, policy.source, diagnostic)
+            await self.check_novelty(replacement.source, self.islands[row.island], row)
         except InvalidPolicy as exc:
             detach()
             for item in rows:
@@ -799,14 +793,14 @@ class ShinkaEvolve:
         return self.embeddings[implementation]
 
     async def check_novelty(self, implementation, population, row) -> None:
-        if any(candidate.policy._implementation == implementation for candidate in population):
+        if any(candidate.policy.source == implementation for candidate in population):
             raise InvalidCandidate("Duplicate island program")
         if self.embed is None or not population:
             return
         vector = await self.embedding(implementation)
         similarities = []
         for candidate in population:
-            reference = await self.embedding(candidate.policy._implementation)
+            reference = await self.embedding(candidate.policy.source)
             if len(vector) != len(reference):
                 raise ValueError("Embedding dimensions changed")
             similarities.append(sum(a * b for a, b in zip(vector, reference)))

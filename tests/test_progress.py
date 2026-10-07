@@ -857,6 +857,7 @@ class RunLoggingTests(unittest.IsolatedAsyncioTestCase):
         def checked_report(run):
             display = _current_run.get()["display"]
             self.assertEqual((display.completed, display.total), (10, 10))
+            self.assertEqual((len(display.proposals), len(display.evaluations)), (5, 5))
             self.assertEqual(len(display.leaders), 5)
             self.assertEqual(display.status, "completed")
             return report(run)

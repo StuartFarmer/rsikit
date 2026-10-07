@@ -116,7 +116,7 @@ class ShinkaTests(unittest.IsolatedAsyncioTestCase):
                 parents = await agent.generate(n=2, concurrency=1)
                 agent.update_scores({p.id: float(i) for i, p in enumerate(parents)})
                 (policy,) = await agent.generate()
-                self.assertIn("return 2", policy._implementation)
+                self.assertIn("return 2", policy.source)
                 row = agent.evaluations[-1]
                 self.assertEqual(row.parents[0], parents[1].id)
                 self.assertEqual(len(row.parents), 2 if mode == "cross" else 1)

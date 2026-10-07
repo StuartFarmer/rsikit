@@ -13,7 +13,7 @@ from research.alphaevolve.history import Evaluation, Generation, history_records
 from research.alphaevolve.paper.evaluation import assess
 from research.rewards import episode_error, measure_rewards
 from rsikit import search
-from rsikit.policy import Policy, validate_policy
+from rsikit.policy import PolicyDefinition
 
 
 def _log_history(run):
@@ -224,8 +224,8 @@ async def run_search(
     outcome = "failed"
     try:
         if initial_policy is not None:
-            policy = Policy.from_file(initial_policy)
-            validate_policy(policy)
+            policy = PolicyDefinition.from_file(initial_policy)
+            policy.validate()
             measurement = (await evaluate([policy]))[policy.id]
             if not measurement or episode_error(measurement) is not None:
                 raise ValueError("Initial policy failed screening; it was not registered")

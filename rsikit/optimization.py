@@ -5,7 +5,7 @@ from collections.abc import Awaitable, Callable, Mapping, Sequence
 from typing import Protocol
 
 from .episode import Episode
-from .policy import Policy
+from .policy import PolicyDefinition
 
 
 class Optimizer(Protocol):
@@ -13,9 +13,9 @@ class Optimizer(Protocol):
     def done(self) -> bool: ...
 
     @property
-    def best(self) -> type[Policy] | None: ...
+    def best(self) -> PolicyDefinition | None: ...
 
-    async def propose(self) -> list[type[Policy]]:
+    async def propose(self) -> list[PolicyDefinition]:
         """Create policy definitions; execution creates fresh instances per episode."""
         ...
 
@@ -45,10 +45,12 @@ def validate_results(results, pending, *, seed_panel=None):
 
 async def search(
     optimizer: Optimizer,
-    evaluate: Callable[[Sequence[type[Policy]]], Awaitable[Mapping[str, Mapping[int, Episode]]]],
+    evaluate: Callable[
+        [Sequence[PolicyDefinition]], Awaitable[Mapping[str, Mapping[int, Episode]]]
+    ],
     *,
     on_checkpoint: Callable[[Optimizer], None] | None = None,
-) -> type[Policy] | None:
+) -> PolicyDefinition | None:
     """Drive complete proposal rounds; the caller owns evaluation resources."""
 
     def checkpoint():

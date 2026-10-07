@@ -6,7 +6,7 @@ from pathlib import Path
 
 import numpy as np
 
-from rsikit import Episode, Policy, Run
+from rsikit import Episode, PolicyDefinition, Run
 from rsikit.episode import EpisodeEncoder
 
 
@@ -131,7 +131,7 @@ class EpisodeStorageTests(unittest.TestCase):
                     Episode.from_data(broken)
 
     def test_run_reopens_without_environment_and_keeps_checkpoint_and_episode(self):
-        policy = Policy.from_text(
+        policy = PolicyDefinition.from_text(
             "from rsikit import Policy\nclass Solution(Policy):\n    async def act(self, observation):\n        return 0\n"
         )
         with tempfile.TemporaryDirectory() as directory:
