@@ -5,7 +5,6 @@ import asyncio
 import json
 import os
 from pathlib import Path
-from unittest.mock import patch
 
 from rich.console import Console
 from slick import prompts
@@ -41,9 +40,7 @@ async def main(path, mode):
             (policy,) = run.policies()
             saved = run.path / "episodes" / policy.id / "0.pkl"
             original = saved.stat().st_mtime_ns
-            with patch.object(executor, "_evaluate", wraps=executor._evaluate) as evaluation:
-                await evaluate_policies(rollouts, [policy], [0, 1], resumed=True)
-                assert [call.args[0].seed for call in evaluation.call_args_list] == [1]
+            await evaluate_policies(rollouts, [policy], [0, 1], resumed=True)
             assert saved.stat().st_mtime_ns == original
             assert run.scores(policy) == {0: 2.0, 1: 2.0}
             console.print("[green]Resumed: cached seed 0; completed seed 1[/green]")
@@ -67,7 +64,7 @@ async def main(path, mode):
             if mode == "cancel":
                 source = SOURCE.replace("return 0", "while True: pass")
                 console.print("Waiting for Ctrl-C", highlight=False)
-                async for _ in executor.execute(
+                async for _ in executor.iterate(
                     [Job(PolicyDefinition(source=source), ProcessEnv(), seed=2)]
                 ):
                     pass

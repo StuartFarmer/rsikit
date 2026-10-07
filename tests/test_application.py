@@ -94,7 +94,7 @@ class ApplicationEpisodeTests(unittest.IsolatedAsyncioTestCase):
             async with Executor(episode_timeout=timeout) as executor:
                 results = [
                     job.result
-                    async for job in executor.execute(
+                    async for job in executor.iterate(
                         [Job(policy, environment, seed=1, max_steps=5)]
                     )
                 ]
@@ -123,7 +123,7 @@ class ApplicationEpisodeTests(unittest.IsolatedAsyncioTestCase):
                     episodes.extend(
                         [
                             job.result
-                            async for job in executor.execute(
+                            async for job in executor.iterate(
                                 [Job(policy, environment, seed=1, max_steps=limit)]
                             )
                         ]
@@ -174,35 +174,46 @@ class ApplicationEpisodeTests(unittest.IsolatedAsyncioTestCase):
                     tempfile.TemporaryDirectory() as directory,
                     make_environment(name, max_steps=3) as env,
                     cloudpickle.loads(cloudpickle.dumps(env)) as restored,
-                    recorded_run(
+                ):
+                    async with recorded_run(
                         name="box2d",
                         path=Path(directory) / "run",
                         environment=restored,
                         console=Console(file=io.StringIO()),
-                    ) as (run, rollouts),
-                    patch.object(prompts, "TEMPLATE_ROOT", Path(alphaevolve.__file__).parent),
-                ):
-                    self.assertEqual(restored.instructions, env.instructions)
-                    self.assertEqual(restored.spec.max_episode_steps, 3)
-                    provider = ScriptedProvider(
-                        [
-                            _PolicyResponse(
-                                name="Random motors",
-                                description="Exercise continuous actions and environment instructions.",
-                                implementation=f'from rsikit import Policy\nclass Solution(Policy):\n    async def act(self, observation):\n        assert {name!r} in self.instructions\n        assert "truncated after 3 steps" in self.instructions\n        assert self.action_space.shape == ({actions},)\n        return self.action_space.sample()\n',
+                    ) as (run, rollouts):
+                        with patch.object(
+                            prompts, "TEMPLATE_ROOT", Path(alphaevolve.__file__).parent
+                        ):
+                            self.assertEqual(restored.instructions, env.instructions)
+                            self.assertEqual(restored.spec.max_episode_steps, 3)
+                            provider = ScriptedProvider(
+                                [
+                                    _PolicyResponse(
+                                        name="Random motors",
+                                        description="Exercise continuous actions and environment instructions.",
+                                        implementation=f'from rsikit import Policy\nclass Solution(Policy):\n    async def act(self, observation):\n        assert {name!r} in self.instructions\n        assert "truncated after 3 steps" in self.instructions\n        assert self.action_space.shape == ({actions},)\n        return self.action_space.sample()\n',
+                                    )
+                                ]
                             )
-                        ]
-                    )
-                    agent = AlphaEvolve("Maximize reward", provider, context=restored.instructions)
-                    await run_search(
-                        agent, run, rollouts, generations=1, batch_size=1, seeds=[0, 1]
-                    )
-                    self.assertIn(restored.instructions, provider.calls[0])
-                    scores = run.scores(agent.best)
-                    self.assertEqual(set(scores), {0, 1})
-                    self.assertTrue(all((math.isfinite(score) for score in scores.values())))
-                    self.assertEqual(agent.completed, 1)
-                    self.assertEqual(agent._best.seed_scores, scores)
+                            agent = AlphaEvolve(
+                                "Maximize reward", provider, context=restored.instructions
+                            )
+                            await run_search(
+                                agent,
+                                run,
+                                rollouts,
+                                generations=1,
+                                batch_size=1,
+                                seeds=[0, 1],
+                            )
+                            self.assertIn(restored.instructions, provider.calls[0])
+                            scores = run.scores(agent.best)
+                            self.assertEqual(set(scores), {0, 1})
+                            self.assertTrue(
+                                all((math.isfinite(score) for score in scores.values()))
+                            )
+                            self.assertEqual(agent.completed, 1)
+                            self.assertEqual(agent._best.seed_scores, scores)
 
     async def test_shinkaevolve_runs_all_presets_and_persists_islands(self):
         import io
@@ -233,53 +244,55 @@ class ApplicationEpisodeTests(unittest.IsolatedAsyncioTestCase):
                 patch.object(
                     prompts, "TEMPLATE_ROOT", Path(shinkaevolve.__file__).parent / "prompts"
                 ),
-                recorded_run(
+            ):
+                async with recorded_run(
                     name="shinka-smoke",
                     path=Path(directory) / "run",
                     environment=environment,
                     executor=Executor(concurrency=2),
                     console=Console(file=io.StringIO()),
-                ) as (run, rollouts),
-            ):
-                provider = ScriptedProvider(
-                    [
-                        _PolicyResponse(
-                            name="RandomPolicy",
-                            description="Sample a valid action.",
-                            implementation=implementation,
-                        ),
-                        _PolicyResponse(
-                            name="RandomPolicyV2",
-                            description="Sample another valid action.",
-                            implementation=implementation + "\n# second generation\n",
-                        ),
-                    ]
-                )
-                agent = ShinkaEvolve(
-                    "task",
-                    provider,
-                    context=environment.instructions,
-                    config=Config(islands=1, meta_interval=0, patch_types=(("full", 1),)),
-                )
-                await run_search(agent, run, rollouts, generations=2, batch_size=1, seeds=(0, 1))
-                self.assertEqual(len(run.policies()), 2)
-                self.assertTrue(
-                    all(
-                        (
-                            math.isfinite(value)
-                            for policy in run.policies()
-                            for value in run.scores(policy).values()
+                ) as (run, rollouts):
+                    provider = ScriptedProvider(
+                        [
+                            _PolicyResponse(
+                                name="RandomPolicy",
+                                description="Sample a valid action.",
+                                implementation=implementation,
+                            ),
+                            _PolicyResponse(
+                                name="RandomPolicyV2",
+                                description="Sample another valid action.",
+                                implementation=implementation + "\n# second generation\n",
+                            ),
+                        ]
+                    )
+                    agent = ShinkaEvolve(
+                        "task",
+                        provider,
+                        context=environment.instructions,
+                        config=Config(islands=1, meta_interval=0, patch_types=(("full", 1),)),
+                    )
+                    await run_search(
+                        agent, run, rollouts, generations=2, batch_size=1, seeds=(0, 1)
+                    )
+                    self.assertEqual(len(run.policies()), 2)
+                    self.assertTrue(
+                        all(
+                            (
+                                math.isfinite(value)
+                                for policy in run.policies()
+                                for value in run.scores(policy).values()
+                            )
                         )
                     )
-                )
-                self.assertIn(name, provider.calls[0])
-                with run.database() as db:
-                    self.assertEqual(len(db.exec(select(Evaluation)).all()), 2)
-                    generations = db.exec(select(Generation)).all()
-                    self.assertTrue(
-                        all((row.complete and row.seeds == [0, 1] for row in generations))
-                    )
-                    self.assertEqual(len(generations[-1].islands[0]), 2)
+                    self.assertIn(name, provider.calls[0])
+                    with run.database() as db:
+                        self.assertEqual(len(db.exec(select(Evaluation)).all()), 2)
+                        generations = db.exec(select(Generation)).all()
+                        self.assertTrue(
+                            all((row.complete and row.seeds == [0, 1] for row in generations))
+                        )
+                        self.assertEqual(len(generations[-1].islands[0]), 2)
 
     async def test_alphaevolve_uses_native_environments_and_isolated_evaluation(self):
         import io
@@ -314,27 +327,27 @@ class ApplicationEpisodeTests(unittest.IsolatedAsyncioTestCase):
             tempfile.TemporaryDirectory() as folder,
             gym.make("CartPole-v1", max_episode_steps=50) as environment,
             patch.object(prompts, "TEMPLATE_ROOT", Path(alphaevolve.__file__).parent),
-            recorded_run(
+        ):
+            async with recorded_run(
                 name="evolution",
                 environment=environment,
                 path=Path(folder) / "run",
                 executor=Executor(concurrency=2),
                 console=Console(file=output, width=120, force_terminal=False),
-            ) as (run, rollouts),
-        ):
-            agent = AlphaEvolve(
-                "Balance CartPole", provider, config=Config(mode="rewrite", islands=1)
-            )
-            await run_search(agent, run, rollouts, generations=2, batch_size=1)
-            generation_scores = [run.scores(policy)[0] for policy in run.policies()]
-            self.assertIn("Generated Left", output.getvalue())
-            self.assertIn("score=50", output.getvalue())
-            self.assertIn("Best so far: Balance", (run.path / "run.log").read_text())
-            self.assertGreater(generation_scores[1], generation_scores[0])
-            self.assertEqual(generation_scores[1], 50)
-            self.assertEqual(agent.best.name, "Balance")
-            self.assertEqual(len(run.policies()), 2)
-            self.assertEqual(len(list((run.path / "exports").glob("*.py"))), 2)
+            ) as (run, rollouts):
+                agent = AlphaEvolve(
+                    "Balance CartPole", provider, config=Config(mode="rewrite", islands=1)
+                )
+                await run_search(agent, run, rollouts, generations=2, batch_size=1)
+                generation_scores = [run.scores(policy)[0] for policy in run.policies()]
+                self.assertIn("Generated Left", output.getvalue())
+                self.assertIn("score=50", output.getvalue())
+                self.assertIn("Best so far: Balance", (run.path / "run.log").read_text())
+                self.assertGreater(generation_scores[1], generation_scores[0])
+                self.assertEqual(generation_scores[1], 50)
+                self.assertEqual(agent.best.name, "Balance")
+                self.assertEqual(len(run.policies()), 2)
+                self.assertEqual(len(list((run.path / "exports").glob("*.py"))), 2)
         self.assertEqual(len(provider.calls), 2)
         self.assertIn('Per-seed rewards: {"0":', provider.calls[1])
 
@@ -371,26 +384,26 @@ class ApplicationEpisodeTests(unittest.IsolatedAsyncioTestCase):
             tempfile.TemporaryDirectory() as directory,
             gym.make("CartPole-v1", max_episode_steps=5) as env,
             patch.object(prompts, "TEMPLATE_ROOT", Path(alphaevolve.__file__).parent),
-            recorded_run(
+        ):
+            async with recorded_run(
                 name="healing",
                 path=Path(directory) / "run",
                 environment=env,
                 executor=Executor(),
                 console=Console(file=output, force_terminal=False, width=120),
-            ) as (run, rollouts),
-        ):
-            generator = AlphaEvolve("Balance CartPole", provider)
-            await run_search(generator, run, rollouts, generations=1, batch_size=1)
-            self.assertEqual(generator.repair_calls, 2)
-            self.assertEqual(generator.completed, 1)
-            self.assertEqual(generator.best.name, "Repaired")
-            self.assertEqual(run.scores(generator.best), {0: 5.0})
-            failed, repaired = run.policies()
-            self.assertEqual(run.scores(failed), {0: None})
-            self.assertEqual(repaired.id, generator.best.id)
-            self.assertIn("unmatched", provider.calls[1])
-            self.assertIn("positional arguments", provider.calls[2])
-            self.assertIn("Repairing proposal 1 (2/2)", (run.path / "run.log").read_text())
+            ) as (run, rollouts):
+                generator = AlphaEvolve("Balance CartPole", provider)
+                await run_search(generator, run, rollouts, generations=1, batch_size=1)
+                self.assertEqual(generator.repair_calls, 2)
+                self.assertEqual(generator.completed, 1)
+                self.assertEqual(generator.best.name, "Repaired")
+                self.assertEqual(run.scores(generator.best), {0: 5.0})
+                failed, repaired = run.policies()
+                self.assertEqual(run.scores(failed), {0: None})
+                self.assertEqual(repaired.id, generator.best.id)
+                self.assertIn("unmatched", provider.calls[1])
+                self.assertIn("positional arguments", provider.calls[2])
+                self.assertIn("Repairing proposal 1 (2/2)", (run.path / "run.log").read_text())
 
     async def test_inner_loop_demo_passes_generated_policies_to_run(self):
         import contextlib
@@ -437,14 +450,12 @@ class ApplicationEpisodeTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(result[2]["name"], "PD")
             self.assertEqual(result[2]["mean_score"], 30)
             self.assertIsNone(result[3]["mean_score"])
-            with (
-                gym.make("CartPole-v1", max_episode_steps=30) as env,
-                recorded_run(output, environment=env) as (run, rollouts),
-            ):
-                self.assertEqual(len(run.policies()), 5)
-                self.assertEqual(sum(len(run.scores(p)) for p in run.policies()), 10)
-                with self.assertRaises(PolicyError):
-                    await finish_pending(rollouts)
+            with gym.make("CartPole-v1", max_episode_steps=30) as env:
+                async with recorded_run(output, environment=env) as (run, rollouts):
+                    self.assertEqual(len(run.policies()), 5)
+                    self.assertEqual(sum(len(run.scores(p)) for p in run.policies()), 10)
+                    with self.assertRaises(PolicyError):
+                        await finish_pending(rollouts)
 
     async def test_run_records_real_video_artifact(self):
         import json
@@ -484,19 +495,23 @@ class ApplicationEpisodeTests(unittest.IsolatedAsyncioTestCase):
                 str(Path(directory) / "recordings"),
                 episode_trigger=lambda _: True,
             )
-            with env, recorded_run(name="video", path=output, environment=env) as (run, rollouts):
-                self.assertEqual(
-                    await mean_rewards(rollouts, [policy], seeds=[1]), {policy.id: 5.0}
-                )
-                videos = list((output / "artifacts" / policy.id / "1").rglob("*.mp4"))
-                self.assertEqual(len(videos), 1)
-                video = videos[0]
-                self.assertGreater(video.stat().st_size, 100)
-                from moviepy import VideoFileClip
+            with env:
+                async with recorded_run(name="video", path=output, environment=env) as (
+                    run,
+                    rollouts,
+                ):
+                    self.assertEqual(
+                        await mean_rewards(rollouts, [policy], seeds=[1]), {policy.id: 5.0}
+                    )
+                    videos = list((output / "artifacts" / policy.id / "1").rglob("*.mp4"))
+                    self.assertEqual(len(videos), 1)
+                    video = videos[0]
+                    self.assertGreater(video.stat().st_size, 100)
+                    from moviepy import VideoFileClip
 
-                with VideoFileClip(str(video)) as clip:
-                    self.assertGreater(clip.duration, 0)
-                    self.assertEqual(clip.get_frame(0).shape[2], 3)
+                    with VideoFileClip(str(video)) as clip:
+                        self.assertGreater(clip.duration, 0)
+                        self.assertEqual(clip.get_frame(0).shape[2], 3)
             with (
                 gym.make("CartPole-v1", max_episode_steps=5) as env,
                 recorded_run(output, environment=env) as (run, rollouts),
@@ -576,7 +591,7 @@ class ApplicationEpisodeTests(unittest.IsolatedAsyncioTestCase):
             await self.run_source(COUNTER_SOURCE.replace("return action", "os._exit(3)"))
         timeout_source = COUNTER_SOURCE.replace("return action", "while True: pass")
         episode = await self.run_source(timeout_source, timeout=0.5, raw=True)
-        self.assertIn("exceeded", episode.error)
+        self.assertIn("timeout", episode.error)
 
 
 if __name__ == "__main__":

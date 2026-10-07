@@ -557,7 +557,7 @@ class LineageTests(unittest.IsolatedAsyncioTestCase):
             [families(), *sequence(0, 1, 2)], {"Policy 0": 1, "Policy 1": 1, "Policy 2": 1}
         )
         with tempfile.TemporaryDirectory() as directory, gym.make("CartPole-v1") as env:
-            with recorded_run(
+            async with recorded_run(
                 name="lineage-test", environment=env, path=Path(directory) / "run"
             ) as (run, rollouts):
                 agent.on_checkpoint = lambda current: run.save(*current.records())

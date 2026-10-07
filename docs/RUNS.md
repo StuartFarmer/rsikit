@@ -45,16 +45,21 @@ the worker deadline. `instructions` is an optional construction override for
 definitions. A worker copies the inputs, resets both with the job seed, runs the
 same Evaluator, closes its copies and returns native Episode fields using pickle.
 
-`await execute(jobs, concurrency=4)` returns the original jobs in completion order.
-`Executor.execute(jobs)` streams those jobs for incremental persistence. Each job
+`await execute(jobs, concurrency=4)` returns the original jobs in observed readiness order.
+`await executor.execute(jobs)` also returns a list; `executor.iterate(jobs)`
+streams those jobs for incremental persistence. Each job
 has `result=None` until its result arrives; `done` means an Episode is available,
 including failed attempts. Jobs are single-use. Infrastructure failures raise after
-successful siblings finish, and cancellation propagates after worker cleanup.
+successful siblings finish. Cancellation revokes queued jobs; running jobs finish
+before the executor context closes. A detected worker crash aborts pending waits.
 
 Use `async with Executor(concurrency=4, episode_timeout=60)` to share worker limits
-across submissions. Close partially consumed streams with `contextlib.aclosing`.
+across submissions. Add `database="evaluations.sqlite"` to retain the queue;
+otherwise it uses temporary storage. Entry is required; each Executor instance
+has one context lifetime. Finish or cancel/await concurrent batch tasks before
+exit. Close partially consumed streams with `contextlib.aclosing`.
 Keep template instances unchanged until execution finishes; serialization occurs
-when each job acquires a slot. Templates must be serializable and remain caller-owned.
+when each job is enqueued in Huey. Templates must be serializable and remain caller-owned.
 See [the direct-to-sweep examples](INNER_LOOP.md#from-interactive-evaluation-to-a-sweep).
 
 ## Storage and analysis

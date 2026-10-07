@@ -449,7 +449,7 @@ evaluation fast enough.
 
 ## References
 
-- [Current evaluator](../rsikit/evaluation.py), [executor](../rsikit/execution.py),
+- [Current evaluator](../rsikit/evaluation.py), [executor](../rsikit/execution/executor.py),
   [EliteSearch](../research/elitesearch/agent.py), [Measurement](../research/rewards.py).
 - [Current execution boundaries](IN_PROCESS_SANDBOX.md).
 - [Pinned Ocean API](https://github.com/PufferAI/PufferLib/blob/6ffa5b10dbbbe4d1e8288367c7d9d3acd3bad4a2/src/pufferenv.h).

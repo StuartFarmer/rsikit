@@ -127,7 +127,7 @@ class RunTests(unittest.IsolatedAsyncioTestCase):
         async def batch(seeds):
             return [
                 (job.policy.id, job.seed, job.result)
-                async for job in self.executor.execute(
+                async for job in self.executor.iterate(
                     [
                         Job(
                             PolicyDefinition(source=RESPONSE["implementation"]), self.env, seed=seed
@@ -328,8 +328,13 @@ class RunTests(unittest.IsolatedAsyncioTestCase):
         with self.create() as (run, rollouts):
             task = asyncio.create_task(mean_rewards(rollouts, [self.policy], seeds=[0, 1, 2]))
             await started.wait()
+
             # Allow the completed seed's result to reach the persistence consumer.
-            await asyncio.sleep(0)
+            async def wait_persisted():
+                while run.scores(self.policy)[0] is None:
+                    await asyncio.sleep(0.01)
+
+            await asyncio.wait_for(wait_persisted(), 1)
             task.cancel()
             with self.assertRaises(asyncio.CancelledError):
                 await task
@@ -424,12 +429,12 @@ class RunTests(unittest.IsolatedAsyncioTestCase):
         mutated = trajectory()
         mutated.rewards[0] = float("nan")
         with self.create() as (run, rollouts):
-            for outcome, diagnostic in [
-                (mutated, "finite"),
-                (trajectory(1.0, {"../../../../outside": b"bad"}), "Artifact path"),
+            for outcome, error, diagnostic in [
+                (mutated, InfrastructureError, "finite"),
+                (trajectory(1.0, {"../../../../outside": b"bad"}), ValueError, "Artifact path"),
             ]:
                 self.evaluation.evaluate.return_value = outcome
-                with self.assertRaisesRegex(ValueError, diagnostic):
+                with self.assertRaisesRegex(error, diagnostic):
                     await mean_rewards(rollouts, [self.policy])
                 self.assertEqual(run.scores(self.policy), {0: None})
             self.evaluation.evaluate.side_effect = InfrastructureError("start failed")

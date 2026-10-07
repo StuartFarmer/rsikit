@@ -400,7 +400,7 @@ class RepairTests(unittest.IsolatedAsyncioTestCase):
         evaluation.evaluate.side_effect = evaluate
         with gym.make("CartPole-v1") as env:
             with self.assertRaisesRegex(InfrastructureError, "Docker stopped"):
-                async for _ in fake_executor(evaluation=evaluation, concurrency=2).execute(
+                async for _ in fake_executor(evaluation=evaluation, concurrency=2).iterate(
                     [Job(policy, env, seed=seed) for seed in (0, 1)]
                 ):
                     pass

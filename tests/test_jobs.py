@@ -1,4 +1,4 @@
-"""The interactive-to-worker contract, including ownership and native pickle output."""
+"""The interactive-to-worker contract, including ownership and native episode output."""
 
 import os
 import threading
@@ -13,9 +13,8 @@ from rsikit.evaluation import InfrastructureError
 from tests.test_execution import SOURCE, ProcessEnv
 
 
-def malformed_result(channel, *args):
-    os.setsid()
-    channel.send_bytes(b"not a pickle")
+def malformed_result(*args):
+    return {"not": "an episode"}
 
 
 class JobTests(unittest.IsolatedAsyncioTestCase):
@@ -89,7 +88,7 @@ class JobTests(unittest.IsolatedAsyncioTestCase):
         completed = []
         async with Executor(concurrency=2) as executor:
             with self.assertRaisesRegex(InfrastructureError, "serialize"):
-                async for job in executor.execute([bad, good]):
+                async for job in executor.iterate([bad, good]):
                     completed.append(job)
         self.assertEqual(completed, [good])
         self.assertFalse(bad.done)
@@ -115,10 +114,10 @@ class JobTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(job.result.infos[-1]["array"].dtype, np.int16)
         self.assertIsInstance(job.result.infos[-1]["detail"], tuple)
         self.assertIsInstance(job.result.infos[-1]["detail"][0], np.int16)
-        with patch("rsikit.execution._run_child", malformed_result):
+        with patch("rsikit.execution.worker.run_episode", malformed_result):
             with self.assertRaisesRegex(InfrastructureError, "result"):
                 await execute([Job(PolicyDefinition(source=SOURCE), ProcessEnv())])
-        with patch("rsikit.execution.MAX_RESULT", 256):
+        with patch("rsikit.execution.worker.MAX_RESULT", 256):
             with self.assertRaises(InfrastructureError):
                 await execute([Job(PolicyDefinition(source=SOURCE), ProcessEnv())])
 
@@ -130,15 +129,14 @@ class JobTests(unittest.IsolatedAsyncioTestCase):
             job = Job(PolicyDefinition(source=source), ProcessEnv())
             await execute([job], episode_timeout=1)
             self.assertTrue(job.done)
-            self.assertIn("exceeded", job.result.error)
+            self.assertIn("timeout", job.result.error)
 
     async def test_worker_bounds_encoded_episode_and_error_responses(self):
-        # Set the limit inside the child; patching the parent only tests recv_bytes.
-        prefix = "import rsikit.execution\nrsikit.execution.MAX_RESULT = 1024\n"
+        # Exercise the task result bound inside the worker.
+        prefix = "import rsikit.execution.worker\nrsikit.execution.worker.MAX_RESULT = 1024\n"
         for body in (
             SOURCE.replace("return 0", "raise ValueError('x' * 2000)"),
-            "from rsikit.evaluation import InfrastructureError\n"
-            "raise InfrastructureError('x' * 2000)",
+            SOURCE + "\nfrom pathlib import Path\nPath('large.bin').write_bytes(b'x' * 2000)",
         ):
-            with self.subTest(body=body), self.assertRaisesRegex(InfrastructureError, "exceeds"):
+            with self.subTest(body=body), self.assertRaisesRegex(InfrastructureError, "exceed"):
                 await execute([Job(PolicyDefinition(source=prefix + body), ProcessEnv())])

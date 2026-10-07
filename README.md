@@ -27,7 +27,7 @@ This is an experimental release; APIs may change.
 - `Optimizer`: the `propose()` / `update(episodes)` protocol, with `done` and `best`, implemented by all six optimizers.
 - `Episode` feedback and `search`: raw per-seed rollout evidence and one external optimization loop.
 - `Run`: persists one optimizer run: configuration, checkpoints, policies, and episodes.
-- `Executor`: runs fresh local episode processes with bounded concurrency and deadlines.
+- `Executor`: owns a SQLite queue and Huey process workers for evaluation batches.
 - `AlphaEvolve`: evolutionary search using Slick and Gymnasium feedback.
 - `ShinkaEvolve`: island archives, adaptive model selection, and diff/rewrite/crossover search.
 - `LineageSearch`: diverse approach families, measured refinement and pivots, and stagnation-based completion.
@@ -68,8 +68,50 @@ with gym.make("CartPole-v1") as environment:
 One seed resets both objects once per episode. Direct evaluation uses the original
 instances; execution copies them into workers and returns the original jobs with
 `result` attached. Inputs must be serializable; keep them unchanged while jobs run.
-For large runs, use `Executor.execute(jobs)` to stream and persist each result.
+For large runs, use `Executor.iterate(jobs)` to stream and persist each result.
 See [lifecycle and failure behavior](docs/INNER_LOOP.md).
+
+`Executor` owns its SQLite queue and starts Huey process workers when you enter
+its required async context.
+The default queue is temporary; no separate service or Docker container is needed.
+To retain queued jobs and results, provide a database path:
+
+```python
+from rsikit import Executor
+
+async with Executor(database="evaluations.sqlite", concurrency=4) as executor:
+    completed_jobs = await executor.execute(jobs)
+    for job in completed_jobs:
+        print(job.task_id, job.result.total_reward)
+    # Submit another batch here to reuse the same workers.
+```
+
+Use each Executor instance for one context lifetime. Calling `execute()` or
+`iterate()` outside that context raises an error. To reopen a persistent queue,
+create a new Executor with the same database path. The standalone `execute()`
+function opens and closes its own context.
+
+Concurrent batches share Huey's workers. Finish or cancel and await any batch
+tasks before leaving the context; close partially consumed streams with
+`contextlib.aclosing`. Each batch has one result loop. Queue I/O runs in pooled
+threads so SQLite locks do not block the event loop; no thread waits for an entire
+evaluation, and there is no async waiter per job.
+
+The queue name (`evaluations`) and durable SQLite writes (`fsync=True`) are internal
+defaults. An executor consumes pending tasks from earlier sessions too. Completed
+results remain keyed by `job.task_id` when a database path is supplied. This queue
+is separate from `Run` episode storage; persisting a queue does not restore the
+original Python `Job` objects or automatically save episodes into a Run.
+
+Workers reuse their processes but deserialize private inputs for every job.
+Cancellation revokes queued jobs; jobs already running finish under Huey's
+signal-based timeout. Exiting the context waits for running jobs and joins the
+workers. Huey does not recover tasks lost after a worker crashes; detected local
+worker exits raise an infrastructure error rather than waiting forever.
+
+Native process workers require POSIX `fork` (Linux/macOS); they do not support
+Windows or provide clean-interpreter isolation from the parent. The whole
+application can still run in Docker. Multi-machine backend configuration is deferred.
 
 Generate policies and persist a research run:
 
@@ -126,7 +168,7 @@ the source layer; dependency installation and scientific checks remain cached
 unless their inputs change.
 
 Configure episode limits with `Executor(concurrency=4, episode_timeout=60)`.
-Each episode gets a fresh child process, and timeouts preserve successful siblings.
+Huey reuses worker processes and applies signal-based whole-task timeouts.
 Generated code shares the application's network, API credentials and mounted
 outputs, including access to its environment and scores. See
 [execution and launcher settings](docs/IN_PROCESS_SANDBOX.md).
@@ -139,7 +181,7 @@ uv pip install --python .venv/bin/python -e '.[dev]'
 ./scripts/run examples.cartpole
 ```
 
-Runtime dependencies are Gymnasium, NumPy, Slick (`slick-ai`), Pydantic, SQLModel, cloudpickle, and Rich.
+Runtime dependencies are Gymnasium, NumPy, Slick (`slick-ai`), Pydantic, SQLModel, cloudpickle, Huey, and Rich.
 
 The application image additionally includes SciPy, python-control (`control`), CVXPY
 with OSQP/Clarabel/SCS, scikit-learn (`sklearn`), and CPU-only PyTorch (`torch`).

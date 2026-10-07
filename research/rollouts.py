@@ -40,7 +40,7 @@ class Rollouts:
                     else:
                         yield policy.id, seed, episode
             requested = {(job.policy.id, job.seed) for job in jobs}
-            async with aclosing(self.executor.execute(jobs)) as results:
+            async with aclosing(self.executor.iterate(jobs)) as results:
                 async for job in results:
                     policy_id, seed, episode = job.policy.id, job.seed, job.result
                     if (policy_id, seed) not in requested:

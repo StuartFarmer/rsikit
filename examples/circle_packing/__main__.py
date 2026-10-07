@@ -18,7 +18,7 @@ async def main():
     policy = PolicyDefinition.from_file(args.program)
     with CirclePackingEnv() as environment:
         async with Executor() as executor:
-            async for job in executor.execute([Job(policy, environment, seed=1, max_steps=1)]):
+            async for job in executor.iterate([Job(policy, environment, seed=1, max_steps=1)]):
                 episode = job.result
                 if episode.error is not None:
                     raise PolicyError(episode.error)

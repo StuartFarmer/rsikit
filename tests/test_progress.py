@@ -1019,21 +1019,21 @@ class RunLoggingTests(unittest.IsolatedAsyncioTestCase):
             tempfile.TemporaryDirectory() as directory,
             gym.make("CartPole-v1") as env,
             patch.object(prompts, "TEMPLATE_ROOT", Path(generation.__file__).parent / "prompts"),
-            recorded_run(
+        ):
+            async with recorded_run(
                 name="generic",
                 path=Path(directory) / "run",
                 environment=env,
                 console=Console(file=io.StringIO()),
-            ),
-        ):
-            provider = ScriptedProvider([program(0), program(0)])
-            first = await generate("test", provider=provider)
-            second = await generate("test", provider=provider)
-            display = _current_run.get()
-            self.assertTrue(display.model.active)
-            self.assertEqual(display.model.completed, 2)
-            self.assertEqual(len(display.model.candidates), 2)
-            self.assertEqual(first.id, second.id)
+            ):
+                provider = ScriptedProvider([program(0), program(0)])
+                first = await generate("test", provider=provider)
+                second = await generate("test", provider=provider)
+                display = _current_run.get()
+                self.assertTrue(display.model.active)
+                self.assertEqual(display.model.completed, 2)
+                self.assertEqual(len(display.model.candidates), 2)
+                self.assertEqual(first.id, second.id)
 
     async def test_paper_resume_replays_history_before_new_proposals(self):
         from research.alphaevolve import paper

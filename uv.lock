@@ -326,6 +326,15 @@ wheels = [
 ]
 
 [[package]]
+name = "huey"
+version = "3.4.0"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/57/25/1281d8f3febc30b5facbfc5e4163447241711591c094dac642d32c827eb0/huey-3.4.0.tar.gz", hash = "sha256:ac9b02e741f13da4092ea19bcaafc73669e97d3153914d2fed2868df144f6dfa", size = 630013, upload-time = "2026-09-04T02:04:34.521Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/57/31/cee585bd4d1e39947a426a6736f4e17d22b454952370fb9cf48eb3103085/huey-3.4.0-py3-none-any.whl", hash = "sha256:d0580762397744026f83baae5f2b97a62474a62b8565ac75bbafefe72f9c784f", size = 136493, upload-time = "2026-09-04T02:04:32.848Z" },
+]
+
+[[package]]
 name = "idna"
 version = "3.20"
 source = { registry = "https://pypi.org/simple" }
@@ -1446,6 +1455,7 @@ source = { editable = "." }
 dependencies = [
     { name = "cloudpickle" },
     { name = "gymnasium" },
+    { name = "huey" },
     { name = "numpy", version = "2.2.6", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.11'" },
     { name = "numpy", version = "2.4.6", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version == '3.11.*'" },
     { name = "numpy", version = "2.5.3", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.12'" },
@@ -1500,6 +1510,7 @@ requires-dist = [
     { name = "gymnasium", specifier = ">=1.3,<2" },
     { name = "gymnasium", extras = ["classic-control"], marker = "extra == 'box2d'", specifier = ">=1.3,<2" },
     { name = "gymnasium", extras = ["classic-control"], marker = "extra == 'video'", specifier = ">=1.3,<2" },
+    { name = "huey", specifier = ">=3.4,<4" },
     { name = "moviepy", marker = "extra == 'video'", specifier = ">=2,<3" },
     { name = "numpy", specifier = ">=1.24,<3" },
     { name = "pettingzoo", marker = "extra == 'ocean'", specifier = ">=1.24,<2" },

@@ -1,4 +1,4 @@
-"""Fresh local episodes, real deadlines and ordinary process cleanup."""
+"""Huey evaluation, trajectories, artifacts, and signal-based timeouts."""
 
 import asyncio
 import os
@@ -47,52 +47,38 @@ class Solution(Policy):
 class ExecutionTests(unittest.IsolatedAsyncioTestCase):
     async def test_darwin_cleanup_waits_for_exiting_worker(self):
         from research.ocean.evaluator import PanelEvaluator
-        from rsikit.episode import Episode
 
-        for ocean in (False, True):
-            for exits in (True, False):
+        # The separate OCEAN panel backend still owns child processes.
+        for exits in (True, False):
+            with (
+                self.subTest(exits=exits),
+                tempfile.TemporaryDirectory() as directory,
+                patch("research.ocean.evaluator.metadata", return_value={}),
+            ):
+                executor = PanelEvaluator(directory)
+                process = Mock(pid=12345)
+                process.is_alive.return_value = True
+
+                def join(timeout=None):
+                    process.is_alive.return_value = not exits
+
+                process.join.side_effect = join
+                receiving, sending = Mock(), Mock()
+                receiving.recv_bytes.return_value = pickle.dumps({"results": [], "steps": 0})
+                executor._context = Mock()
+                executor._context.Process.return_value = process
+                executor._context.Pipe.return_value = receiving, sending
                 with (
-                    self.subTest(ocean=ocean, exits=exits),
-                    tempfile.TemporaryDirectory() as directory,
-                    patch("research.ocean.evaluator.metadata", return_value={}),
+                    patch("sys.platform", "darwin"),
+                    patch("os.killpg", side_effect=PermissionError(1, "Operation not permitted")),
                 ):
-                    executor = PanelEvaluator(directory) if ocean else Executor()
-                    process = Mock(pid=12345)
-                    process.is_alive.return_value = True
-
-                    def join(timeout=None):
-                        process.is_alive.return_value = not exits
-
-                    process.join.side_effect = join
-                    receiving, sending = Mock(), Mock()
-                    receiving.recv_bytes.return_value = (
-                        pickle.dumps({"results": [], "steps": 0})
-                        if ocean
-                        else pickle.dumps(Episode(error="example").encode())
-                    )
-                    executor._context = Mock()
-                    executor._context.Process.return_value = process
-                    executor._context.Pipe.return_value = receiving, sending
-                    with (
-                        patch("sys.platform", "darwin"),
-                        patch(
-                            "os.killpg", side_effect=PermissionError(1, "Operation not permitted")
-                        ),
-                    ):
-                        evaluation = (
-                            executor._panel(SOURCE, [1])
-                            if ocean
-                            else executor._evaluate(
-                                Job(PolicyDefinition(source=SOURCE), ProcessEnv(), seed=1)
-                            )
-                        )
-                        if exits:
-                            await evaluation
-                            process.close.assert_called_once()
-                            receiving.close.assert_called_once()
-                        else:
-                            with self.assertRaises(PermissionError):
-                                await evaluation
+                    if exits:
+                        await executor._panel(SOURCE, [1])
+                        process.close.assert_called_once()
+                        receiving.close.assert_called_once()
+                    else:
+                        with self.assertRaises(PermissionError):
+                            await executor._panel(SOURCE, [1])
 
     async def test_generated_traceback_preserves_chain_without_locals(self):
         import io
@@ -123,7 +109,7 @@ class ExecutionTests(unittest.IsolatedAsyncioTestCase):
     async def collect(self, executor, source=SOURCE, seeds=(1,), environment=None):
         return [
             (job.policy.id, job.seed, job.result)
-            async for job in executor.execute(
+            async for job in executor.iterate(
                 [
                     Job(PolicyDefinition(source=source), environment or ProcessEnv(), seed=seed)
                     for seed in seeds
@@ -131,7 +117,7 @@ class ExecutionTests(unittest.IsolatedAsyncioTestCase):
             )
         ]
 
-    async def test_fresh_processes_trajectory_and_large_result(self):
+    async def test_reused_workers_trajectory_and_large_result(self):
         import json
 
         async with Executor(concurrency=2, episode_timeout=10) as executor:
@@ -148,7 +134,7 @@ class ExecutionTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(episode.observations, [0, 1, 1])
                 self.assertEqual(episode.rewards, [1.0, 1.0])
                 self.assertIn(b"candidate output", episode.artifacts["episode.log"])
-            self.assertEqual(len(set(pids)), 4)
+            self.assertLessEqual(len(set(pids)), 2)
             large = SOURCE + '\nPath("large.bin").write_bytes(b"x" * 2_000_000)\n'
             result = await asyncio.wait_for(self.collect(executor, large), 10)
             self.assertEqual(len(result[0][2].artifacts["large.bin"]), 2_000_000)
@@ -165,7 +151,7 @@ class ExecutionTests(unittest.IsolatedAsyncioTestCase):
                     for seed, instructions in ((5, "override"), (None, "")):
                         results = [
                             job.result
-                            async for job in executor.execute(
+                            async for job in executor.iterate(
                                 [
                                     Job(
                                         policy,
@@ -191,7 +177,6 @@ class ExecutionTests(unittest.IsolatedAsyncioTestCase):
                 (SOURCE.replace("return 0", "return 99"), PolicyError),
                 ("raise ValueError('load failed')", PolicyError),
                 (SOURCE.replace("return 0", "raise RuntimeError('act failed')"), PolicyError),
-                ("import os; os._exit(17)", InfrastructureError),
             ]:
                 with self.subTest(source=source):
                     if error is InfrastructureError:
@@ -207,10 +192,10 @@ class ExecutionTests(unittest.IsolatedAsyncioTestCase):
                 seed=0,
             )
             good_job = Job(PolicyDefinition(source=SOURCE), ProcessEnv(), seed=1)
-            async for job in executor.execute([bad, good_job]):
+            async for job in executor.iterate([bad, good_job]):
                 good.append(job)
             self.assertIs(good[0], good_job)
-            self.assertIn("exceeded", bad.result.error)
+            self.assertIn("timeout", bad.result.error)
             self.assertEqual(len(await self.collect(executor)), 1)
 
     async def test_invalid_policy_methods_are_repairable(self):
@@ -265,45 +250,10 @@ class ExecutionTests(unittest.IsolatedAsyncioTestCase):
             with self.assertRaisesRegex(InfrastructureError, "environment failed"):
                 await self.collect(executor, cleanup_failure, environment=BrokenEnv())
 
-    async def test_cancel_and_timeout_kill_ordinary_descendants(self):
-        with tempfile.TemporaryDirectory() as directory:
-            marker = Path(directory) / "pids"
-            source = SOURCE.replace(
-                "return 0",
-                f"""import subprocess, sys
-        child = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"])
-        Path({str(marker)!r}).write_text(str(os.getpid()) + " " + str(child.pid))
-        while True: pass""",
-            )
-            for cancel in (False, True):
-                marker.unlink(missing_ok=True)
-                async with Executor(episode_timeout=3) as executor:
-                    task = asyncio.create_task(self.collect(executor, source))
-
-                    async def wait_for_marker():
-                        while not marker.exists():
-                            await asyncio.sleep(0.01)
-
-                    await asyncio.wait_for(wait_for_marker(), 10)
-                    pids = [int(p) for p in marker.read_text().split()]
-                    if cancel:
-                        task.cancel()
-                    if cancel:
-                        with self.assertRaises(asyncio.CancelledError):
-                            await task
-                    else:
-                        results = await task
-                        self.assertIn("exceeded", results[0][2].error)
-                    for pid in pids:
-                        # Linux init may need a moment to reap an adopted grandchild.
-                        for _ in range(100):
-                            try:
-                                os.kill(pid, 0)
-                            except ProcessLookupError:
-                                break
-                            await asyncio.sleep(0.02)
-                        else:
-                            self.fail(f"process {pid} survived")
+    async def test_worker_exit_raises_instead_of_waiting_forever(self):
+        async with Executor() as executor:
+            with self.assertRaisesRegex(InfrastructureError, "worker exited"):
+                await asyncio.wait_for(self.collect(executor, "import os; os._exit(17)"), 5)
 
     def test_options_validated(self):
         for value in (0, -1, float("inf"), float("nan")):

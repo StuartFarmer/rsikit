@@ -144,7 +144,7 @@ reset or prove freshness first. Worker cleanup closes only the copies. Direct
 `evaluate()` uses the actual instances and leaves cleanup to the caller.
 
 Keep inputs unchanged while execution is in progress: each snapshot is taken when
-a worker slot opens. Locally defined classes and wrappers are supported by
+the job is enqueued in Huey. Locally defined classes and wrappers are supported by
 cloudpickle, but live connections, event loops or native resources may not be
 serializable. If interactive use retained such resources, supply fresh instances
 or implement serialization for those types. Execution never silently falls back
@@ -163,13 +163,52 @@ from contextlib import aclosing
 from rsikit import Executor
 
 async with Executor(concurrency=8, episode_timeout=60) as executor:
-    async with aclosing(executor.execute(jobs)) as results:
+    async with aclosing(executor.iterate(jobs)) as results:
         async for job in results:
             persist(job)  # Your storage callback; job.result is an Episode.
 ```
 
-Use new jobs for this example. `aclosing()` ensures early exits cancel and reap
-outstanding workers. An Executor shares its concurrency limit across submissions.
+Use new jobs for this example. `await executor.execute(jobs)` collects the same
+stream into a list. `aclosing()` revokes outstanding queued jobs on early exit;
+already-running jobs continue. An Executor shares its concurrency limit across
+submissions and reuses Huey process workers. Closing it waits for running work.
+
+The context is required even for empty submissions. Each Executor has one context
+lifetime; create a new instance after exit. The standalone `execute()` helper
+opens its own context. Concurrent batches are allowed while it is open, but the
+caller must finish or cancel and await their tasks before exiting:
+
+```python
+import asyncio
+
+async with Executor(concurrency=4) as executor:
+    batch = asyncio.create_task(executor.execute(jobs))
+    try:
+        await generate_more_policies()
+        completed = await batch
+    finally:
+        batch.cancel()
+        await asyncio.gather(batch, return_exceptions=True)
+```
+
+Each batch uses one nonblocking result loop. Short SQLite operations run in
+asyncio's thread pool; the thread never waits for a whole evaluation. An unfinished
+sweep sleeps for 10 ms, letting other coroutines run. Results are yielded as
+readiness is observed, with no ordering guarantee between results ready in the
+same sweep.
+
+The SQLite queue is temporary by default. Pass `database="evaluations.sqlite"`
+to retain pending tasks and results, with queue name `evaluations` and
+`fsync=True` handled internally. `job.task_id` identifies the stored result.
+Pending jobs can run when a new executor opens the database, but this does not
+reconstruct original Job objects or write Run episodes automatically. Huey does
+not recover tasks already taken by a worker that crashes; a detected local worker
+exit raises InfrastructureError. Create a new Executor before submitting new work.
+
+Huey process workers use POSIX fork. Each task gets private policy/environment
+copies and a temporary working directory, but process globals can persist between
+tasks. Timeouts use Huey's SIGALRM handler, not parent-enforced process killing.
+Running cancellation and descendant-process termination are not provided.
 
 ## Generated programs
 

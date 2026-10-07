@@ -15,6 +15,7 @@ dependencies = [
     "pydantic>=2,<3",
     "sqlmodel>=0.0.24,<0.1",
     "cloudpickle>=3.1,<4",
+    "huey>=3.4,<4",
     "rich>=13,<16",
     "PyYAML>=6,<7",
 ]

@@ -434,7 +434,7 @@ async def export(
                 for pid, source, seed in jobs
             }
             completed = 0
-            async for job in executor.execute(identities):
+            async for job in executor.iterate(identities):
                 pid, seed, result = identities[job], job.seed, job.result
                 if result.error is not None:
                     raise PolicyError(result.error)
