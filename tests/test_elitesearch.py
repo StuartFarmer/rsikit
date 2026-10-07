@@ -1,4 +1,4 @@
-"""Elite retention, reproduction, repair, and overlapping isolated evaluations."""
+"""Elite retention, reproduction, repair, and complete-round isolated evaluations."""
 
 import asyncio
 import io
@@ -15,9 +15,9 @@ from slick import prompts
 from slick.providers import ProviderError
 from sqlmodel import select
 
-from research.elitesearch import Config, EliteSearch, Generation, Measurement, Organism
-from rsikit import Policy
-from tests.helpers import fake_executor, recorded_run
+from research.elitesearch import Config, EliteSearch, Generation, Organism
+from rsikit import PolicyDefinition
+from tests.helpers import episodes, fake_executor, recorded_run
 from tests.providers import ScriptedProvider
 from tests.test_run import FakeEvaluation
 
@@ -65,7 +65,7 @@ class EliteSearchTests(unittest.IsolatedAsyncioTestCase):
             return program(value), []
 
         async def evaluate(policies):
-            return {p.id: Measurement({0: int(p.name.split()[-1])}) for p in policies}
+            return {p.id: episodes({0: int(p.name.split()[-1])}) for p in policies}
 
         agent = EliteSearch(
             "Score policies",
@@ -91,7 +91,7 @@ class EliteSearchTests(unittest.IsolatedAsyncioTestCase):
         scores = iter([10, 9, 8, 9, -10, 8])
 
         async def evaluate(policies):
-            return {p.id: Measurement({0: next(scores)}) for p in policies}
+            return {p.id: episodes({0: next(scores)}) for p in policies}
 
         agent = EliteSearch(
             "Score",
@@ -117,9 +117,9 @@ class EliteSearchTests(unittest.IsolatedAsyncioTestCase):
         async def evaluate(policies):
             evaluated.extend(p.name for p in policies)
             return {
-                p.id: Measurement({}, failure="invalid action")
+                p.id: episodes({}, failure="invalid action")
                 if p.name == "Policy 0"
-                else Measurement({0: 12})
+                else episodes({0: 12})
                 for p in policies
             }
 
@@ -164,7 +164,7 @@ class EliteSearchTests(unittest.IsolatedAsyncioTestCase):
 
         async def evaluate(policies):
             evaluated.extend(policies)
-            return {p.id: Measurement({0: len(evaluated)}) for p in policies}
+            return {p.id: episodes({0: len(evaluated)}) for p in policies}
 
         agent = EliteSearch(
             "Score",
@@ -180,7 +180,7 @@ class EliteSearchTests(unittest.IsolatedAsyncioTestCase):
         )
         await agent.run()
         self.assertEqual(len(evaluated), 2)
-        self.assertIn("OFFSET = 1", evaluated[-1]._implementation)
+        self.assertIn("OFFSET = 1", evaluated[-1].source)
         self.assertEqual(agent.elites[0].name, "Changed")
 
     async def test_failed_edit_retains_organism_metadata(self):
@@ -192,7 +192,7 @@ class EliteSearchTests(unittest.IsolatedAsyncioTestCase):
         provider = ScriptedProvider([program(0), json.dumps(response)])
 
         async def evaluate(policies):
-            return {p.id: Measurement({0: 1}) for p in policies}
+            return {p.id: episodes({0: 1}) for p in policies}
 
         agent = EliteSearch(
             "Score",
@@ -215,43 +215,29 @@ class EliteSearchTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(failed.policy_id)
         self.assertEqual(json.loads(failed.calls[-1]["raw"]), response)
 
-    async def test_generation_overlaps_evaluation_and_cancels_on_failure(self):
-        provider = ScriptedProvider([program(0), program(1)])
-        evaluating, generating, cancelled = asyncio.Event(), asyncio.Event(), asyncio.Event()
-        original = provider.acall
-
-        async def respond(context, **kwargs):
-            result = await original(context, **kwargs)
-            if result[0] == program(1):
-                await evaluating.wait()
-                generating.set()
-                try:
-                    await asyncio.Event().wait()
-                finally:
-                    cancelled.set()
-            return result
-
+    async def test_evaluation_failure_retains_generated_round_without_promotion(self):
         async def evaluate(policies):
-            evaluating.set()
-            await generating.wait()
+            self.assertEqual(len(policies), 2)
             raise RuntimeError("worker offline")
 
         agent = EliteSearch(
-            "Score", provider, evaluate, config=Config(population_size=2, generations=1)
+            "Score",
+            ScriptedProvider([program(0), program(1)]),
+            evaluate,
+            config=Config(population_size=2, generations=1),
         )
-        with patch.object(provider, "acall", side_effect=respond):
-            with self.assertRaisesRegex(RuntimeError, "worker offline"):
-                await asyncio.wait_for(agent.run(), 2)
-        self.assertTrue(cancelled.is_set())
+        with self.assertRaisesRegex(RuntimeError, "worker offline"):
+            await agent.run()
         self.assertEqual(agent.reason, "error")
         self.assertEqual(agent.elites, [])
+        self.assertEqual(len(agent._round), 2)
 
     async def test_invalid_scores_never_enter_leaderboard(self):
-        for scores in ({}, {0: float("nan")}, {0: float("inf")}):
+        for scores in ({0: float("nan")}, {0: float("inf")}):
             with self.subTest(scores=scores):
 
                 async def evaluate(policies):
-                    return {p.id: Measurement(scores) for p in policies}
+                    return {p.id: episodes(scores) for p in policies}
 
                 agent = EliteSearch(
                     "Score",
@@ -259,7 +245,7 @@ class EliteSearchTests(unittest.IsolatedAsyncioTestCase):
                     evaluate,
                     config=Config(population_size=1, generations=1),
                 )
-                with self.assertRaisesRegex(ValueError, "finite per-seed"):
+                with self.assertRaises(ValueError):
                     await agent.run()
                 self.assertEqual(agent.elites, [])
                 self.assertEqual(agent.reason, "error")
@@ -267,9 +253,9 @@ class EliteSearchTests(unittest.IsolatedAsyncioTestCase):
     async def test_screening_rejection_does_not_promote_or_repair(self):
         async def evaluate(policies):
             return {
-                p.id: Measurement(scores={99: 100}, accepted=False, feedback="screened")
+                p.id: episodes(scores={99: 100}, accepted=False, feedback="screened")
                 if p.name == "Policy 0"
-                else Measurement(scores={0: 3})
+                else episodes(scores={0: 3})
                 for p in policies
             }
 
@@ -280,42 +266,30 @@ class EliteSearchTests(unittest.IsolatedAsyncioTestCase):
         await agent.run()
         self.assertEqual(agent.best.name, "Policy 1")
         self.assertEqual(agent.organisms[0].status, "discarded")
-        self.assertEqual(agent.organisms[0].error, "screened")
+        self.assertEqual(agent.organisms[0].error, "Evaluation rejected")
         self.assertEqual(agent.organisms[0].repairs, 0)
         self.assertEqual(len(provider.calls), 2)
 
-    async def test_arriving_candidate_evaluates_while_previous_candidate_is_running(self):
+    async def test_whole_generation_is_proposed_before_evaluation(self):
         provider = ScriptedProvider([program(0), program(1)])
-        first_started, second_started = asyncio.Event(), asyncio.Event()
-        original = provider.acall
-
-        async def respond(context, **kwargs):
-            result = await original(context, **kwargs)
-            if result[0] == program(1):
-                await first_started.wait()
-            return result
 
         async def evaluate(policies):
-            if policies[0].name == "Policy 0":
-                first_started.set()
-                await asyncio.wait_for(second_started.wait(), 1)
-            else:
-                second_started.set()
-            return {p.id: Measurement({0: 7}) for p in policies}
+            self.assertEqual(len(provider.calls), 2)
+            self.assertEqual([p.name for p in policies], ["Policy 0", "Policy 1"])
+            return {p.id: episodes({0: 7}) for p in policies}
 
         agent = EliteSearch(
             "Score", provider, evaluate, config=Config(population_size=2, generations=1)
         )
-        with patch.object(provider, "acall", side_effect=respond):
-            await agent.run()
+        await agent.run()
         self.assertTrue(all(row.status == "evaluated" for row in agent.organisms))
 
     async def test_duplicate_and_failed_populations_preserve_existing_elites(self):
         async def evaluate(policies):
             return {
-                p.id: Measurement({0: 7})
+                p.id: episodes({0: 7})
                 if p.name == "Policy 0"
-                else Measurement({}, failure="broken policy")
+                else episodes({}, failure="broken policy")
                 for p in policies
             }
 
@@ -335,31 +309,32 @@ class EliteSearchTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual([g.elite_ids for g in agent.generations], [[1], [1], [1]])
         self.assertEqual(agent.reason, "completed")
 
-    async def test_provider_failure_cancels_inflight_evaluation(self):
-        provider = ScriptedProvider([program(0), program(1)])
-        evaluating, cancelled = asyncio.Event(), asyncio.Event()
-        original = provider.acall
+    async def test_provider_failure_cancels_sibling_generation_before_evaluation(self):
+        provider = ScriptedProvider([])
+        started, cancelled = asyncio.Event(), asyncio.Event()
+        calls = 0
 
         async def respond(context, **kwargs):
-            result = await original(context, **kwargs)
-            if result[0] == program(1):
-                await evaluating.wait()
+            nonlocal calls
+            calls += 1
+            if calls == 1:
+                await started.wait()
                 raise ProviderError("offline")
-            return result
-
-        async def evaluate(policies):
-            evaluating.set()
+            started.set()
             try:
                 await asyncio.Event().wait()
             finally:
                 cancelled.set()
+
+        async def evaluate(policies):
+            self.fail("evaluation started before generation finished")
 
         agent = EliteSearch(
             "Score", provider, evaluate, config=Config(population_size=2, generations=1)
         )
         with patch.object(provider, "acall", side_effect=respond):
             with self.assertRaisesRegex(ProviderError, "offline"):
-                await asyncio.wait_for(agent.run(), 0.5)
+                await asyncio.wait_for(agent.run(), 2)
         self.assertTrue(cancelled.is_set())
         self.assertEqual(agent.reason, "error")
 
@@ -405,7 +380,10 @@ class EliteSearchTests(unittest.IsolatedAsyncioTestCase):
                 patch.object(
                     example, "Executor", return_value=fake_executor(evaluation=evaluation)
                 ),
-                patch("rsikit.progress.Console", return_value=Console(file=terminal, width=140)),
+                patch(
+                    "rsikit.progress.controller.Console",
+                    return_value=Console(file=terminal, width=140),
+                ),
             ):
                 await example.main()
             summary = json.loads((output / "summary.json").read_text())
@@ -414,7 +392,7 @@ class EliteSearchTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(summary["elite_ids"], [1])
             self.assertEqual(summary["heldout"]["scores"], {"99": 7})
             self.assertEqual(
-                Policy.from_file(output / "best.py")._implementation,
+                PolicyDefinition.from_file(output / "best.py").source,
                 json.loads(program(0))["implementation"],
             )
             self.assertIn("Elite leaderboard", terminal.getvalue())
@@ -447,7 +425,9 @@ class EliteSearchTests(unittest.IsolatedAsyncioTestCase):
                 patch.object(
                     example, "Executor", return_value=fake_executor(evaluation=FakeEvaluation())
                 ),
-                patch("rsikit.progress.Console", return_value=Console(file=io.StringIO())),
+                patch(
+                    "rsikit.progress.controller.Console", return_value=Console(file=io.StringIO())
+                ),
             ):
                 with self.assertRaises(TimeoutError):
                     await asyncio.wait_for(

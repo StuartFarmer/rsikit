@@ -1,30 +1,30 @@
-"""Optional Pillow charts; visual history never enters policy observations."""
+"""SVG performance charts; visual history never enters policy observations."""
 
 from datetime import date
-from functools import lru_cache
 
 import gymnasium as gym
-import numpy as np
-from PIL import Image, ImageDraw, ImageFont
 
-INK, MUTED = "#1f2933", "#52616b"
-GREEN, RED, BLUE, GOLD = "#18705b", "#b44949", "#284b63", "#a87014"
-
-
-@lru_cache(maxsize=12)
-def _font(size):
-    return ImageFont.load_default(size=size)
+from .render_theme import BLUE, FPS, GOLD, GREEN, GRID, MUTED, RED, RULE
+from .svg_frame import SvgFrame, rasterize
 
 
 class BitcoinRenderer(gym.Wrapper):
     """Price/fills, fee-adjusted equity, allocation and peak-to-trough drawdown."""
 
     render_mode = "rgb_array"
-    metadata = {"render_modes": ["rgb_array"], "render_fps": 30}
+    metadata = {"render_modes": ["rgb_array"], "render_fps": FPS}
+    title = "Bitcoin"
+    price_label = "BTC / USD"
+    allocation_label = "BTC"
+    currency = "USD"
+    currency_symbol = "$"
+    step_label = "day"
+    value_key = "usd"
 
-    def __init__(self, env, *, policy_name="Baseline agent", split="training"):
+    def __init__(self, env, *, policy_name="Baseline agent", split="training", policy_id=""):
         super().__init__(env)
         self.policy_name, self.split = policy_name, split
+        self.policy_id = policy_id
         self.history, self.trades = [], []
         self.seed = None
 
@@ -36,11 +36,14 @@ class BitcoinRenderer(gym.Wrapper):
         self.history = [self._point(observation, 0.0, self._peak)]
         return observation, info
 
+    def _date_label(self, observation):
+        return date.fromordinal(int(observation[4])).isoformat()
+
     def _point(self, observation, fees, buy_hold):
         equity = self.unwrapped._wealth
         self._peak = max(self._peak, equity)
         return dict(
-            date=date.fromordinal(int(observation[4])).isoformat(),
+            date=self._date_label(observation),
             price=float(observation[0]),
             equity=equity,
             fees=fees,
@@ -53,25 +56,26 @@ class BitcoinRenderer(gym.Wrapper):
         result = self.env.step(action)
         observation, _, done, _, info = result
         index = len(self.history) - 1
-        if info["trade_usd"]:
-            self.trades.append(
-                dict(
-                    index=index,
-                    price=self.history[-1]["price"],
-                    usd=info["trade_usd"],
-                    kind="buy" if info["trade_usd"] > 0 else "sell",
-                )
-            )
-        if info["liquidation_usd"]:
-            self.trades.append(
-                dict(
-                    index=index + 1,
-                    price=float(observation[0]),
-                    usd=-info["liquidation_usd"],
-                    kind="liquidation",
-                )
-            )
         game = self.unwrapped
+        trade, liquidation = info[game._trade_key], info[game._liquidation_key]
+        if trade:
+            self.trades.append(
+                {
+                    "index": index,
+                    "price": self.history[-1]["price"],
+                    self.value_key: trade,
+                    "kind": "buy" if trade > 0 else "sell",
+                }
+            )
+        if liquidation:
+            self.trades.append(
+                {
+                    "index": index + 1,
+                    "price": float(observation[0]),
+                    self.value_key: -liquidation,
+                    "kind": "liquidation",
+                }
+            )
         buy_hold = (
             game.initial_cash / (1 + game.fee_rate) * observation[0] / self.history[0]["price"]
         )
@@ -81,55 +85,49 @@ class BitcoinRenderer(gym.Wrapper):
         return result
 
     def render(self):
+        return rasterize(self.render_svg(embed_fonts=False))
+
+    def render_svg(self, *, embed_fonts=True):
+        """Return the source SVG, with selectable text and vector curves/fills."""
         if not self.history:
             raise RuntimeError("Call reset() before rendering")
-        image = Image.new("RGB", (1280, 720), "#fafaf8")
-        draw = ImageDraw.Draw(image)
+        frame = SvgFrame(f"{self.title} policy performance")
+        text = frame.text
         current = self.history[-1]
         initial = self.unwrapped.initial_cash
         profit = current["equity"] - initial
-
-        def text(x, y, value, size=13, color=INK, anchor="lt"):
-            draw.text((x, y), str(value), font=_font(size), fill=color, anchor=anchor)
-
-        text(28, 20, "BITCOIN / POLICY PERFORMANCE", 25)
-        text(
-            28,
-            54,
-            f"{self.policy_name[:72]}  /  {self.split.upper()}  /  seed {self.seed}",
-            color=MUTED,
+        identity = f"   /   policy {self.policy_id[:12]}" if self.policy_id else ""
+        frame.header(
+            f"{self.title} / policy performance",
+            self.policy_name,
+            f"{self.split.upper()}   /   seed {self.seed}   /   {self.step_label} {len(self.history) - 1}"
+            f"   /   {self.history[0]['date']} to {current['date']}{identity}",
+            f"{self.currency_symbol}{current['equity']:,.2f}",
+            f"Net {profit:+,.2f} {self.currency}  /  {profit / initial:+.2%}",
+            GREEN if profit >= 0 else RED,
         )
-        text(1250, 20, f"${current['equity']:,.2f}", 27, GREEN if profit >= 0 else RED, "rt")
+        max_drawdown = max(p["drawdown"] for p in self.history)
+        text(32, 136, self.price_label, 20, face="serif", max_width=450)
         text(
-            1250,
-            54,
-            f"Net {profit:+,.2f} USD  /  {profit / initial:+.2%}",
-            color=MUTED,
-            anchor="rt",
+            1248,
+            140,
+            f"Fees {self.currency_symbol}{current['fees']:,.2f}   /   {len(self.trades)} fills   /   Max drawdown {max_drawdown:.2%}",
+            16,
+            MUTED,
+            "rt",
+            max_width=735,
         )
-        draw.line((28, 79, 1252, 79), fill="#cad3d5")
-        text(
-            28,
-            94,
-            f"{self.history[0]['date']} to {current['date']}  /  day {len(self.history) - 1}",
-        )
-        text(500, 94, f"Fees ${current['fees']:,.2f}  /  {len(self.trades)} fills")
-        text(900, 94, f"Max drawdown {max(p['drawdown'] for p in self.history):.2%}")
-        text(28, 127, "BTC / USD", 15)
-        draw.polygon([(555, 126), (550, 137), (560, 137)], fill=GREEN)
-        text(569, 127, "BUY", color=GREEN)
-        draw.polygon([(665, 138), (660, 127), (670, 127)], fill=RED)
-        text(679, 127, "SELL", color=RED)
-        draw.polygon([(785, 126), (791, 132), (785, 138), (779, 132)], fill=RED)
-        text(799, 127, "FINAL LIQUIDATION", color=RED)
-        text(28, 320, "EQUITY / USD", 15)
-        text(550, 320, "Policy", color=BLUE)
-        text(660, 320, "Buy & hold (same fees)", color=GOLD)
-        text(940, 320, "Starting cash", color=MUTED)
-        text(28, 517, "BTC ALLOCATION / %", 14, BLUE)
-        text(735, 517, "DRAWDOWN / % BELOW PEAK", 14, RED)
+        text(32, 348, f"Equity / {self.currency}", 20, face="serif", max_width=440)
+        frame.line([(538, 359), (570, 359)], BLUE, 2)
+        text(580, 351, "Policy", 16, BLUE)
+        frame.line([(676, 359), (708, 359)], GOLD, 2, dash="8 5")
+        text(718, 351, "Buy & hold (same fees)", 16, GOLD)
+        frame.line([(1010, 359), (1042, 359)], MUTED, 1, dash="3 5")
+        text(1052, 351, "Starting cash", 16, MUTED)
+        text(32, 528, f"{self.allocation_label} allocation / %", 20, face="serif", max_width=600)
+        text(718, 528, "Drawdown / % below peak", 20, face="serif")
 
-        def chart(keys, colors, bounds, *, limits=None, cash=False):
+        def chart(keys, colors, bounds, *, limits=None, cash=False, date_y=None):
             left, top, right, bottom = bounds
             values = [p[k] for p in self.history for k in keys]
             low, high = limits or (
@@ -147,49 +145,78 @@ class BitcoinRenderer(gym.Wrapper):
 
             for i in range(3):
                 value = low + (high - low) * i / 2
-                y = xy(0, value)[1]
-                draw.line((left, y, right, y), fill="#e1e6e8")
-                label = f"{value:.0%}" if limits else f"{value:,.0f}"
-                text(left - 10, y, label, 12, MUTED, "rm")
+                py = xy(0, value)[1]
+                frame.line([(left, py), (right, py)], GRID)
+                label = f"{value:.0%}" if limits else self._value_label(value)
+                text(
+                    left - 12,
+                    py,
+                    label,
+                    15,
+                    MUTED,
+                    "rm",
+                    max_width=left - (650 if left > 650 else 12),
+                )
             if cash:
-                y = xy(0, initial)[1]
-                draw.line((left, y, right, y), fill="#a6b8b1", width=2)
+                py = xy(0, initial)[1]
+                frame.line([(left, py), (right, py)], MUTED, dash="3 5")
             for key, color in zip(keys, colors):
                 points = [xy(i, p[key]) for i, p in enumerate(self.history)]
                 if len(points) > 1:
-                    draw.line(points, fill=color, width=2)
+                    frame.line(
+                        points,
+                        color,
+                        2,
+                        dash="8 5" if key == "buy_hold" else None,
+                        id=key.replace("_", "-"),
+                    )
                 x, y = points[-1]
-                draw.ellipse((x - 3, y - 3, x + 3, y + 3), fill=color)
-            for i in dict.fromkeys((0, (len(self.history) - 1) // 2, len(self.history) - 1)):
-                text(xy(i, low)[0], bottom + 8, self.history[i]["date"], 12, MUTED, "mt")
+                frame.circle(x, y, 3, color, id=f"{key}-current")
+            indices = dict.fromkeys((0, (len(self.history) - 1) // 2, len(self.history) - 1))
+            for i in indices:
+                anchor = "lt" if i == 0 else "rt" if i == len(self.history) - 1 else "mt"
+                text(
+                    xy(i, low)[0],
+                    date_y or bottom + 12,
+                    self.history[i]["date"],
+                    14,
+                    MUTED,
+                    anchor,
+                    max_width=(right - left) / 3 - 12,
+                )
             return xy
 
-        xy = chart(["price"], [BLUE], (108, 159, 1224, 280))
-        for trade in self.trades:
-            x, y = xy(trade["index"], trade["price"])
-            if trade["kind"] == "liquidation":
-                points = [(x, y - 6), (x + 6, y), (x, y + 6), (x - 6, y)]
-            else:
-                direction = 1 if trade["kind"] == "buy" else -1
-                points = [
-                    (x, y - 6 * direction),
-                    (x - 5, y + 5 * direction),
-                    (x + 5, y + 5 * direction),
-                ]
-            draw.polygon(points, fill=GREEN if trade["kind"] == "buy" else RED)
-        chart(["buy_hold", "equity"], [GOLD, BLUE], (108, 355, 1224, 476), cash=True)
-        chart(["allocation"], [BLUE], (108, 550, 585, 654), limits=(0, 1))
-        chart(
-            ["drawdown"],
-            [RED],
-            (750, 550, 1224, 654),
-            limits=(0, max(0.01, max(p["drawdown"] for p in self.history))),
-        )
+        with frame.group("price-panel"):
+            xy = chart(["price"], [BLUE], (106, 181, 1224, 254), date_y=316)
+        # All fills stay aligned with price/time, without obscuring the price curve.
+        with frame.group("fills"):
+            text(32, 281, "Fills", 15, MUTED)
+            frame.line([(106, 293), (1224, 293)], RULE)
+            for i, trade in enumerate(self.trades):
+                x, _ = xy(trade["index"], trade["price"])
+                if trade["kind"] == "liquidation":
+                    frame.polygon(
+                        [(x, 295), (x + 5, 300), (x, 305), (x - 5, 300)], RED, id=f"fill-{i}"
+                    )
+                elif trade["kind"] == "buy":
+                    frame.polygon([(x, 278), (x - 4, 286), (x + 4, 286)], GREEN, id=f"fill-{i}")
+                else:
+                    frame.polygon([(x, 305), (x - 4, 297), (x + 4, 297)], RED, id=f"fill-{i}")
+        with frame.group("equity-panel"):
+            chart(["buy_hold", "equity"], [GOLD, BLUE], (106, 389, 1224, 474), cash=True)
+        with frame.group("allocation-panel"):
+            chart(["allocation"], [BLUE], (106, 569, 595, 646), limits=(0, 1))
+        with frame.group("drawdown-panel"):
+            chart(["drawdown"], [RED], (768, 569, 1224, 646), limits=(0, max(0.01, max_drawdown)))
         text(
-            28,
-            695,
-            "Fresh cash and policy state per seed. Seeds change policy randomness; dates determine the market sample.",
-            12,
+            32,
+            697,
+            "Fresh cash per seed; seeds change policy randomness, not the market sample.",
+            14,
             MUTED,
         )
-        return np.asarray(image).copy()
+        text(1248, 697, "Fills: up = buy / down = sell / diamond = liquidation", 14, MUTED, "rt")
+        return frame.svg(embed_fonts=embed_fonts)
+
+    def _value_label(self, value):
+        return f"{value:,.0f}"

@@ -9,18 +9,19 @@ import logging
 import math
 import random
 from collections.abc import Awaitable, Callable, Sequence
-from dataclasses import dataclass
 from statistics import fmean
 
-from pydantic import ValidationError
+from pydantic import ConfigDict, Field, ValidationError, model_validator
+from pydantic.dataclasses import dataclass
 from rich.table import Column
 from slick import parse, render
 from slick.providers import Provider
 
-from research.rewards import Measurement
-from rsikit import Policy
+from research.rewards import episode_error, episode_scores
+from rsikit import Episode, PolicyDefinition, search
 from rsikit.generation import WORKER_LIBRARIES
-from rsikit.policy import InvalidPolicy, validate_policy
+from rsikit.optimization import validate_results
+from rsikit.policy import InvalidPolicy
 
 from .generation import (
     InvalidCandidate,
@@ -35,18 +36,24 @@ from .records import Generation, Organism
 logger = logging.getLogger(__name__)
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, config=ConfigDict(strict=True, extra="forbid", allow_inf_nan=False))
 class Config:
-    elite_size: int = 10
-    population_size: int = 50
-    generations: int = 20
-    new_fraction: float = 0.2
-    remix_fraction: float = 0.4
-    remix_parents: int = 3
-    generation_concurrency: int = 100
-    generation_timeout: float = 120
-    max_repairs: int = 2
+    elite_size: int = Field(default=10, ge=1)
+    population_size: int = Field(default=50, ge=1)
+    generations: int = Field(default=20, ge=0)
+    new_fraction: float = Field(default=0.2, ge=0, le=1)
+    remix_fraction: float = Field(default=0.4, ge=0, le=1)
+    remix_parents: int = Field(default=3, ge=2)
+    generation_concurrency: int = Field(default=100, ge=1)
+    generation_timeout: float = Field(default=120, gt=0)
+    max_repairs: int = Field(default=2, ge=0)
     target_score: float | None = None
+
+    @model_validator(mode="after")
+    def valid_fractions(self):
+        if self.new_fraction + self.remix_fraction > 1:
+            raise ValueError("new_fraction + remix_fraction must not exceed 1")
+        return self
 
 
 class EliteSearch:
@@ -60,6 +67,7 @@ class EliteSearch:
     """
 
     leaderboard_columns = {"operation": Column("Operation"), "parents": Column("Parents")}
+    optimizer_name = "EliteSearch"
 
     def _log_candidate(self, row, *, restored=False):
         status = {"rejected": "repairing", "execution_failed": "repairing", "error": "failed"}.get(
@@ -119,15 +127,14 @@ class EliteSearch:
         self,
         task: str,
         provider: Provider,
-        evaluate: Callable[[Sequence[type[Policy]]], Awaitable[dict[str, Measurement]]],
+        evaluate: Callable[[Sequence[PolicyDefinition]], Awaitable[dict[str, dict[int, Episode]]]]
+        | None = None,
         *,
         context: str = "",
         config: Config = Config(),
         seed: int = 0,
         on_checkpoint: Callable[[EliteSearch], None] | None = None,
     ):
-        if config.target_score is not None and not math.isfinite(config.target_score):
-            raise ValueError("target_score must be finite")
         self.healer = SelfHealer(task, provider, context=context, libraries=self.libraries)
         self.task, self.context, self.provider = task, context, provider
         self.evaluate, self.config, self.on_checkpoint = evaluate, config, on_checkpoint
@@ -136,13 +143,15 @@ class EliteSearch:
         self.organisms: list[Organism] = []
         self.generations: list[Generation] = []
         self.reason = "ready"
-        self._policies: dict[int, type[Policy]] = {}
+        self._round = {}
+        self._proposing = False
+        self._policies: dict[int, PolicyDefinition] = {}
         self._sources: set[str] = set()
         self._seed_panel: set[int] | None = None
         self._call_slots = asyncio.Semaphore(config.generation_concurrency)
 
     @property
-    def best(self) -> type[Policy] | None:
+    def best(self) -> PolicyDefinition | None:
         return self._policies[self.elites[0].id] if self.elites else None
 
     def records(self):
@@ -189,7 +198,7 @@ class EliteSearch:
                         raise ValueError("Invalid checkpoint scores")
                     self._seed_panel = panel
                 if row.policy_id is not None:
-                    policy = Policy.from_text(
+                    policy = PolicyDefinition.from_text(
                         row.implementation, name=row.name, description=row.description
                     )
                     if policy.id != row.policy_id:
@@ -202,7 +211,7 @@ class EliteSearch:
                     if revision.get("policy_id") is not None
                 )
                 for implementation in implementations:
-                    validate_policy(Policy.from_text(implementation))
+                    PolicyDefinition.from_text(implementation).validate()
                     self._sources.add(ast.dump(ast.parse(implementation), include_attributes=False))
             if generation.status == "completed":
                 ranked = self._rank(rows)
@@ -223,7 +232,7 @@ class EliteSearch:
 
     async def invent(
         self, proposal: int, elites: list[Organism], *, provider, record=None
-    ) -> type[Policy]:
+    ) -> PolicyDefinition:
         schema = _PolicyResponse.model_json_schema()
         context = render(
             "new.j2",
@@ -238,7 +247,7 @@ class EliteSearch:
             record["raw"] = raw
         return parse(raw, _PolicyResponse).to_policy()
 
-    async def edit(self, parent: Organism, *, provider, record=None) -> type[Policy]:
+    async def edit(self, parent: Organism, *, provider, record=None) -> PolicyDefinition:
         schema = Mutation.model_json_schema()
         context = render(
             "edit.j2",
@@ -253,13 +262,13 @@ class EliteSearch:
         mutation = parse(raw, Mutation)
         if record is not None:
             record.update(name=mutation.name, description=mutation.description)
-        return Policy.from_text(
+        return PolicyDefinition.from_text(
             apply_edits(parent.implementation, mutation.edits),
             name=mutation.name,
             description=mutation.description,
         )
 
-    async def remix(self, parents: list[Organism], *, provider, record=None) -> type[Policy]:
+    async def remix(self, parents: list[Organism], *, provider, record=None) -> PolicyDefinition:
         schema = _PolicyResponse.model_json_schema()
         context = render(
             "remix.j2",
@@ -368,8 +377,8 @@ class EliteSearch:
             try:
                 proposal = await self._call(row, operation, *args)
                 row.name, row.description = proposal.name, proposal.description
-                row.implementation = proposal._implementation
-                validate_policy(proposal)
+                row.implementation = proposal.source
+                proposal.validate()
                 if reference:
                     check_rewrite(reference, row.implementation)
                 key = ast.dump(ast.parse(row.implementation), include_attributes=False)
@@ -397,56 +406,7 @@ class EliteSearch:
                 row.error = f"{type(exc).__name__}: {exc}"
                 raise
 
-    async def _measure(self, rows):
-        while rows:
-            for row in rows:
-                row.status = "evaluating"
-                self._log_candidate(row)
-            self._checkpoint()
-            results = await self.evaluate([self._policies[row.id] for row in rows])
-            if set(results) != {row.policy_id for row in rows}:
-                raise ValueError("Evaluator must return exactly the requested policy IDs")
-            panel = self._seed_panel
-            for result in results.values():
-                if not result.accepted:
-                    continue
-                if not result.scores or any(not math.isfinite(v) for v in result.scores.values()):
-                    raise ValueError("Measurements must contain finite per-seed scores")
-                if panel is not None and set(result.scores) != panel:
-                    raise ValueError("All candidates must use the same seed panel")
-                panel = set(result.scores)
-            self._seed_panel = panel
-            failed = []
-            for row in rows:
-                result = results[row.policy_id]
-                if result.failure is not None:
-                    row.status, row.error = "execution_failed", result.failure
-                    failed.append(row)
-                elif not result.accepted:
-                    row.status, row.error = "discarded", result.feedback or "Evaluation rejected"
-                else:
-                    row.score = fmean(result.scores.values())
-                    row.seed_scores = {str(seed): value for seed, value in result.scores.items()}
-                    row.status = "evaluated"
-                self._log_candidate(row)
-            self._checkpoint()
-            if not failed:
-                return
-            logger.info(
-                "Repairing %s failed organisms",
-                len(failed),
-                extra={"event": "generation_started", "total": len(failed)},
-            )
-            tasks = [asyncio.create_task(self._generate(row, repairing=True)) for row in failed]
-            try:
-                repaired = await asyncio.gather(*tasks)
-            finally:
-                for task in tasks:
-                    task.cancel()
-                await asyncio.gather(*tasks, return_exceptions=True)
-            rows = [row for row in repaired if row.status == "generated"]
-
-    async def _experiment(self, rows):
+    async def _prepare(self, rows):
         logger.info(
             "Generating population of %s",
             len(rows),
@@ -466,8 +426,6 @@ class EliteSearch:
                         row.implementation = row.revisions[-1]["implementation"]
                         row.error = row.revisions[-1]["error"]
                 await self._generate(row, repairing=repairing)
-            if row.status == "generated":
-                await self._measure([row])
 
         tasks = [asyncio.create_task(produce(row)) for row in rows]
         try:
@@ -503,14 +461,128 @@ class EliteSearch:
             self.elites[0].score if self.elites else "unfilled",
         )
 
-    async def run(self) -> list[Organism]:
-        self.reason = "running"
+    @property
+    def done(self):
+        if self._round or self._proposing:
+            return False
+        if self.generations and self.generations[-1].status != "completed":
+            return False
+        return (
+            len(self.generations) >= self.config.generations
+            or self.config.target_score is not None
+            and bool(self.elites)
+            and self.elites[0].score >= self.config.target_score
+        )
+
+    def _settle_generation(self):
+        generation = self.generations[-1]
+        rows = [row for row in self.organisms if row.generation == generation.number]
+        if generation.status == "completed" or any(
+            row.status not in ("evaluated", "discarded") for row in rows
+        ):
+            return
+        self._promote(generation, rows)
+        self._log_leaderboard()
         logger.info(
-            "Starting EliteSearch",
+            "Finished generation %s",
+            generation.number,
+            extra={
+                "progress": dict(
+                    kind="batch_finished", batch_id=str(generation.number), status="completed"
+                )
+            },
+        )
+        self.reason = (
+            "target_reached"
+            if self.config.target_score is not None
+            and self.elites
+            and self.elites[0].score >= self.config.target_score
+            else "completed"
+            if len(self.generations) >= self.config.generations
+            else "running"
+        )
+        self._checkpoint()
+
+    async def propose(self):
+        if self._proposing or self._round:
+            raise RuntimeError("Previous proposal round is still outstanding")
+        if self.done:
+            return []
+        self._proposing = True
+        self.reason = "running"
+        try:
+            while True:
+                if not self.generations or self.generations[-1].status == "completed":
+                    if (
+                        len(self.generations) >= self.config.generations
+                        or self.config.target_score is not None
+                        and self.elites
+                        and self.elites[0].score >= self.config.target_score
+                    ):
+                        return []
+                    generation = Generation(
+                        number=len(self.generations) + 1, elite_ids=[row.id for row in self.elites]
+                    )
+                    self.generations.append(generation)
+                    self._population(generation)
+                generation = self.generations[-1]
+                generation.status, generation.error = "running", None
+                rows = [row for row in self.organisms if row.generation == generation.number]
+                logger.info(
+                    "Generation %s",
+                    generation.number,
+                    extra={
+                        "progress": dict(
+                            kind="batch_started",
+                            batch_id=str(generation.number),
+                            label=f"Generation {generation.number}",
+                            total_candidates=len(rows),
+                        )
+                    },
+                )
+                self._checkpoint()
+                await self._prepare(rows)
+                self._round = {row.policy_id: row for row in rows if row.status == "generated"}
+                if self._round:
+                    for row in self._round.values():
+                        row.status = "evaluating"
+                        self._log_candidate(row)
+                    return [self._policies[row.id] for row in self._round.values()]
+                self._settle_generation()
+        finally:
+            self._proposing = False
+
+    def update(self, results):
+        panel = validate_results(results, self._round, seed_panel=self._seed_panel)
+        score_panels = {id: episode_scores(r) for id, r in results.items()}
+        for id, result in results.items():
+            error = episode_error(result)
+            row = self._round[id]
+            if error is not None:
+                row.status, row.error = "execution_failed", error
+            elif not result:
+                row.status, row.error = "discarded", "Evaluation rejected"
+            else:
+                row.score = fmean(score_panels[id].values())
+                row.seed_scores = {str(seed): value for seed, value in score_panels[id].items()}
+                row.status, row.error = "evaluated", None
+            self._log_candidate(row)
+        self._round.clear()
+        self._seed_panel = panel
+        self._checkpoint()
+        self._settle_generation()
+
+    async def run(self) -> list[Organism]:
+        """Compatibility wrapper; new callers pass this optimizer to rsikit.search."""
+        if self.evaluate is None:
+            raise ValueError("Pass an evaluator to rsikit.search(optimizer, evaluate)")
+        logger.info(
+            "Starting %s",
+            self.optimizer_name,
             extra={
                 "progress": dict(
                     kind="search_started",
-                    optimizer="EliteSearch",
+                    optimizer=self.optimizer_name,
                     total_candidates=self.config.population_size * self.config.generations,
                     total_generations=self.config.generations,
                     leaderboard_size=self.config.elite_size,
@@ -519,109 +591,25 @@ class EliteSearch:
                 )
             },
         )
-        for generation in self.generations:
-            logger.info(
-                "Restoring generation %s",
-                generation.number,
-                extra={
-                    "progress": dict(
-                        kind="batch_started",
-                        batch_id=str(generation.number),
-                        label=f"Generation {generation.number}",
-                        total_candidates=self.config.population_size,
-                    )
-                },
-            )
-            for row in self.organisms:
-                if row.generation == generation.number:
-                    self._log_candidate(row, restored=True)
-            if generation.status == "completed":
-                logger.info(
-                    "Restored generation %s",
-                    generation.number,
-                    extra={
-                        "progress": dict(
-                            kind="batch_finished",
-                            batch_id=str(generation.number),
-                            status="completed",
-                            restored=True,
-                        )
-                    },
-                )
+        for row in self.organisms:
+            self._log_candidate(row, restored=True)
         self._log_leaderboard()
         try:
-            pending = self.generations and self.generations[-1].status != "completed"
-            if (
-                not pending
-                and self.config.target_score is not None
-                and self.elites
-                and self.elites[0].score >= self.config.target_score
-            ):
-                self.reason = "target_reached"
-                return self.elites
-            start = len(self.generations) if pending else len(self.generations) + 1
-            for number in range(start, self.config.generations + 1):
-                if pending and number == start:
-                    generation = self.generations[-1]
-                    generation.status, generation.error = "running", None
-                    rows = [row for row in self.organisms if row.generation == number]
-                else:
-                    generation = Generation(
-                        number=number, elite_ids=[row.id for row in self.elites]
-                    )
-                    self.generations.append(generation)
-                    rows = self._population(generation)
-                logger.info(
-                    "Generation %s",
-                    number,
-                    extra={
-                        "progress": dict(
-                            kind="batch_started",
-                            batch_id=str(number),
-                            label=f"Generation {number}",
-                            total_candidates=len(rows),
-                        )
-                    },
-                )
-                for row in rows:
-                    self._log_candidate(row, restored=bool(pending))
-                self._checkpoint()
-                await self._experiment(rows)
-                self._promote(generation, rows)
-                self._log_leaderboard()
-                logger.info(
-                    "Finished generation %s",
-                    number,
-                    extra={
-                        "progress": dict(
-                            kind="batch_finished", batch_id=str(number), status="completed"
-                        )
-                    },
-                )
-                self._checkpoint()
-                if (
-                    self.config.target_score is not None
-                    and self.elites
-                    and self.elites[0].score >= self.config.target_score
-                ):
-                    self.reason = "target_reached"
-                    logger.info(
-                        "Stopping after generation %s: best=%g reached target=%g",
-                        number,
-                        self.elites[0].score,
-                        self.config.target_score,
-                    )
-                    return self.elites
-            self.reason = "completed"
+            await search(self, self.evaluate, on_checkpoint=lambda agent: agent._checkpoint())
+            if self.reason in ("ready", "running"):
+                self.reason = "completed"
             return self.elites
         except BaseException as exc:
             self.reason = "cancelled" if isinstance(exc, asyncio.CancelledError) else "error"
-            if self.generations:
+            if self.generations and self.generations[-1].status != "completed":
                 self.generations[-1].status = self.reason
                 self.generations[-1].error = f"{type(exc).__name__}: {exc}"
+            try:
+                self._checkpoint()
+            except BaseException:
+                logger.exception("Checkpoint failed while handling search error")
             raise
         finally:
-            self._checkpoint()
             logger.info(
                 "Search %s",
                 self.reason,

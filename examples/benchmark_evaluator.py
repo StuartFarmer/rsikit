@@ -11,15 +11,16 @@ import tempfile
 from contextlib import AsyncExitStack
 from datetime import datetime, timezone
 from pathlib import Path
-from time import perf_counter
+from time import perf_counter, sleep
 
 import gymnasium as gym
 
 from research.rewards import mean_rewards
 from research.rollouts import Rollouts
-from rsikit import Episode, Executor, Run
+from rsikit import Executor, Job, Run
 from rsikit.envs import BitcoinEnv, BlackjackEnv, CirclePackingEnv
-from rsikit.policy import Policy
+from rsikit.evaluation import PolicyError
+from rsikit.policy import PolicyDefinition
 
 PACKING = """
 import numpy as np
@@ -83,21 +84,31 @@ async def scheduling(samples):
         values = []
         for _ in range(samples):
             arrived, waits, durations = {}, [], []
-            active = peak = 0
+            intervals = []
+
+            class TimedEnvironment(CirclePackingEnv):
+                def reset(self, *, seed=None, options=None):
+                    self.started = perf_counter()
+                    self.seed = seed
+                    return super().reset(seed=seed, options=options)
+
+                def step(self, action):
+                    sleep(0.08 if self.seed == 0 else 0.008)
+                    obs, _, terminated, truncated, info = super().step(action)
+                    info["timing"] = (self.started, perf_counter())
+                    return obs, 0.5, terminated, truncated, info
 
             class TimedExecutor(Executor):
-                async def _evaluate(self, implementation, environment, seed):
-                    nonlocal active, peak
-                    start = perf_counter()
-                    waits.append(start - arrived[implementation])
-                    active += 1
-                    peak = max(peak, active)
-                    try:
-                        await asyncio.sleep(0.08 if seed == 0 else 0.008)
-                        return Episode([0, 1], [0], [0.5], [True], [False], [{}, {}])
-                    finally:
-                        active -= 1
-                        durations.append(perf_counter() - start)
+                async def iterate(self, jobs):
+                    from contextlib import aclosing
+
+                    async with aclosing(super().iterate(jobs)) as completed:
+                        async for job in completed:
+                            start, end = job.result.infos[-1]["timing"]
+                            waits.append(start - arrived[job.policy.source])
+                            durations.append(end - start)
+                            intervals.extend(((start, 1), (end, -1)))
+                            yield job
 
             with tempfile.TemporaryDirectory() as directory:
                 async with (
@@ -108,7 +119,7 @@ async def scheduling(samples):
                         path=Path(directory) / "run",
                     ) as run,
                 ):
-                    rollouts = Rollouts(CirclePackingEnv(1), executor, run)
+                    rollouts = Rollouts(TimedEnvironment(1), executor, run)
                     queue = asyncio.Queue()
 
                     async def produce():
@@ -116,7 +127,7 @@ async def scheduling(samples):
                             await asyncio.sleep(0.005)
                             source = PACKING + f"\n# candidate {i}\n"
                             arrived[source] = perf_counter()
-                            await queue.put(Policy.from_text(source, name=str(i)))
+                            await queue.put(PolicyDefinition.from_text(source, name=str(i)))
                         await queue.put(None)
 
                     async def consume():
@@ -150,6 +161,10 @@ async def scheduling(samples):
                     start = perf_counter()
                     await asyncio.gather(produce(), consume())
                     elapsed = perf_counter() - start
+                    active = peak = 0
+                    for _, change in sorted(intervals):
+                        active += change
+                        peak = max(peak, active)
                     assert len(durations) == 24 and peak <= 4
                     assert all(run.scores(p) == {0: 0.5, 1: 0.5} for p in run.policies())
                     values.append(
@@ -171,7 +186,7 @@ async def scheduling(samples):
 
 async def main(samples, output):
     report = {
-        "backend": "local episode processes",
+        "backend": "Huey process workers",
         "host": platform.platform(),
         "python": platform.python_version(),
         "date": datetime.now(timezone.utc).isoformat(),
@@ -179,13 +194,13 @@ async def main(samples, output):
             str(path): hashlib.sha256(path.read_bytes()).hexdigest()
             for path in (
                 Path(__file__),
-                Path("rsikit/execution.py"),
+                *sorted(Path("rsikit/execution").glob("*.py")),
                 Path("rsikit/run.py"),
                 Path("Dockerfile"),
             )
         },
         "image": os.environ.get("RSIKIT_IMAGE_ID"),
-        "scope": "First episode includes clean forkserver startup; subsequent episodes use fresh children. Residual includes startup, reset/close, validation and artifacts.",
+        "scope": "Huey reuses worker processes across episodes. Residual includes queue I/O, input copies, reset/close, validation and artifacts.",
         "workloads": {},
     }
     workloads = [
@@ -210,10 +225,15 @@ async def main(samples, output):
             for repeat in range(samples + 1):
                 start = perf_counter()
                 results = [
-                    r async for _, _, r in executor.evaluate([(label, source + TIMING, 1)], env)
+                    job.result
+                    async for job in executor.iterate(
+                        [Job(PolicyDefinition(source=source + TIMING, name=label), env, seed=1)]
+                    )
                 ]
                 elapsed = perf_counter() - start
                 result = results[0]
+                if result.error is not None:
+                    raise PolicyError(result.error)
                 env_time = json.loads(result.artifacts["environment-timing.json"])
                 policy_time = json.loads(result.artifacts["policy-timing.json"])
                 assert env_time["steps"] == policy_time["steps"] > 0

@@ -207,9 +207,20 @@ async def main():
         )
         if saved is None:
             (run.path / "experiment.json").write_text(
-                json.dumps({**vars(args), "config": asdict(config)}, default=str, indent=2) + "\n",
+                json.dumps(
+                    {**vars(args), "config": asdict(config), "optimization_schedule": "round-v1"},
+                    default=str,
+                    indent=2,
+                )
+                + "\n",
                 encoding="utf-8",
             )
+        elif saved.get("optimization_schedule") != "round-v1":
+            with (run.path / "schedule_changes.jsonl").open("a") as stream:
+                stream.write(
+                    json.dumps({"from": saved.get("optimization_schedule"), "to": "round-v1"})
+                    + "\n"
+                )
         try:
             await run_search(
                 generator,

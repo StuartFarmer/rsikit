@@ -1,5 +1,6 @@
 ARG PYTHON_VERSION=3.14
 FROM python:${PYTHON_VERSION}-slim
+ARG OCEAN=0
 RUN apt-get update && apt-get install -y --no-install-recommends g++ swig && rm -rf /var/lib/apt/lists/*
 ENV OPENBLAS_NUM_THREADS=1 OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 PYTHONDONTWRITEBYTECODE=1 MPLCONFIGDIR=/tmp/matplotlib
 RUN pip install --no-cache-dir \
@@ -14,6 +15,14 @@ WORKDIR /app
 COPY pyproject.toml .
 # Resolve project dependencies before copying frequently edited source.
 RUN python -c "import subprocess, tomllib; p=tomllib.load(open('pyproject.toml','rb'))['project']; subprocess.check_call(['pip','install','--no-cache-dir',*p['dependencies'],*(d for e in ('openai','box2d','video','dev') for d in p['optional-dependencies'][e])])"
+COPY scripts/install_ocean.py /tmp/install_ocean.py
+COPY scripts/ocean-episodes.patch /tmp/ocean-episodes.patch
+RUN if [ "$OCEAN" = 1 ]; then \
+    apt-get update && apt-get install -y --no-install-recommends git ca-certificates libgl1 libx11-6 && \
+    rm -rf /var/lib/apt/lists/* && \
+    python -c "import subprocess,tomllib; subprocess.check_call(['pip','install','--no-cache-dir',*tomllib.load(open('pyproject.toml','rb'))['project']['optional-dependencies']['ocean']])" && \
+    python /tmp/install_ocean.py; \
+    fi
 # Scientific checks depend on installed libraries, not application source.
 COPY tests/test_scientific_libraries.py /tmp/check_libraries.py
 RUN python /tmp/check_libraries.py && rm /tmp/check_libraries.py

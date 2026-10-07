@@ -1,459 +1,315 @@
-# Ocean benchmark: make LLM generation the bottleneck
+# Upstream Ocean evaluation
 
-Status: implemented, 2026-10-02. The native 2048 adapter, evaluator,
-capacity/replay driver and budgeted search example are available. The sizing
-table below remains hypothetical; short implementation checks do not establish
-that evaluation keeps up with a particular live model.
+The runner uses PufferLib's **existing Python factories and C batch bindings**.
+The installer applies `scripts/ocean-episodes.patch` to the pinned upstream source.
+There is no duplicated simulator or runtime compiler.
+Pinned upstream: `3b5c6046bb8b46685d62d151720025507e3418c2` (Python-facing 3.0).
+The search and benchmark CLIs support `g2048` and `breakout`.
 
-## Run it
+## Run
 
-From a repository checkout with project dependencies installed and a C compiler
-(`cc`, or `CC`), run this small correctness check:
+Docker installs and builds the upstream bindings automatically:
 
-```sh
-python -m examples.benchmark_ocean correctness \
-  --seeds 2 --max-steps 32 --output runs/ocean-check
+```bash
+./scripts/run examples.benchmark_ocean correctness \
+  --env g2048 --seeds 2 --batch-size 4 --max-steps 32 \
+  --output runs/ocean-upstream-check
 ```
 
-No PufferLib pip install, GPU, raylib, download or model key is needed. The pinned
-C source and MIT license are included; a content-hashed headless shared library
-is compiled into the temporary directory on first use. Output directories must
-be new. For the specified four-CPU/eight-GiB container allocation, replace
-`python -m` with `./scripts/run` in these commands. Local runs record the requested
-budget but do not enforce CPU affinity or a memory limit.
+The upstream Linux build downloads x86-64 native libraries. The Ocean launcher
+therefore selects `linux/amd64`; on Apple Silicon Docker emulates that architecture.
+Native macOS builds are also supported. Do not compare emulated Docker timings
+with native macOS timings.
 
-Run a short check of complete 32-seed panels, then synthetic arrivals:
+For local development:
 
-```sh
-python -m examples.benchmark_ocean capacity --mode batch --workers 4 \
-  --duration 1 --panels 8 --repeats 1 --output runs/ocean-capacity-smoke
-python -m examples.benchmark_ocean replay --rate 1 --duration 10 --repeats 1 \
-  --workers 4 --output runs/ocean-replay-smoke
+```bash
+uv sync --extra ocean --extra dev
+.venv/bin/python scripts/install_ocean.py
+.venv/bin/python -m unittest tests.test_ocean_upstream tests.test_ocean_evaluator
 ```
 
-These deliberately short runs leave `pilot_pass=false`. For the full offline
-protocol, run default correctness, then `capacity --matrix`; the matrix executes
-all 15 mode/worker/batch configurations three times and can take substantially
-longer than the smoke check. For a single selected configuration, omit `--matrix`:
+The installer fetches the pinned source into the Python environment and invokes
+upstream `setup.py build_g2048 --inplace` / `build_breakout --inplace`. It adds the
+checkout to that environment's Python path. Build requirements include Git, a C
+compiler, and internet access for upstream Raylib/Box2D downloads. Upstream
+source is patched only for the episode fixes described below. The old PyPI
+distribution pins older NumPy/Gymnasium; we build
+the selected bindings against our installed libraries instead of downgrading the
+project. This supports the selected Ocean environments, not the full upstream
+trainer or every legacy Gym integration. Runtime evaluation needs no downloads.
 
-```sh
-python -m examples.benchmark_ocean correctness --output runs/ocean-correctness
-python -m examples.benchmark_ocean capacity --mode batch --workers 4 \
-  --correctness-report runs/ocean-correctness/report.json \
-  --output runs/ocean-capacity
-python -m examples.benchmark_ocean replay --rate 1 --workers 4 \
-  --correctness-report runs/ocean-correctness/report.json \
-  --capacity-report runs/ocean-capacity/report.json --output runs/ocean-replay
-```
+## Evaluation protocol
 
-Synthetic replay reports capacity/queue evidence but cannot pass the real-LLM
-gate. Run `replay --trace PATH` for recorded arrivals; paths in that trace are
-resolved relative to its file. The same `--trace` can supply the exact policy mix
-to correctness and capacity. Evidence reports must match source, workload,
-platform and mix. A real trace must span at least 300 seconds after any `--speed`
-acceleration; `--duration` creates synthetic traces and does not tile real traces.
-Use `--speed 1.25` for the separate headroom replay.
+Protocol ID: `ocean-upstream-episodic-v2` (compatibility patch `episodes-v1`).
 
-Use repeated `--policy path.py` arguments instead of the eight reviewed baseline
-programs when testing a saved corpus. Default policies are hand-authored examples,
-including bounded lookahead; they are explicitly not labeled LLM-generated.
-`--diagnostics` adds per-phase timing to a separate run, which cannot count as
-uninstrumented pilot evidence. `--help` lists all parameters.
+- Each `--seeds` entry requests **one independently seeded episode**.
+- `--batch-size B` is the maximum number of those episodes stepped together.
+  It does not multiply the episode count. The final batch may be smaller.
+- Each game stops at its native terminal signal or `--max-steps H`, whichever
+  comes first. Finished lanes freeze; no replacement episodes are started.
+- Total transitions are **at most `number_of_seeds × H`**. Actual counts are saved.
+- A panel with S seeds has a wall-time allowance of `S × timeout` seconds,
+  including process startup. A candidate runs in its own isolated process.
+- `--env-kwargs` on the legacy example CLI forwards environment options.
+  The unified CLI uses environment flags or YAML. Width, seeds, log interval,
+  and buffers remain evaluator-owned.
 
-Results include `manifest.json`, `report.json`, policy sources, per-job JSON and
-`evaluations.jsonl`. Replay adds `admissions.json`, `queue.json` and `queue.svg`
-per repetition. Worker RSS is a high-water measurement, not a simultaneous
-process-tree memory total.
+**10 seeds, batch size 32, max steps 2,000 means 10 episodes and at most 20,000
+transitions per policy.** A 50-population, 10-generation search requests 5,000
+search episodes (at most 10 million transitions), before repairs or held-out
+panels. The previous fixed-horizon protocol accidentally multiplied this budget
+by 32 and continued through autoresets; those scores and timings are historical.
 
-### Live search
+The patch keeps upstream physics, observations, reward functions and native
+vector stepping. A seed list passed to `reset` selects episodic operation;
+integer reset seeds retain the upstream training/autoreset mode. It fixes 2048's
+cleared done flag, stops finished lanes, and exposes current per-lane metrics.
+Breakout also stops its frameskip loop when the episode ends. Native 2048 ends
+include its own dynamic tick limit, starting at 1,000; this limit is still reported
+as termination by upstream. The evaluator's additional cap is reported as truncation.
 
-For the standalone 50-population × 10-generation × 10-seed EliteTable run,
-see the [ready-to-run command](OCEAN_CONTROLLER_OPTIONS.md#standalone-elitetable-run-with-no-outer-optimization).
-Only `g2048` is implemented. `--population`, `--generations`, `--elites`,
-`--max-repairs` and `--seeds` configure the existing search; call/token reservation
-defaults scale to the requested workload. No outer controller optimization runs.
+Episodic mode uses per-game `rand_r` state instead of shared process-global
+`rand()`, so a seed identifies the same game regardless of batch width, order or
+other lanes finishing. This changes trajectories from the previous protocol.
+Reproducibility requires the same native build/platform: libc RNG implementations
+can differ. Manifests include the upstream revision, patch version and binary hash.
 
-The live example requires an explicit model and budget. Set `MODEL`,
-`INPUT_PRICE` and `OUTPUT_PRICE` to the chosen model and conservative upper USD
-prices per million tokens, and provide `OPENROUTER_API_KEY`:
+Generated policies must be deterministic and stateless, deciding independently
+for each row. Each batch loads a fresh policy and resets it with policy seed 0;
+environment seeds control the games. Batch width is fixed within each batch,
+including frozen finished rows, and may differ between calls to the evaluator.
 
-```sh
-./scripts/run examples.ocean_search --output runs/ocean-elite-0 \
-  --model "$MODEL" --arm elite --search-seed 0 --spend-cap 5 \
-  --input-price "$INPUT_PRICE" --output-price "$OUTPUT_PRICE"
-```
+## Scores and observations
 
-The default is 20 proposals × 5 generations, at most two repairs each, four model
-calls in flight and four evaluation workers. It reserves worst-case per-call
-input/output token cost **before** sending, counts failed calls and repairs, and
-stops at its call/token/spend reservation limit. Its UTF-8 input bound assumes a
-byte-tokenized text model; provider billing is not independently enforced by this
-local ledger. Responses retain actual usage/cost when supplied. No calls were
-made to a paid provider during implementation checks.
-
-Repeat with `--arm independent` and paired `--search-seed` values 0 through 4
-for the comparison. The example performs 128-seed finalist selection and a
-512-seed frozen test, and writes `winner.py`, `selection.json`, `summary.json`,
-`generation_tails.json`, `arrival_trace.json`, and the existing Run database.
-`arrival_trace.json` is accepted directly by the replay command. A full recursive
-controller experiment remains the follow-up described below.
-
-Run the focused native/process/CLI tests with:
-
-```sh
-python -m unittest tests.test_ocean_native tests.test_ocean_evaluator \
-  tests.test_ocean_benchmark tests.test_ocean_search
-```
-
-### Implementation measurements
-
-One local ARM64 macOS pass, one candidate worker, eight reviewed policies,
-32 seeds each, up to 2,000 decisions per episode, with matching native binaries:
-
-| Path | Eight complete panels | Median panel service | Valid panels/s |
-| --- | ---: | ---: | ---: |
-| Reference, fresh process per episode | 132.99 s | 12.34 s | 0.060 |
-| Batched, fresh process per panel | 6.26 s | 0.47 s | 1.277 |
-
-All 256 per-seed results matched. The aggregate difference is **21.2×** including
-worker startup and result persistence. Policy complexity matters: the slowest
-batched panel took 2.45 seconds. These are one-pass implementation checks, not the
-repeated capacity pilot or proof of generation-bound live search. Resource limits
-were not enforced locally, and some verification processes overlapped the reference
-run. Linux forkserver results may differ from macOS spawn.
-[Raw results and per-seed evidence](ocean-benchmark-2026-10-02.json).
-
-A subsequent worker-scaling check repeated each configuration three times, with
-16 full candidate panels per repetition and the same eight-policy mix:
-
-| Candidate workers | Median valid panels/s | Throughput relative to one batched worker |
-| --- | ---: | ---: |
-| 1 | 1.267 | 1.00× |
-| 2 | 2.207 | 1.74× |
-| 4 | 3.366 | 2.66× |
-
-Each panel still contains 32 games. Configurations ran sequentially, and all
-per-seed results matched the original evidence. These short runs include startup,
-persistence and final drain; they do not establish the full steady-state or
-real-LLM pilot. [Worker-scaling measurements](ocean-worker-scaling-2026-10-02.json).
-
-The CLI was also exercised across all 15 configurations with a short workload,
-and live-search wiring completed the full 32/128/512 seed split using a scripted
-provider. No paid LLM calls were made and no real-model pilot pass is claimed.
-
-Validation: all 20 Ocean tests and Ruff checks pass. The full local suite ran
-257 tests with four errors in existing tests outside this implementation:
-
-- `ApplicationEpisodeTests.test_replay_records_best_completed_policy_without_changing_original_scores`
-  and `test_run_records_real_video_artifact`: video episode workers exited without a result.
-- `ApplicationEpisodeTests.test_scientific_libraries_in_episode_process` and
-  `ScientificLibrariesTests.test_numerical_operations`: optional `control` package missing.
-
-No shared evaluator, optimizer, dependency configuration or existing test was
-changed to suppress those errors.
-
-## Goal
-
-Evaluate generated policies faster than the LLM produces them, at useful seed
-coverage. Evaluation should keep up with arrivals without building a backlog or
-holding up the next search generation. Once that is true, stop optimizing speed
-and use spare capacity for more reliable policy comparisons.
-
-Start with Ocean **2048** on CPU and reuse RSIKit's **EliteSearch**. First measure
-the evaluator without paid model calls; then confirm the result in a live search.
-Repeat on Breakout after the first experiment passes.
-
-## The example we are testing
-
-A candidate plays 32 independently seeded games, each capped at 2,000 decisions:
-at most 64,000 individual environment transitions.
-
-| Assumed policy + environment throughput | Rollout time for 64,000 steps | Serial rollout capacity |
-| --- | ---: | ---: |
-| 10,000 steps/s | 6.40 s | 0.156 candidates/s |
-| 100,000 steps/s | 0.64 s | 1.563 candidates/s |
-| 1,000,000 steps/s | 0.064 s | 15.625 candidates/s |
-
-These figures exclude startup, loading, scoring, serialization and persistence.
-Real episodes can end early. Measure full candidate latency and actual step
-counts; do not present this table as an Ocean performance result.
-
-Let `lambda` be the actual generation rate in evaluation jobs/second, including
-repaired candidates submitted for another evaluation. Let `mu` be measured
-aggregate evaluator capacity on the allocated hardware. The target is:
-
-```text
-mu >= 1.25 * lambda
-```
-
-The 25% headroom is a pilot choice for variable arrivals and evaluation lengths.
-For initial sizing only, `workers ≈ ceil(1.25 * lambda * mean_service_seconds)`.
-This assumes service time holds under concurrency; the benchmark must verify it.
-
-For example, at 10 arrivals/s and 0.64 s **complete** evaluation service time,
-seven workers barely cover average demand; eight provide 25% nominal headroom.
-At 0.064 s, one worker would suffice. Rollout-only times cannot be substituted
-for complete service times without measuring the missing overhead.
-
-## Freeze the workload
-
-| Setting | Initial value |
+| Key | Meaning at episode end or evaluator cap |
 | --- | --- |
-| Upstream | PufferLib `6ffa5b10dbbbe4d1e8288367c7d9d3acd3bad4a2` |
-| Environment | `g2048` |
-| Curriculum | `[env] scaffolding_ratio=0` |
-| Search seeds | Integers 0–31, explicit per-environment RNG initialization |
-| Episode cap | 2,000 decisions, or earlier native ending |
-| Primary fitness | Mean conventional tile merge score across all 32 seeds |
-| Additional metrics | Maximum tile, shaped return, decisions, ending reason |
-| Policy | Stateless Python/NumPy program; LLM writes code, never acts per step |
-| Hardware budget | One machine/container, 4 allocated CPU cores, 8 GiB RAM |
-| Threading | One numerical-library thread per worker; no nested oversubscription |
-| Candidate deadline | 60 s for the entire panel, including initialization and result preparation |
-| Rendering | Off during timed runs |
-| Evaluation cache | Disabled for throughput measurements |
+| `merge_score` (2048 default) | Accumulated merge score |
+| `score` | 2048 maximum tile; Breakout game score |
+| `episode_return`, `perf` | Current upstream episode metric |
+| `return` (Breakout default) | Sum of rewards from this episode only |
 
-Pin the platform, C library, compiler flags, Python/NumPy versions and native
-library hash. `rand_r` streams need not match across platforms. Record actual
-hardware and CPU allocation; local results do not automatically transfer to a
-different host. Build once; report build time separately from candidate timing.
+Capped games retain their earned scores. Missing score keys fail evaluation.
+Fitness is the arithmetic mean of the requested per-seed episode scores. Each row
+records `steps`, `ending` (`terminated` or `truncated`), `episodes=1`, and metrics.
 
-2048 has its own adaptive episode cap, initially 1,000 ticks. Our external cap
-does not replace that rule. Preserve the native rule in every comparison and
-clear lifetime state before each seed. This is a benchmark of this exact Ocean
-configuration, not unrestricted conventional 2048.
+2048 now receives upstream `uint8 (B,289)` observations, not `(B,16)`:
+columns 0:16 are encoded magnitudes, 16:32 are empty flags, 32:288 are 16 one-hot
+exponent channels per cell, and 288 is the snake-pattern flag. Actions remain
+0=up, 1=down, 2=left, 3=right. The prompts and bundled baselines use this interface;
+old saved 16-column policies need adapting.
 
-Use eight frozen policy programs for the evaluator benchmark: a cheap legal-move
-heuristic, a one-step board heuristic, a bounded-lookahead policy, and five
-representative generated candidates. Prefer saved candidates when available;
-otherwise author reviewed examples before starting the timed comparison. Record
-their hashes and preserve the same mix in every mode. Report results per policy
-as well as for the mixture, so a cheap policy cannot hide slow realistic ones.
+Breakout receives upstream `float32 (B,118)` observations. Actions are 0=noop,
+1=left, 2=right. Default upstream frameskip is 4; use
+`--env-kwargs '{"frameskip": 1}'` to select a different benchmark explicitly.
+Neither runner exports videos.
 
-## Smallest implementation
+## Search and benchmarking
 
-Reuse source storage, generation, edits/remixes, elite ranking and checkpoints.
-The experiment-owned evaluation callback returns
-`{policy_id: Measurement(scores={seed: merge_score})}`. Do not rewrite EliteSearch
-or the shared evaluator to conduct this experiment.
+The existing EliteSearch command still works with explicit workload settings:
 
-The evaluator uses a small native CPU binding to Ocean's
-`puf_init/reset/step/close` functions, compact results and one fresh candidate
-worker per seed panel. Initialize native environment objects inside the worker;
-do not attempt to pickle live C pointers. Current upstream trainer batching is
-CUDA-coupled and is not a drop-in CPU Python vector evaluator.
-
-The research-only batch convention for `Solution.act` is observation shape
-`(B, 16)`, action shape `(B,)`, with matching declared spaces. Board entries are
-tile exponents; actions are 0 up, 1 down, 2 left, 3 right. This convention is new
-adapter behavior, not a change to the shared scalar evaluator. Require independent rows;
-no cross-board statistics or shared evolving state. Start with deterministic
-policies. Any stochastic policy needs independent per-seed random streams.
-
-Use the same policy source for scalar and batch timing: scalar evaluation calls
-the batch function with one row. Verify row-permutation and batch-size invariance.
-Maintain a fixed mapping from active rows to seed IDs. Remove completed cases;
-do not continue their auto-reset games or count inactive padding as useful steps.
-
-Return score, length, ending reason and timing per seed. Save full trajectories
-only for the correctness subset and chosen finalists. Retain source, failures,
-scores and checkpoint persistence in the timed application path.
-
-The initial timing pilot uses reviewed policies under RSIKit's documented
-cooperative execution model. Generated code currently shares a process with
-scoring state; this is not a protected benchmark against adversarial programs.
-Before recursive self-modification, put scoring, hidden tests and budget
-enforcement outside candidate control and remeasure that configuration.
-
-## Correctness gate
-
-Before comparing speed, run the same eight policies on the same 32 seeds through
-scalar and batched modes. Require identical per-seed actions, scores, lengths
-and ending reasons for deterministic policies on the pinned platform. Verify
-repetition and reordered batches produce the same seed results.
-
-Handle the upstream details explicitly:
-
-- Disable scaffolding and initialize RNG from the requested seed, not the slot
-  index. Freshen the entire episode state, including `lifetime_max_tile`.
-- `merge_score` is conventional game score. Upstream's log field `score` means
-  maximum tile; `episode_return` is shaped reward.
-- At native termination, read the completed log delta exactly once: the live
-  board may already be the next episode's reset board.
-- At external truncation, capture the live merge score explicitly. Upstream
-  does not emit a completed-game log for our external cap.
-- Distinguish an in-range but ineffective move from an out-of-range action.
-  Invalid move penalties and native timeouts remain part of the pinned task.
-- Reject malformed/nonfinite actions; crashes and deadlines produce failures,
-  never a partially averaged score. Every accepted candidate has all 32 seeds.
-
-Keep one small runnable check covering these invariants with the adapter.
-Run failure probes separately from successful-policy throughput so rapid
-rejection cannot inflate the claimed evaluation capacity.
-
-## Bench A: evaluator capacity, no live LLM
-
-Compare the same workload in three modes:
-
-| Mode | Execution | Purpose |
-| --- | --- | --- |
-| A: reference | Scalar Gym adapter, current full-history evaluator and fresh episode processes | Establish the existing execution pattern on Ocean |
-| B: summaries | Scalar steps, one candidate-panel worker, compact results | Measure amortized startup and reduced recording costs |
-| C: batches | Batched actions/steps, one candidate-panel worker, compact results | Measure the extra benefit of batching |
-
-The Gym adapter in A is also new work. All modes use the same pinned simulator,
-policies, seed panel and ending rules. B changes both worker lifetime and result
-retention, so A→B is their combined effect, not a pure logging ablation.
-
-1. Record cold initialization and first-panel latency for each mode.
-2. Run one untimed warmup panel. Each subsequent panel still starts a fresh
-   candidate worker in B/C; warmup does not imply persistent policy workers.
-3. Measure candidate concurrency 1, 2 and 4. In C measure environment batch widths
-   1, 8 and 32 within the fixed 32-seed panel. Keep the 4-core budget fixed.
-4. Keep the evaluator supplied with jobs for at least 30 seconds and 100
-   completed panels per configuration, whichever takes longer. Stop arrivals,
-   drain admitted jobs, and include drain time in aggregate throughput.
-5. Repeat each configuration three times, alternating mode order to reduce
-   background-load bias. Reevaluate identical programs; do not use cached scores.
-
-Report the bottleneck directly: environment time, policy time, startup/reset,
-validation/copying, result transfer and persistence. Use lightly instrumented
-separate diagnostic runs for per-step attribution; exclude profiler overhead
-from headline timing. Do not sum overlapping worker wall times as elapsed time.
-
-Choose the smallest worker/batch configuration that meets the capacity target.
-If representative policy computation dominates, measure a cheaper/batched policy
-implementation before considering generated C or CUDA. Compilation would then
-be charged to every new candidate, not hidden in warmup.
-
-## Bench B: can evaluation keep up with generation?
-
-First obtain an arrival trace from a representative existing run: evaluation
-submission timestamps, candidate identities/sources, repair attempts, and model
-call start/end timestamps. Estimate generation capacity from periods when
-generation is active and not waiting for evaluations. Whole-run throughput from
-an evaluation-bound run would underestimate the target and make passing trivial.
-
-If no usable trace exists, report a synthetic rate sweep first (0.1, 1 and 10
-jobs/s), and measure real arrivals in Bench C. Synthetic rates are test inputs,
-not claims about the configured model. For the real target, freeze model,
-generation concurrency and provider limits in the run manifest.
-
-Replay the same candidate workload and arrival timestamps into A and the selected
-C configuration, with generation replaced by the saved trace. This avoids paying
-for repeated LLM calls and preserves burstiness. Preserve source/latency pairing
-where available. Repeated trace cycles must execute again with caches disabled;
-use fresh request IDs. Record producer backpressure rather than silently dropping
-jobs if an overload run reaches its queue limit.
-
-Run three traces of at least five minutes each. Record queue depth once per
-second, every submission/start/finish event, and the drain after the final arrival.
-Also test 1.25× the measured arrival rate to check headroom. Finite replay must
-finish with every job accounted for, including failures.
-
-The declared pilot passes when all of these hold:
-
-- Score parity and correctness checks pass.
-- Saturated aggregate capacity is at least `1.25 * lambda` on the same workload
-  mix and CPU budget. Report successful panels/s separately from failure handling.
-- At the real arrival rate, mean queued jobs in the last minute is no more than
-  one above the first post-warmup minute in each replay. Plot the full queue trace
-  to expose bursts and growth hidden by that simple criterion.
-- p95 queue wait is no greater than `max(0.1 s, 10% of median LLM-call latency)`.
-  For synthetic-only runs, report wait without claiming this real-LLM gate passed.
-- No drops, increasing backpressure or worsening failure rate explain the result.
-
-These are predeclared engineering thresholds, not a statistical proof of queue
-stability. A longer soak is warranted if arrivals or expensive policy tails vary
-substantially. Report failure honestly; do not reduce seed coverage to make the
-same benchmark appear to pass.
-
-## Bench C: live program search
-
-Use the chosen evaluator behind EliteSearch's callback. Run an initial
-100-proposal search: 20 candidates × 5 generations, elite size 5, 32 search seeds,
-and at most two repairs per proposal. Freeze model, generation concurrency,
-token ceilings and an explicit spend cap before launch. Count every repair and
-failed proposal. Stop at the first budget limit and retain the best valid policy.
-
-Generation and evaluation should overlap as candidates arrive. EliteSearch
-still ranks at a generation boundary: a stable average queue alone does not
-prove evaluation stopped delaying the loop. For each generation, record the
-time from its last generation/repair LLM response to its last persisted evaluation.
-Target a median residual evaluation tail below 10% of the generation's elapsed
-LLM-call window; also report the maximum. Model calls triggered by repairs belong
-in that window. Include ranking/checkpoint time separately.
-
-If the queue and tail gates pass, the operational objective is met: LLM generation
-sets the pace for this task, policy mix and resource allocation. Record how much
-seed coverage fits before evaluation becomes limiting again; test 128 seeds as
-a separate sensitivity run, never as the same 32-seed benchmark.
-
-To test program improvement, compare independent best-of-100 generation with
-fixed EliteSearch across five paired runs each. Use identical model/resource
-ceilings; report quality against both proposal count and actual spend. Independent
-proposals receive no elite descriptions, source or scores—`new_fraction=1` alone
-does not remove that context from the existing prompt.
-
-Select among each run's top five policies on seeds 1000–1127 (128 validation
-cases), then evaluate the frozen winner once on seeds 2000–2511 (512 test cases).
-Never feed test results into search or repairs. Report per-run mean merge score
-and paired differences with uncertainty across search runs. Use the same reviewed
-heuristic as a predeclared fallback if a run yields no valid policy. Five paired
-runs are a pilot; they may not resolve small effects.
-
-## Results to save
-
-Save one manifest, an event log and a result table alongside policy sources and
-per-seed scores under the run output directory. Required timing events are:
-
-```text
-candidate/job ID, policy hash, generation, attempt/repair
-LLM start, LLM finish, evaluation submitted, worker acquired
-worker/reset ready, rollout finished, result received, score persisted
-actual decisions, successful seeds, native endings, external truncations, failure
+```bash
+./scripts/run examples.ocean_search \
+  --env g2048 --arm elite --model "${MODEL:?Set MODEL}" \
+  --population 50 --generations 10 --elites 10 --max-repairs 2 \
+  --seeds 0 1 2 3 4 5 6 7 8 9 \
+  --batch-size 32 --max-steps 2000 --score-key merge_score \
+  --workers 4 --generation-concurrency 25 \
+  --spend-cap 100 --input-price 0.01 --output-price 0.01 \
+  --output runs/ocean-upstream-search
 ```
 
-Use a common parent monotonic clock for queue and completion timestamps. Worker
-subphase durations use their own monotonic clock; do not subtract clocks from
-different machines. Service time spans worker acquisition through score persistence;
-response time spans submission through persistence and includes queue wait.
+The price flags are user-supplied accounting ceilings, not model price claims.
+Finalist selection still uses episode seeds 1000–1127 and the winner's test uses
+2000–2511. They use the same B/H/scoring settings as search and add substantial
+work. Every manifest records the protocol, upstream commit, binary hash,
+environment kwargs, scoring key, seeds, and workload.
 
-| Mode / batch / workers | Valid panels/s | Actual steps/s | Median / p95 service | p95 queue wait | Final queue / drain | Peak RAM | Score parity |
-| --- | ---: | ---: | --- | ---: | --- | ---: | --- |
-| A: reference | measured | measured | measured | measured | measured | measured | pass/fail |
-| B: summaries | measured | measured | measured | measured | measured | measured | pass/fail |
-| C: batches | measured | measured | measured | measured | measured | measured | pass/fail |
+`reference` mode starts one process per episode seed. `batch` mode groups the
+requested episodes into batches of up to B within one candidate process. `summary`
+is an alias for `batch`. All modes evaluate the same seeded episodes.
 
-The conclusion should state: **“At X generated jobs/s, Y seed games per candidate,
-and Z CPU cores, evaluation sustained M valid panels/s, p95 queue wait W, and
-residual generation tail T.”** Report the measured reference speedup as secondary.
-This is stronger evidence for our goal than simulator steps/s alone.
+The correctness command checks repeated batches, seed-order independence, and
+process-boundary parity and equality across batch widths. The capacity `--matrix`
+compares modes
+and 1/2/4 workers at that same width. Throughput includes startup and persistence.
+Run fresh benchmarks before making speed claims. Historical measurements and
+the old design remain in [OCEAN_BENCHMARK_LEGACY.md](OCEAN_BENCHMARK_LEGACY.md).
 
-## Follow-up: improve the searcher itself
+## Episodic fix verification (2026-10-03)
 
-The [Ocean meta-experiment](OCEAN_META_EXPERIMENT.md) specifies the fixed evaluator,
-three objectives (performance, output-token efficiency and evaluation efficiency),
-outer controller search, held-out protocol and proposed experiment budgets.
+- Rebuilt the patched bindings on native macOS ARM64 and Linux x86-64 Docker.
+- Six native regressions pass: terminal flags, frozen final state, step caps,
+  retained capped scores, independent seeds across widths/order, and Breakout endings.
+- All **280 tests pass** in Docker as UID 501, with a read-only workspace and
+  networking disabled. Log: `/private/tmp/ocean-episode-docker-tests.log`.
+- Changed Python files pass Ruff checks and formatting; `git diff --check` passes.
+- No new throughput benchmark was run on the shared host.
 
-After Bench C, permit edits to parent selection, mutation prompts and operator
-allocation while freezing the evaluator and budgets. Compare a frozen searcher,
-a fixed editor proposing controller revisions, and a recursive arm where promoted
-controller code helps propose successors. Evaluate each revision using fresh inner
-searches, not inherited winning policies, and count all nested generation costs.
-Keep final transfer cases hidden and repeat outer searches independently before
-claiming recursive improvement. This is a follow-up, not a prerequisite for making
-evaluation fast enough.
+## Historical fixed-horizon speed check (2026-10-03)
 
-## References
+**Everything below used `ocean-upstream-fixed-horizon-v1`. These are preserved
+historical measurements, not performance claims or worker recommendations for
+the corrected episodic protocol. No replacement timing run has been made while
+the host is busy with other work.**
 
-- [Current evaluator](../rsikit/evaluation.py), [executor](../rsikit/execution.py),
-  [EliteSearch](../research/elitesearch/agent.py), [Measurement](../research/rewards.py).
-- [Current execution boundaries](IN_PROCESS_SANDBOX.md).
-- [Pinned Ocean API](https://github.com/PufferAI/PufferLib/blob/6ffa5b10dbbbe4d1e8288367c7d9d3acd3bad4a2/src/pufferenv.h).
-- [Pinned 2048 implementation](https://github.com/PufferAI/PufferLib/blob/6ffa5b10dbbbe4d1e8288367c7d9d3acd3bad4a2/ocean/g2048/g2048.h)
-  and [configuration](https://github.com/PufferAI/PufferLib/blob/6ffa5b10dbbbe4d1e8288367c7d9d3acd3bad4a2/config/g2048.ini).
+The then-current upstream path retained a large batching advantage on `g2048`:
+**25.73× in one complete eight-policy comparison on one worker**. This checks
+serial versus vector evaluation under the new protocol; it is not a direct
+timing comparison between the old custom binding and the upstream binding.
 
-The preceding research notes in `outputs/puffer-ocean-search.md` contain broader
-version comparisons and the source audit. This specification is self-contained;
-those local research outputs are not required to interpret the benchmark.
+Both paths executed **64,000 game transitions per policy**, or **512,000 per
+eight-policy pass**, with the same reviewed NumPy policy implementations:
+
+| Path | Configuration per policy | Eight-policy time | Transitions/s |
+| --- | --- | ---: | ---: |
+| Serial | B=1, 32 seeds, 2,000 steps; fresh process per seed | 431.060 s | 1,188 |
+| Vector | B=32, one seed, 2,000 steps; one process | 16.751 s | 30,565 |
+
+Per-policy service times include startup, validation, evaluation, and persistence:
+
+| Policy | Serial seconds | Vector seconds | Speedup |
+| --- | ---: | ---: | ---: |
+| legal-priority | 42.587 | 1.504 | 28.32× |
+| merge-greedy | 42.654 | 1.539 | 27.71× |
+| empty-cells | 42.432 | 1.573 | 26.97× |
+| corner | 42.528 | 1.617 | 26.29× |
+| smooth-board | 42.519 | 1.579 | 26.92× |
+| corner-smooth | 42.520 | 1.584 | 26.84× |
+| merge-two-ply | 87.845 | 3.700 | 23.74× |
+| board-two-ply | 87.972 | 3.651 | 24.10× |
+
+This was native macOS ARM64, Python 3.14.2, NumPy 2.5.3, with numerical-library
+thread limits set to one. Hardware allocation was not OS-enforced. All 16 measured
+panels succeeded and their transition counts were checked. The harness's first
+and warm-up panels were excluded, but each measured candidate still paid for
+fresh child-process startup. The vector pass ran first.
+
+**Only one full comparison completed.** Three repetitions were planned, but the
+second serial pass developed substantial timing drift: previously ~42.5-second
+panels took 86–184 seconds. The host wall clock also advanced about 19.7 minutes
+more than `perf_counter`, consistent with sleep or a clock discontinuity. The six
+completed repeat panels reproduced their original full result rows exactly.
+The run was stopped during its seventh panel; the third repetition was not
+started. These partial timings are retained in the evidence, not included in a
+claimed three-run median. The 25.73× result is a local observation, not a stable
+repeated estimate or a sustained-capacity qualification.
+
+A separate, smaller process-lifetime check kept **B=32, seeds=[0,1], H=2000**
+identical in both modes, using `legal-priority` and `board-two-ply`. `reference`
+took **17.162 s** and `batch` took **11.617 s**, a **1.48×** speedup in one pass.
+All scores and full result rows matched exactly. This isolates process lifetime
+at a fixed batch width; it does not by itself reproduce the serial-to-vector
+speedup, and its timings were collected after the host slowdown.
+
+Changing batch width changes upstream random streams, so the main comparison
+matches transition counts, not trajectories or scores. The historical 21.23×
+benchmark also stopped games at episode endings, whereas this benchmark always
+runs the full horizon with autoresets. Its absolute times and search-duration
+estimates cannot be carried forward. These results apply to the reviewed policy
+mix; arbitrary generated policies and other Ocean games need their own timings.
+No LLM calls or full optimizer searches were included.
+
+Compact evidence, hashes, manifests, and partial-repeat timings:
+[ocean-upstream-speedup-2026-10-03.json](ocean-upstream-speedup-2026-10-03.json).
+Full local artifacts and driver scripts are under
+`runs/ocean-upstream-speedup-2026-10-03/`.
+
+The old comparison cannot be reproduced with the corrected evaluator: the same
+flags now request a different workload. Preserve the artifact manifests when
+comparing historical results; new benchmarks must use equal episode seed lists.
+
+## Historical policy evaluation throughput by worker count (2026-10-03)
+
+**Sixteen workers were fastest among the tested configurations**, reaching a
+median **1.435 completed policy evaluations/second**. In the follow-up sweep,
+this was **12.85% faster than eight workers**. Twelve workers offered essentially
+the same median throughput as eight. This is the best tested setting for this
+workload and finite queue, not a proven optimum for every search workload.
+
+Every candidate received exactly **64,000 transitions**: `g2048`, batch size 32,
+seed `[0]`, horizon 2,000, and `merge_score` scoring. Each trial evaluated the same
+eight reviewed policies twice, with caching disabled: **16 jobs and 1,024,000
+transitions**. All jobs were ready at the start, and the evaluator's worker limit
+controlled concurrency. Batch width, seeds, horizon, and policy order stayed
+fixed. This sweep changes scheduling, not the scoring protocol.
+
+Three trials per worker count used different configuration orders. Timings
+include candidate process startup, execution, validation, result persistence,
+and draining all 16 jobs; two initialization panels per trial are excluded.
+
+| Initial sweep: workers | Median evaluations/s | Observed range | Median time for 16 jobs |
+| ---: | ---: | ---: | ---: |
+| 1 | 0.344 | 0.170–0.376 | 46.466 s |
+| 2 | 0.589 | 0.336–0.630 | 27.172 s |
+| 4 | 0.873 | 0.569–0.889 | 18.322 s |
+| 8 | 1.108 | 0.797–1.146 | 14.436 s |
+
+Because eight workers led that sweep, a second sweep compared higher counts
+against a fresh eight-worker control:
+
+| Follow-up: workers | Median evaluations/s | Observed range | Median time for 16 jobs |
+| ---: | ---: | ---: | ---: |
+| 8 | 1.272 | 1.028–1.319 | 12.583 s |
+| 12 | 1.275 | 1.270–1.375 | 12.545 s |
+| 16 | **1.435** | **1.406–1.516** | **11.150 s** |
+
+All **336 measured evaluations passed**, covering **21,504,000 transitions**.
+Full result rows matched exactly across both sweeps, all worker counts, and all
+repetitions. This used the same pinned upstream binary on native macOS ARM64,
+with 12 reported logical CPUs and numerical-library thread limits of one.
+
+The host was not reserved exclusively for benchmarking, and the initial sweep
+showed substantial timing variation. All trials are retained; the reported
+ranges are observed minima/maxima, not confidence intervals. The largest measured
+wall-clock versus monotonic-clock gap was 0.053 seconds. Use the second sweep's
+eight-worker control when comparing 8/12/16, rather than mixing their ratios with
+the earlier, slower baseline. These finite 16-job trials do not establish
+sustained capacity or the best concurrency for a larger queue; counts above 16
+were not tested.
+
+Sixteen workers led that historical workload; this is not a recommendation for
+the corrected evaluator. The absolute rates above apply to **one batch seed per policy**.
+The example search configuration uses ten seeds and therefore performs ten times
+as many transitions per policy; its evaluation rate needs a separate measurement.
+No LLM generation, repairs, held-out evaluation, or videos were included here.
+
+Evidence: [ocean-upstream-workers-2026-10-03.json](ocean-upstream-workers-2026-10-03.json).
+The [driver](ocean_worker_scaling.py) now follows the corrected episode budget,
+checks every result, and saves raw events; it does not reproduce these old timings.
+Run from the repository root, using fresh output directories:
+
+```bash
+PYTHONPATH=. .venv/bin/python docs/ocean_worker_scaling.py runs/worker-sweep 1 2 4 8
+PYTHONPATH=. .venv/bin/python docs/ocean_worker_scaling.py runs/higher-workers 8 12 16
+```
+
+## Historical fixed-horizon verification (2026-10-03)
+
+- Built the unmodified upstream bindings on native macOS ARM64 and in Linux
+  x86-64 Docker, using Python 3.14, NumPy 2.5.3, and Gymnasium 1.3.0.
+- **258 tests passed** in the read-only Docker container as UID 501, against the
+  current workspace, with networking disabled. Log:
+  `/private/tmp/ocean-upstream-docker-final.log`.
+- **24 Ocean/launcher tests passed** locally. They cover fixed-width workload
+  accounting, direct upstream reward/log agreement, invalid actions, repeatability,
+  process parity, failure recovery, cancellation, search wiring, and arrival replay.
+- Both environment correctness commands passed. A scripted-provider search
+  completed real evaluation, 128 validation seeds, and 512 test seeds at B=2/H=4.
+  This was a plumbing check, not a policy-performance result; no paid model calls.
+- Changed Python files pass Ruff lint and formatting; `git diff --check` passes.
+
+The host-wide run had four existing environment-dependent errors:
+`ApplicationEpisodeTests.test_replay_records_best_completed_policy_without_changing_original_scores`,
+`ApplicationEpisodeTests.test_run_records_real_video_artifact`,
+`ApplicationEpisodeTests.test_scientific_libraries_in_episode_process`, and
+`ScientificLibrariesTests.test_numerical_operations`. The first two concern video
+workers; the latter two lack the host's `control` package. All four passed in Docker.
+The initial Docker verification mistakenly used root and triggered three non-root
+assertions; the corrected full run above passed.
+
+Repository-wide Ruff still reports existing import-order errors in
+`research/{alphaevolve,elitesearch,lineagesearch,shinkaevolve}/generation.py`, plus
+formatting in `docs/RUNS.md` and
+`docs/superpowers/plans/2026-09-19-persistent-sandbox-python.md`. Those unrelated
+files were not changed.

@@ -4,6 +4,8 @@ import json
 import tempfile
 import unittest
 from pathlib import Path
+from xml.etree import ElementTree as ET
+from zipfile import ZipFile
 
 import numpy as np
 
@@ -112,6 +114,19 @@ class BitcoinRenderTests(unittest.TestCase):
             self.assertEqual(count_frames_and_secs(str(root / "test.mp4"))[0], 2)
             self.assertTrue((root / "test.png").exists())
             self.assertEqual(result["segments"][0]["final_equity"], 10000 + reward)
+            self.assertTrue((root / "test.svg").exists())
+            self.assertTrue((root / "test.svg.zip").exists())
+            with ZipFile(root / "test.svg.zip") as archive:
+                frames = sorted(n for n in archive.namelist() if n.startswith("frames/"))
+                self.assertEqual(frames, ["frames/00000000.svg", "frames/00000001.svg"])
+                timeline = json.loads(archive.read("timeline.json"))
+                self.assertEqual(timeline["fps"], 30)
+                self.assertEqual(timeline["initial_frame"], False)
+                self.assertEqual(timeline["segments"][0]["first_frame"], 0)
+                self.assertIn("fonts/lmsans10-regular.otf", archive.namelist())
+                for name in frames:
+                    svg = ET.fromstring(archive.read(name))
+                    self.assertEqual(svg.findall(".//{http://www.w3.org/2000/svg}image"), [])
 
 
 if __name__ == "__main__":

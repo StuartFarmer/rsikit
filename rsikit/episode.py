@@ -2,27 +2,117 @@
 
 import base64
 import math
-from dataclasses import dataclass, field
-from typing import Any
+from typing import Annotated, Union
 
 import numpy as np
+from pydantic import AfterValidator, BaseModel, BeforeValidator, ConfigDict, Field
+from typing_extensions import TypeAliasType
 
 
-@dataclass
-class Episode:
-    """Copied trajectory: T actions/rewards/flags, T+1 observations/infos.
+def _reward(value):
+    # Strict float validation also accepts float-convertible objects, including NumPy booleans.
+    if type(value) not in (int, float) or (type(value) is float and not math.isfinite(value)):
+        raise ValueError("Episode rewards must be finite ordinary numbers")
+    return value
+
+
+def _array(value):
+    if value.dtype.kind not in "biuf" or value.dtype.itemsize > 16:
+        raise ValueError("Episode arrays must contain real numbers or booleans")
+    if value.nbytes > 262_144:
+        raise ValueError("Array exceeds 256 KiB")
+    return value
+
+
+EpisodeValue = TypeAliasType(
+    "EpisodeValue",
+    Union[
+        Annotated[np.ndarray, AfterValidator(_array)],
+        np.integer,
+        np.floating,
+        np.bool_,
+        None,
+        bool,
+        int,
+        float,
+        str,
+        bytes,
+        list["EpisodeValue"],
+        tuple["EpisodeValue", ...],
+        dict[str, "EpisodeValue"],
+    ],
+)
+
+
+class Episode(BaseModel):
+    """An attempted rollout, including its partial trajectory and candidate error.
+
+    Recorded transitions have T actions/rewards/flags and T+1 observations/infos.
+    Initialization failures may have no initial observation. An error means the
+    accumulated rewards are partial evidence, not a successful fitness score.
 
     Transition t is observations[t], actions[t], rewards[t], observations[t+1],
     terminations[t], truncations[t], infos[t+1]. Index 0 of infos is reset info.
     """
 
-    observations: list[Any] = field(default_factory=list)
-    actions: list[Any] = field(default_factory=list)
-    rewards: list[float] = field(default_factory=list)
-    terminations: list[bool] = field(default_factory=list)
-    truncations: list[bool] = field(default_factory=list)
-    infos: list[dict[str, Any]] = field(default_factory=list)
-    artifacts: dict[str, bytes] = field(default_factory=dict)
+    model_config = ConfigDict(
+        strict=True, extra="forbid", arbitrary_types_allowed=True, revalidate_instances="always"
+    )
+
+    observations: list[EpisodeValue] = Field(default_factory=list)
+    actions: list[EpisodeValue] = Field(default_factory=list)
+    rewards: list[Annotated[int | float, BeforeValidator(_reward)]] = Field(default_factory=list)
+    terminations: list[bool] = Field(default_factory=list)
+    truncations: list[bool] = Field(default_factory=list)
+    infos: list[dict[str, EpisodeValue]] = Field(default_factory=list)
+    artifacts: dict[str, bytes] = Field(default_factory=dict)
+    error: Annotated[str, Field(pattern=r"\S")] | None = None
+
+    def validate_complete(self) -> "Episode":
+        """Validate current fields and trajectory, including post-construction mutations."""
+        type(self).model_validate(self)
+        length = len(self)
+        if (not length and self.error is None) or any(
+            len(track) != length for track in (self.actions, self.terminations, self.truncations)
+        ):
+            raise ValueError("Episode transitions are not aligned")
+        initial = len(self.observations)
+        if initial != len(self.infos) or (
+            initial != length + 1 and not (self.error is not None and length == initial == 0)
+        ):
+            raise ValueError("Episode must include its initial observation and info")
+        ends = list(zip(self.terminations, self.truncations))
+        if any(a or b for a, b in ends[:-1]) or (self.error is None and not any(ends[-1])):
+            raise ValueError("Episode must end exactly at its last transition")
+        return self
+
+    def encode(self) -> dict:
+        """Return validated native values for pickle transport and storage."""
+        self.validate_complete()
+        return self.model_dump(exclude={"error"} if self.error is None else set())
+
+    @classmethod
+    def from_data(cls, data: dict) -> "Episode":
+        """Validate native fields, also accepting the previous tagged JSON format."""
+        fields = {
+            "observations",
+            "actions",
+            "rewards",
+            "terminations",
+            "truncations",
+            "infos",
+            "artifacts",
+        }
+        if not isinstance(data, dict) or set(data) not in (fields, fields | {"error"}):
+            raise ValueError("Malformed episode fields")
+        if isinstance(data["rewards"], list) and data["rewards"][:1] == ["list"]:
+            data = {name: _LegacyDecoder.decode(value) for name, value in data.items()}
+        return cls.model_validate(data).validate_complete()
+
+    def decode(self, data: dict) -> "Episode":
+        """Replace this episode with decoded data, leaving it intact if validation fails."""
+        self.__dict__.update(vars(type(self).from_data(data)))
+        return self
 
     def __len__(self) -> int:
         return len(self.rewards)
@@ -43,133 +133,56 @@ class Episode:
         )
 
 
-MAX_ARRAY_BYTES = 262_144
+class _LegacyDecoder:
+    """Read existing tagged JSON episodes; new episodes use pickle."""
 
+    MAX_ARRAY_BYTES = 262_144
 
-def _dtype(name):
-    dtype = np.dtype(name)
-    if dtype.kind not in "biufc" or dtype.itemsize > 16:
-        raise ValueError("Only ordinary numeric and boolean arrays are supported")
-    return dtype
+    @staticmethod
+    def _dtype(name):
+        dtype = np.dtype(name)
+        if dtype.kind not in "biufc" or dtype.itemsize > 16:
+            raise ValueError("Only ordinary numeric and boolean arrays are supported")
+        return dtype
 
+    @classmethod
+    def _shape(cls, shape, dtype):
+        if not isinstance(shape, (list, tuple)) or len(shape) > 32:
+            raise ValueError("Invalid array shape")
+        if any(type(n) is not int or n < 0 or n > cls.MAX_ARRAY_BYTES for n in shape):
+            raise ValueError("Invalid array dimension")
+        size = math.prod(shape) * dtype.itemsize
+        if size > cls.MAX_ARRAY_BYTES:
+            raise ValueError("Array exceeds 256 KiB")
+        return size
 
-def _shape(shape, dtype):
-    if not isinstance(shape, (list, tuple)) or len(shape) > 32:
-        raise ValueError("Invalid array shape")
-    if any(type(n) is not int or n < 0 or n > MAX_ARRAY_BYTES for n in shape):
-        raise ValueError("Invalid array dimension")
-    size = math.prod(shape) * dtype.itemsize
-    if size > MAX_ARRAY_BYTES:
-        raise ValueError("Array exceeds 256 KiB")
-    return size
-
-
-def encode(value, _depth=0):
-    if _depth > 64:
-        raise ValueError("Value nesting exceeds 64")
-    if isinstance(value, np.ndarray):
-        _shape(value.shape, _dtype(value.dtype.str))
-        return [
-            "array",
-            value.dtype.str,
-            list(value.shape),
-            base64.b64encode(value.tobytes()).decode(),
-        ]
-    if isinstance(value, np.generic):
-        return encode(value.item(), _depth + 1)
-    if value is None or type(value) in (bool, int, str):
-        return value
-    if isinstance(value, bytes):
-        return ["bytes", base64.b64encode(value).decode()]
-    if type(value) is float:
-        return value if math.isfinite(value) else ["float", str(value)]
-    if isinstance(value, (tuple, list)):
-        return [
-            "tuple" if isinstance(value, tuple) else "list",
-            [encode(v, _depth + 1) for v in value],
-        ]
-    if isinstance(value, dict):
-        return ["dict", [[encode(k, _depth + 1), encode(v, _depth + 1)] for k, v in value.items()]]
-    raise ValueError(f"Unsupported value type: {type(value).__name__}")
-
-
-def decode(value, _depth=0):
-    if _depth > 64:
-        raise ValueError("Value nesting exceeds 64")
-    if value is None or type(value) in (bool, int, float, str):
-        return value
-    if not isinstance(value, list) or not value:
-        raise ValueError("Invalid encoded value")
-    tag = value[0]
-    if tag == "array" and len(value) == 4:
-        dtype = _dtype(value[1])
-        size = _shape(value[2], dtype)
-        if not isinstance(value[3], str) or len(value[3]) > 4 * ((size + 2) // 3):
-            raise ValueError("Invalid array payload size")
-        data = base64.b64decode(value[3], validate=True)
-        if len(data) != size:
-            raise ValueError("Array payload does not match shape")
-        return np.frombuffer(data, dtype=dtype).reshape(value[2]).copy()
-    if len(value) != 2:
-        raise ValueError("Invalid encoded value")
-    if tag == "bytes" and isinstance(value[1], str):
-        return base64.b64decode(value[1], validate=True)
-    if tag == "float" and value[1] in ("nan", "inf", "-inf"):
-        return float(value[1])
-    if tag in ("tuple", "list") and isinstance(value[1], list):
-        items = [decode(v, _depth + 1) for v in value[1]]
-        return tuple(items) if tag == "tuple" else items
-    if tag == "dict" and isinstance(value[1], list):
-        return {decode(k, _depth + 1): decode(v, _depth + 1) for k, v in value[1]}
-    raise ValueError("Unknown value tag")
-
-
-def encode_episode(episode):
-    """Stable data-only representation for saved episodes."""
-    if not isinstance(episode, Episode):
-        raise ValueError("Expected an Episode")
-    _validate_episode(vars(episode))
-    return {name: encode(value) for name, value in vars(episode).items()}
-
-
-def decode_episode(data):
-    fields = {
-        "observations",
-        "actions",
-        "rewards",
-        "terminations",
-        "truncations",
-        "infos",
-        "artifacts",
-    }
-    if not isinstance(data, dict) or set(data) != fields:
-        raise ValueError("Malformed episode fields")
-    values = {name: decode(value) for name, value in data.items()}
-    _validate_episode(values)
-    return Episode(**values)
-
-
-def _validate_episode(values):
-    if any(not isinstance(values[name], list) for name in set(values) - {"artifacts"}):
-        raise ValueError("Episode tracks must be lists")
-    length = len(values["rewards"])
-    if not length or any(
-        len(values[name]) != length for name in ("actions", "terminations", "truncations")
-    ):
-        raise ValueError("Episode transitions are not aligned")
-    if any(len(values[name]) != length + 1 for name in ("observations", "infos")):
-        raise ValueError("Episode must include its initial observation and info")
-    if any(type(r) not in (int, float) or not math.isfinite(r) for r in values["rewards"]):
-        raise ValueError("Episode rewards must be finite numbers")
-    ends = list(zip(values["terminations"], values["truncations"]))
-    if any(type(flag) is not bool for pair in ends for flag in pair):
-        raise ValueError("Episode end flags must be boolean")
-    if any(a or b for a, b in ends[:-1]) or not any(ends[-1]):
-        raise ValueError("Episode must end exactly at its last transition")
-    if any(not isinstance(info, dict) for info in values["infos"]):
-        raise ValueError("Episode infos must be dictionaries")
-    artifacts = values["artifacts"]
-    if not isinstance(artifacts, dict) or any(
-        not isinstance(k, str) or not isinstance(v, bytes) for k, v in artifacts.items()
-    ):
-        raise ValueError("Episode artifacts must map paths to bytes")
+    @classmethod
+    def decode(cls, value, _depth=0):
+        if _depth > 64:
+            raise ValueError("Value nesting exceeds 64")
+        if value is None or type(value) in (bool, int, float, str):
+            return value
+        if not isinstance(value, list) or not value:
+            raise ValueError("Invalid encoded value")
+        tag = value[0]
+        if tag == "array" and len(value) == 4:
+            dtype = cls._dtype(value[1])
+            size = cls._shape(value[2], dtype)
+            if not isinstance(value[3], str) or len(value[3]) > 4 * ((size + 2) // 3):
+                raise ValueError("Invalid array payload size")
+            data = base64.b64decode(value[3], validate=True)
+            if len(data) != size:
+                raise ValueError("Array payload does not match shape")
+            return np.frombuffer(data, dtype=dtype).reshape(value[2]).copy()
+        if len(value) != 2:
+            raise ValueError("Invalid encoded value")
+        if tag == "bytes" and isinstance(value[1], str):
+            return base64.b64decode(value[1], validate=True)
+        if tag == "float" and value[1] in ("nan", "inf", "-inf"):
+            return float(value[1])
+        if tag in ("tuple", "list") and isinstance(value[1], list):
+            items = [cls.decode(v, _depth + 1) for v in value[1]]
+            return tuple(items) if tag == "tuple" else items
+        if tag == "dict" and isinstance(value[1], list):
+            return {cls.decode(k, _depth + 1): cls.decode(v, _depth + 1) for k, v in value[1]}
+        raise ValueError("Unknown value tag")

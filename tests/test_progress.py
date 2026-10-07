@@ -18,7 +18,7 @@ from research import alphaevolve
 from research.alphaevolve.generation import _PolicyResponse
 from research.alphaevolve.improved import AlphaEvolve, Config
 from rsikit.evaluation import PolicyError
-from tests.helpers import fake_executor, recorded_run
+from tests.helpers import episodes, fake_executor, recorded_run
 from tests.providers import ScriptedProvider
 from tests.test_episode_storage import trajectory
 from tests.test_run import RESPONSE, FakeEvaluation
@@ -122,6 +122,27 @@ if __name__ == "__main__":
 
 
 class DashboardTests(unittest.TestCase):
+    def test_worker_activity_stays_visible_without_changing_outer_progress(self):
+        d = self.display(width=160)
+        self.send(d, "search_started", optimizer="Meta", total_candidates=20)
+        self.send(d, "batch_started", batch_id="1", label="Generation 1", total_candidates=20)
+        self.send(
+            d,
+            "workers",
+            pools={
+                "Searches": dict(active=8, limit=8, queued=52, finished=2),
+                "Panels": dict(active=16, limit=16, queued=80, finished=100),
+                "Models": dict(active=3, limit=8, queued=0, finished=25),
+            },
+        )
+        with d.console.capture() as captured:
+            d.console.print(d.render())
+        self.assertIn("Panels 16/16", captured.get())
+        self.assertIn("Searches 8/8", captured.get())
+        self.assertIn("Models 3/8", captured.get())
+        self.assertEqual(d.model.batch_counts("1"), (0, 40))
+        self.assertFalse(d.model.evaluations)
+
     def display(self, width=120, height=45):
         from rsikit.progress import RunDisplay
 
@@ -169,21 +190,21 @@ class DashboardTests(unittest.TestCase):
         self.send(d, "batch_started", batch_id="1", label="Generation 1", total_candidates=50)
         for i in range(44):
             self.candidate(d, i, status="evaluated" if i < 26 else "generated")
-        self.assertEqual(d.batch_counts("1"), (70, 100))
+        self.assertEqual(d.model.batch_counts("1"), (70, 100))
         self.candidate(d, 0, status="evaluated")
-        self.assertEqual(d.batch_counts("1"), (70, 100))
+        self.assertEqual(d.model.batch_counts("1"), (70, 100))
         self.candidate(d, 26, revision=1, status="repairing")
         self.candidate(d, 26, revision=0, status="evaluated")
-        self.assertEqual(d.batch_counts("1"), (70, 100))
+        self.assertEqual(d.model.batch_counts("1"), (70, 100))
         self.send(d, "batch_started", batch_id="2", label="Generation 2", total_candidates=50)
         self.candidate(d, 0, batch_id="2", status="evaluated")
-        self.assertEqual(d.current_batch, "1")
-        self.assertEqual(d.completed, 72)
-        self.assertEqual(d.total, 200)
+        self.assertEqual(d.model.current_batch, "1")
+        self.assertEqual(d.model.completed, 72)
+        self.assertEqual(d.model.total, 200)
         self.send(d, "search_finished", status="stopped", reason="target_reached")
-        self.assertEqual(d.completed, 72)
+        self.assertEqual(d.model.completed, 72)
         self.candidate(d, 27, status="evaluated")
-        self.assertEqual(d.completed, 72)
+        self.assertEqual(d.model.completed, 72)
 
     def test_policy_colors_follow_rows_across_panels_and_rank_changes(self):
         from rich.table import Column
@@ -234,32 +255,32 @@ class DashboardTests(unittest.TestCase):
         )
         self.send(d, "leaderboard", rows=list(reversed(leaders)))
         self.assertEqual(set(colors(d, "ALPHA")), {alpha[0]})
-        assigned = [d._color(f"policy-{i}") for i in range(1000)]
+        assigned = [d.view.color(f"policy-{i}") for i in range(1000)]
         self.assertEqual(len(set(assigned)), len(assigned))
-        self.assertEqual(assigned, [d._color(f"policy-{i}") for i in range(1000)])
-        self.assertIsNone(d._color(None))
+        self.assertEqual(assigned, [d.view.color(f"policy-{i}") for i in range(1000)])
+        self.assertIsNone(d.view.color(None))
 
     def test_work_tables_show_completions_and_use_terminal_height(self):
         d = self.display(height=60)
         self.send(d, "batch_started", batch_id="1", label="Generation 1", total_candidates=2)
         self.candidate(d, 0, policy_id="a81bcd", name="ALPHA", description="First proposal")
-        proposal = tuple(d.proposals)
+        proposal = tuple(d.model.proposals)
         self.candidate(d, 0, policy_id="a81bcd", name="ALPHA", status="evaluating")
-        self.assertFalse(d.evaluations)
+        self.assertFalse(d.model.evaluations)
         with (
             patch("logging.time.time", return_value=45296),
             patch("logging.time.time_ns", return_value=45296_000_000_000),
         ):
             self.candidate(d, 0, policy_id="a81bcd", name="ALPHA", status="evaluated", score=7)
-        self.assertEqual(d.evaluations[0]["time"], "12:34:56")
-        self.assertEqual(tuple(d.proposals), proposal)
-        self.assertEqual(d.evaluations[0]["score"], 7)
-        before = len(d.evaluations)
+        self.assertEqual(d.model.evaluations[0]["time"], "12:34:56")
+        self.assertEqual(tuple(d.model.proposals), proposal)
+        self.assertEqual(d.model.evaluations[0]["score"], 7)
+        before = len(d.model.evaluations)
         self.candidate(d, 0, policy_id="a81bcd", name="ALPHA", status="evaluated", score=7)
-        self.assertEqual(len(d.evaluations), before)
+        self.assertEqual(len(d.model.evaluations), before)
         self.send(d, "batch_started", batch_id="1", label="Generation 1", total_candidates=2)
-        self.assertEqual(tuple(d.proposals), proposal)
-        self.assertEqual(len(d.evaluations), before)
+        self.assertEqual(tuple(d.model.proposals), proposal)
+        self.assertEqual(len(d.model.evaluations), before)
         d.console.print(d.render())
         output = d.console.file.getvalue()
         self.assertEqual(len(output.splitlines()), 60)
@@ -271,24 +292,24 @@ class DashboardTests(unittest.TestCase):
         self.assertIn("ALPHA", evaluation_output)
         self.assertNotIn("BETA", evaluation_output)
         self.send(d, "batch_finished", batch_id="1", status="completed")
-        self.assertEqual(tuple(d.proposals), proposal)
-        self.assertEqual(len(d.evaluations), before)
+        self.assertEqual(tuple(d.model.proposals), proposal)
+        self.assertEqual(len(d.model.evaluations), before)
         self.send(d, "batch_started", batch_id="2", label="Generation 2", total_candidates=1)
-        self.assertFalse(d.proposals)
-        self.assertFalse(d.evaluations)
+        self.assertFalse(d.model.proposals)
+        self.assertFalse(d.model.evaluations)
         self.candidate(
             d, 1, batch_id="2", policy_id="c012f3", name="BETA", description="Second proposal"
         )
-        self.assertEqual([row["name"] for row in d.proposals], ["BETA"])
+        self.assertEqual([row["name"] for row in d.model.proposals], ["BETA"])
         self.candidate(d, 1, batch_id="2", name="BETA", status="evaluated", score=8)
-        self.assertEqual([row["name"] for row in d.evaluations], ["BETA"])
+        self.assertEqual([row["name"] for row in d.model.evaluations], ["BETA"])
 
     def test_proposals_only_queue_completed_generations_once(self):
         d = self.display()
         self.send(d, "batch_started", batch_id="1", label="Generation 1", total_candidates=None)
         for status in ("planned", "generating", "failed"):
             self.candidate(d, 0, status=status, proposal_done=False)
-        self.assertFalse(d.proposals)
+        self.assertFalse(d.model.proposals)
         with (
             patch("logging.time.time", return_value=45296),
             patch("logging.time.time_ns", return_value=45296_000_000_000),
@@ -296,9 +317,9 @@ class DashboardTests(unittest.TestCase):
             for attempt in range(1, 53):
                 self.candidate(d, attempt, name=f"Proposal {attempt}", description="Complete")
                 self.candidate(d, attempt, name=f"Proposal {attempt}", description="Complete")
-        self.assertEqual(len(d.proposals), 50)
+        self.assertEqual(len(d.model.proposals), 50)
         self.assertEqual(
-            [row["attempt_id"] for row in d.proposals], [str(i) for i in range(52, 2, -1)]
+            [row["attempt_id"] for row in d.model.proposals], [str(i) for i in range(52, 2, -1)]
         )
         d.console.print(d.render())
         output = d.console.file.getvalue()
@@ -321,7 +342,7 @@ class DashboardTests(unittest.TestCase):
             )
         ):
             self.candidate(d, attempt, status=status)
-        self.assertFalse(d.evaluations)
+        self.assertFalse(d.model.evaluations)
         for attempt in range(100, 152):
             self.candidate(
                 d,
@@ -332,12 +353,13 @@ class DashboardTests(unittest.TestCase):
                 score=float(attempt),
                 duration=12,
             )
-        self.assertEqual(len(d.evaluations), 50)
+        self.assertEqual(len(d.model.evaluations), 50)
         self.assertEqual(
-            [row["attempt_id"] for row in d.evaluations], [str(i) for i in range(151, 101, -1)]
+            [row["attempt_id"] for row in d.model.evaluations],
+            [str(i) for i in range(151, 101, -1)],
         )
         self.candidate(d, 151, status="evaluated", score=999)
-        self.assertEqual(d.evaluations[0]["score"], 151)
+        self.assertEqual(d.model.evaluations[0]["score"], 151)
         d.console.print(d.render())
         output = d.console.file.getvalue()
         self.assertLess(output.index("Result 151"), output.index("Result 150"))
@@ -349,18 +371,18 @@ class DashboardTests(unittest.TestCase):
         self.send(d, "search_started", total_candidates=1)
         self.send(d, "batch_started", batch_id="1", label="Generation 1", total_candidates=None)
         self.send(d, "batch_started", batch_id="1", label="Generation 1", total_candidates=1)
-        self.assertEqual(d.batch_counts("1"), (0, 2))
+        self.assertEqual(d.model.batch_counts("1"), (0, 2))
         self.candidate(d, 1, status="evaluated")
         self.send(d, "batch_finished", batch_id="1", status="completed")
         self.send(d, "search_finished", status="completed", reason="completed")
         self.send(d, "search_started", total_candidates=2)
-        self.assertIsNone(d.finished)
-        self.assertEqual(d.status, "running")
-        self.assertEqual((d.completed, d.total), (2, 4))
+        self.assertIsNone(d.model.finished)
+        self.assertEqual(d.model.status, "running")
+        self.assertEqual((d.model.completed, d.model.total), (2, 4))
         self.send(d, "batch_started", batch_id="2", label="Generation 2", total_candidates=1)
-        with patch("rsikit.progress.monotonic", return_value=100):
+        with patch("rsikit.progress.model.monotonic", return_value=100):
             self.candidate(d, 2, batch_id="2", status="evaluating")
-        with patch("rsikit.progress.monotonic", return_value=107):
+        with patch("rsikit.progress.model.monotonic", return_value=107):
             self.candidate(d, 2, batch_id="2", status="evaluated", score=3)
             d.console.print(d.render())
         self.assertIn("00:00:07", d.console.file.getvalue())
@@ -370,20 +392,20 @@ class DashboardTests(unittest.TestCase):
         self.send(d, "batch_started", batch_id="1", label="Batch 1", total_candidates=None)
         for i, status in enumerate(("discarded", "failed", "cancelled")):
             self.candidate(d, i, status=status, proposal_done=status != "cancelled")
-        self.assertEqual(d.batch_counts("1"), (4, None))
-        self.assertIsNone(d.total)
+        self.assertEqual(d.model.batch_counts("1"), (4, None))
+        self.assertIsNone(d.model.total)
         self.send(d, "batch_finished", batch_id="1", status="cancelled")
-        self.assertEqual(d.completed, 4)
+        self.assertEqual(d.model.completed, 4)
         empty = self.display()
         self.send(
             empty, "search_started", optimizer="Test", total_candidates=0, columns={}, resumed=False
         )
         self.send(empty, "search_finished", status="completed", reason="completed")
-        self.assertEqual(empty.completed, 0)
+        self.assertEqual(empty.model.completed, 0)
         empty.console.print(empty.render())
         zero = self.display()
         self.send(zero, "batch_started", batch_id="1", label="Generation 1", total_candidates=0)
-        self.assertEqual(zero.batches["1"]["status"], "completed")
+        self.assertEqual(zero.model.batches["1"]["status"], "completed")
         finished = self.display()
         self.send(finished, "batch_started", batch_id="1", label="Generation 1", total_candidates=1)
         self.candidate(finished, 1, status="evaluated")
@@ -409,6 +431,13 @@ class DashboardTests(unittest.TestCase):
         self.assertNotIn("Generation Progress:", output)
         self.assertEqual(len(output.splitlines()), 45)
 
+    def test_empty_batch_id_retains_work_counts(self):
+        d = self.display()
+        self.send(d, "batch_started", batch_id="", label="Batch 1", total_candidates=None)
+        self.candidate(d, 0, batch_id="", status="evaluated", score=7)
+        d.console.print(d.render())
+        self.assertEqual(d.console.file.getvalue().count("1/—"), 2)
+
     def test_exception_reason_is_literal_and_cannot_control_terminal(self):
         d = self.display()
         self.send(d, "search_started", total_candidates=0)
@@ -423,13 +452,13 @@ class DashboardTests(unittest.TestCase):
     def test_exact_history_supersedes_conservative_checkpoint_count(self):
         d = self.display()
         self.send(d, "search_started", total_candidates=4, completed_candidates_before=1)
-        self.assertEqual(d.completed, 2)
+        self.assertEqual(d.model.completed, 2)
         self.send(d, "batch_started", batch_id="1", label="Restored", total_candidates=3)
         for attempt, status in enumerate(("evaluated", "discarded", "cancelled")):
             self.candidate(d, attempt, status=status, restored=True, proposal_done=False)
         self.send(d, "batch_finished", batch_id="1", status="stopped", restored=True)
-        self.assertEqual(d.completed, 4)
-        self.assertEqual(d.total, 8)
+        self.assertEqual(d.model.completed, 4)
+        self.assertEqual(d.model.total, 8)
 
     def test_narrow_terminal_only_shows_completed_evaluations(self):
         d = self.display(80, 24)
@@ -510,13 +539,13 @@ class DashboardTests(unittest.TestCase):
                 status="bogus",
                 proposal_done=True,
             )
-            self.assertEqual(d.completed, 20)
+            self.assertEqual(d.model.completed, 20)
             d.console.print(d.render())
             output = d.console.file.getvalue()
             for label in ("w/ Test", "PROPOSALS", "EVALUATIONS", "EVENT LOG"):
                 self.assertIn(label, output)
             self.assertNotIn("\x1b", output)
-            self.assertTrue(any("Invalid progress" in line.plain for line in d.logs))
+            self.assertTrue(any("Invalid progress" in line.plain for line in d.view.events.lines))
             self.assertLessEqual(max(map(len, output.splitlines())), width)
             self.assertLessEqual(len(output.splitlines()), height)
             if width == 120:
@@ -524,7 +553,7 @@ class DashboardTests(unittest.TestCase):
                 self.assertIn("[bold] literal", output)
 
     def test_event_log_types_have_fixed_prefixes_and_preserve_error_details(self):
-        from rsikit.progress import _event_lines
+        from rsikit.progress.view import _event_lines
 
         console = self.display().console
         for level, status, event, label, color in (
@@ -566,7 +595,9 @@ class DashboardTests(unittest.TestCase):
             for attempt in range(50):
                 self.candidate(d, attempt)
                 self.candidate(d, attempt, status="evaluated", score=attempt)
-            d.logs.extend([Text("Long log message " * 20)] * 100 + [Text("Newest log entry")])
+            d.view.events.lines.extend(
+                [Text("Long log message " * 20)] * 100 + [Text("Newest log entry")]
+            )
             d.console.file.seek(0)
             d.console.file.truncate()
             d.console.print(d.render())
@@ -622,7 +653,7 @@ class DashboardTests(unittest.TestCase):
         self.candidate(d, 1, status="evaluated")
         self.send(d, "batch_started", batch_id="2", label="Generation 2", total_candidates=2)
         self.candidate(d, 2, batch_id="2", status="evaluated")
-        with patch("rsikit.progress.monotonic", return_value=d.started + 75):
+        with patch("rsikit.progress.model.monotonic", return_value=d.model.started + 75):
             d.console.print(d.render())
         lines = d.console.file.getvalue().splitlines()
         self.assertTrue(lines[0].startswith("╭"))
@@ -672,8 +703,85 @@ class DashboardTests(unittest.TestCase):
             d.console.print(d.render())
         self.assertEqual(column._cells, [])
         self.candidate(d, 1, policy_id=5)
-        self.assertEqual(d.completed, 0)
+        self.assertEqual(d.model.completed, 0)
         d.console.print(d.render())
+
+
+class DisplayLifecycleTests(unittest.TestCase):
+    def test_nested_runs_share_terminal_but_keep_logs_and_context_separate(self):
+        from rsikit.progress import bind_run
+        from rsikit.progress.controller import _current_run, _live_streams
+
+        output = io.StringIO()
+        console = Console(file=output, force_terminal=True, width=120, height=30)
+        logger = logging.getLogger("research.test")
+        parent = logging.getLogger("research")
+        original = (parent.level, list(parent.handlers), parent.propagate)
+        previous = _current_run.get()
+        streams = set(_live_streams)
+        start = {"progress": dict(kind="search_started", total_candidates=1)}
+        with tempfile.TemporaryDirectory() as directory:
+            outer_path, inner_path = Path(directory) / "outer", Path(directory) / "inner"
+            outer_path.mkdir()
+            inner_path.mkdir()
+            with bind_run(outer_path, console) as outer:
+                outer_binding = _current_run.get()
+                logger.info("outer message", extra=start)
+                self.assertIsNotNone(outer_binding.live)
+                with bind_run(inner_path, console) as inner:
+                    inner_binding = _current_run.get()
+                    logger.info("inner message", extra=start)
+                    self.assertIs(inner_binding, inner)
+                    self.assertIsNone(inner_binding.live)
+                    self.assertIsNotNone(outer_binding.live)
+                    self.assertIn("[research.test] inner message", output.getvalue())
+                self.assertIs(_current_run.get(), outer_binding)
+                logger.info("outer restored")
+            self.assertEqual(outer.model.status, "stopped")
+            self.assertIs(_current_run.get(), previous)
+            self.assertEqual(_live_streams, streams)
+            self.assertEqual((parent.level, parent.handlers, parent.propagate), original)
+            outer_log = (outer_path / "run.log").read_text()
+            inner_log = (inner_path / "run.log").read_text()
+            self.assertIn("outer restored", outer_log)
+            self.assertNotIn("inner message", outer_log)
+            self.assertIn("inner message", inner_log)
+            self.assertNotIn("outer message", inner_log)
+
+    def test_stop_failure_still_releases_run_resources(self):
+        from rich.live import Live
+
+        from rsikit.progress import bind_run
+        from rsikit.progress.controller import _current_run, _live_streams
+
+        console = Console(file=io.StringIO(), force_terminal=True, width=120, height=30)
+        parent = logging.getLogger("research")
+        original = (parent.level, list(parent.handlers), parent.propagate)
+        previous = _current_run.get()
+        streams = set(_live_streams)
+        real_stop = Live.stop
+
+        def broken_stop(live):
+            real_stop(live)
+            raise OSError("terminal disconnected")
+
+        with tempfile.TemporaryDirectory() as directory:
+            with patch.object(Live, "stop", broken_stop):
+                with self.assertRaisesRegex(OSError, "terminal disconnected"):
+                    with bind_run(Path(directory), console) as display:
+                        logging.getLogger("research.test").info(
+                            "started",
+                            extra={"progress": dict(kind="search_started", total_candidates=1)},
+                        )
+                        binding = _current_run.get()
+                        log_file = binding.file
+                        stream_key = binding.stream_key
+                        self.addCleanup(_live_streams.discard, stream_key)
+                self.assertTrue(log_file.closed)
+                self.assertIs(_current_run.get(), previous)
+                self.assertEqual((parent.level, parent.handlers, parent.propagate), original)
+                self.assertEqual(_live_streams, streams)
+                display.close()  # A second close must not try to stop the failed Live again.
 
 
 class RunLoggingTests(unittest.IsolatedAsyncioTestCase):
@@ -717,7 +825,7 @@ class RunLoggingTests(unittest.IsolatedAsyncioTestCase):
         from research.alphaevolve.original import AlphaEvolve, Config
         from research.shinkaevolve import ShinkaEvolve
         from rsikit import Run
-        from rsikit.progress import _current_run
+        from rsikit.progress.controller import _current_run
         from tests.test_elitesearch import program
 
         for cls, templates in (
@@ -743,18 +851,18 @@ class RunLoggingTests(unittest.IsolatedAsyncioTestCase):
                 if cls is AlphaEvolve:
                     agent.update_scores({policies[0].id: 1})
                 else:
-                    agent.update({policies[0].id: 1})
+                    agent.update_scores({policies[0].id: 1})
                 policies = await agent.generate(1)
                 agent.evaluation_started(policies)
-                display = _current_run.get()["display"]
-                self.assertEqual(display.current_batch, "2")
-                self.assertEqual(display.batches["1"]["status"], "completed")
-                self.assertEqual(len(display.candidates), 1)
+                display = _current_run.get()
+                self.assertEqual(display.model.current_batch, "2")
+                self.assertEqual(display.model.batches["1"]["status"], "completed")
+                self.assertEqual(len(display.model.candidates), 1)
 
     async def test_repeated_shinka_search_counts_prior_attempts(self):
         from research.shinkaevolve import ShinkaEvolve
         from research.shinkaevolve.search import run_search
-        from rsikit.progress import _current_run
+        from rsikit.progress.controller import _current_run
         from tests.test_elitesearch import program
 
         with (
@@ -772,18 +880,19 @@ class RunLoggingTests(unittest.IsolatedAsyncioTestCase):
             agent = ShinkaEvolve("test", ScriptedProvider([program(0), program(1)]))
             for completed in (2, 4):
                 await run_search(agent, run, rollouts, generations=1, batch_size=1)
-                display = _current_run.get()["display"]
-                self.assertEqual((display.completed, display.total), (completed, completed))
+                display = _current_run.get()
+                self.assertEqual(
+                    (display.model.completed, display.model.total), (completed, completed)
+                )
 
     async def test_native_paper_resume_replays_only_known_completions(self):
         from research.alphaevolve import paper
-        from research.alphaevolve.paper.evaluation import EvaluationResult
         from rsikit import Run
-        from rsikit.progress import _current_run
+        from rsikit.progress.controller import _current_run
         from tests.test_elitesearch import program
 
         async def evaluate(policies):
-            return {p.id: EvaluationResult({"reward": 1}) for p in policies}
+            return {p.id: episodes({0: 1}) for p in policies}
 
         with (
             tempfile.TemporaryDirectory() as directory,
@@ -802,9 +911,9 @@ class RunLoggingTests(unittest.IsolatedAsyncioTestCase):
                     )
                     try:
                         await paper.search(agent, evaluate, proposals=1)
-                        display = _current_run.get()["display"]
+                        display = _current_run.get()
                         self.assertEqual(
-                            (display.completed, display.total),
+                            (display.model.completed, display.model.total),
                             (2 * (invocation + 1), 2 * (invocation + 1)),
                         )
                     finally:
@@ -829,16 +938,17 @@ class RunLoggingTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_inner_loop_counts_policies_across_multiple_seeds(self):
         from examples import inner_loop
-        from rsikit.progress import _current_run
+        from rsikit.progress.controller import _current_run
         from tests.test_elitesearch import program
 
         report = inner_loop.write_report
 
         def checked_report(run):
-            display = _current_run.get()["display"]
-            self.assertEqual((display.completed, display.total), (10, 10))
-            self.assertEqual(len(display.leaders), 5)
-            self.assertEqual(display.status, "completed")
+            display = _current_run.get()
+            self.assertEqual((display.model.completed, display.model.total), (10, 10))
+            self.assertEqual((len(display.model.proposals), len(display.model.evaluations)), (5, 5))
+            self.assertEqual(len(display.model.leaders), 5)
+            self.assertEqual(display.model.status, "completed")
             return report(run)
 
         with (
@@ -847,7 +957,7 @@ class RunLoggingTests(unittest.IsolatedAsyncioTestCase):
                 inner_loop, "Executor", return_value=fake_executor(evaluation=FakeEvaluation())
             ),
             patch.object(inner_loop, "write_report", side_effect=checked_report),
-            patch("rsikit.progress.Console", return_value=Console(file=io.StringIO())),
+            patch("rsikit.progress.controller.Console", return_value=Console(file=io.StringIO())),
             patch.object(prompts, "TEMPLATE_ROOT", Path("rsikit/generation/prompts")),
         ):
             rows = await inner_loop.run_demo(
@@ -859,7 +969,7 @@ class RunLoggingTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_exception_and_cancellation_restore_terminal_and_file_errors_surface(self):
         from rsikit import Run
-        from rsikit.progress import _current_run
+        from rsikit.progress.controller import _current_run
 
         for error in (ValueError("broken"), asyncio.CancelledError()):
             with tempfile.TemporaryDirectory() as directory:
@@ -883,10 +993,10 @@ class RunLoggingTests(unittest.IsolatedAsyncioTestCase):
                                 )
                             },
                         )
-                        display = _current_run.get()["display"]
+                        display = _current_run.get()
                         raise error
                 self.assertEqual(
-                    display.status,
+                    display.model.status,
                     "cancelled" if isinstance(error, asyncio.CancelledError) else "failed",
                 )
                 self.assertIn("\x1b[?25h", output.getvalue())
@@ -895,40 +1005,40 @@ class RunLoggingTests(unittest.IsolatedAsyncioTestCase):
             Run.create(name="disk", path=Path(directory) / "run"),
         ):
             binding = _current_run.get()
-            with patch.object(binding["file"], "write", side_effect=OSError("disk full")):
+            with patch.object(binding.file, "write", side_effect=OSError("disk full")):
                 with self.assertRaisesRegex(OSError, "disk full"):
                     logging.getLogger("rsikit.test").info("persist this")
 
     async def test_generic_generation_activates_progress_and_retains_attempt_identity(self):
         import rsikit.generation as generation
         from rsikit import generate
-        from rsikit.progress import _current_run
+        from rsikit.progress.controller import _current_run
         from tests.test_elitesearch import program
 
         with (
             tempfile.TemporaryDirectory() as directory,
             gym.make("CartPole-v1") as env,
             patch.object(prompts, "TEMPLATE_ROOT", Path(generation.__file__).parent / "prompts"),
-            recorded_run(
+        ):
+            async with recorded_run(
                 name="generic",
                 path=Path(directory) / "run",
                 environment=env,
                 console=Console(file=io.StringIO()),
-            ),
-        ):
-            provider = ScriptedProvider([program(0), program(0)])
-            first = await generate("test", provider=provider)
-            second = await generate("test", provider=provider)
-            display = _current_run.get()["display"]
-            self.assertTrue(display.active)
-            self.assertEqual(display.completed, 2)
-            self.assertEqual(len(display.candidates), 2)
-            self.assertEqual(first.id, second.id)
+            ):
+                provider = ScriptedProvider([program(0), program(0)])
+                first = await generate("test", provider=provider)
+                second = await generate("test", provider=provider)
+                display = _current_run.get()
+                self.assertTrue(display.model.active)
+                self.assertEqual(display.model.completed, 2)
+                self.assertEqual(len(display.model.candidates), 2)
+                self.assertEqual(first.id, second.id)
 
     async def test_paper_resume_replays_history_before_new_proposals(self):
         from research.alphaevolve import paper
         from research.alphaevolve.search import run_search
-        from rsikit.progress import _current_run
+        from rsikit.progress.controller import _current_run
         from tests.test_elitesearch import program
 
         with (
@@ -950,10 +1060,10 @@ class RunLoggingTests(unittest.IsolatedAsyncioTestCase):
 
                     async def generate(*args, **kwargs):
                         if resumed:
-                            display = _current_run.get()["display"]
-                            self.assertEqual(display.completed, 2)
-                            self.assertEqual(display.total, 4)
-                            self.assertTrue(display.leaders)
+                            display = _current_run.get()
+                            self.assertEqual(display.model.completed, 2)
+                            self.assertEqual(display.model.total, 4)
+                            self.assertTrue(display.model.leaders)
                         return await original(*args, **kwargs)
 
                     provider.acall = generate
@@ -962,8 +1072,8 @@ class RunLoggingTests(unittest.IsolatedAsyncioTestCase):
                     )
                     try:
                         await run_search(agent, run, rollouts, generations=1, batch_size=1)
-                        display = _current_run.get()["display"]
-                        self.assertEqual(display.completed, 4 if resumed else 2)
+                        display = _current_run.get()
+                        self.assertEqual(display.model.completed, 4 if resumed else 2)
                     finally:
                         agent.close()
 
@@ -972,7 +1082,7 @@ class RunLoggingTests(unittest.IsolatedAsyncioTestCase):
         from research.alphaevolve.search import run_search as alpha_search
         from research.shinkaevolve import Config, ShinkaEvolve
         from research.shinkaevolve.search import run_search as shinka_search
-        from rsikit.progress import _current_run
+        from rsikit.progress.controller import _current_run
         from tests.test_elitesearch import program
 
         variants = [
@@ -1006,21 +1116,21 @@ class RunLoggingTests(unittest.IsolatedAsyncioTestCase):
                 agent = cls("test", ScriptedProvider([program(0)]), **options)
                 try:
                     await search(agent, run, rollouts, generations=1, batch_size=1, seeds=(0, 1))
-                    display = _current_run.get()["display"]
-                    self.assertEqual((display.completed, display.total), (2, 2), name)
-                    self.assertEqual(display.leaders[0]["score"], 7, name)
-                    self.assertIn("island", display.columns)
-                    self.assertEqual(display.status, "completed")
+                    display = _current_run.get()
+                    self.assertEqual((display.model.completed, display.model.total), (2, 2), name)
+                    self.assertEqual(display.model.leaders[0]["score"], 7, name)
+                    self.assertIn("island", display.model.columns)
+                    self.assertEqual(display.model.status, "completed")
                 finally:
                     if name == "paper":
                         agent.close()
 
     async def test_native_optimizer_events_without_example_setup(self):
-        from research.elitesearch import Config, EliteSearch, Measurement
+        from research.elitesearch import Config, EliteSearch
         from research.lineagesearch import Config as LineageConfig
         from research.lineagesearch import LineageSearch
         from rsikit import Run
-        from rsikit.progress import _current_run
+        from rsikit.progress.controller import _current_run
         from tests.test_elitesearch import program
         from tests.test_lineagesearch import experiments, families
 
@@ -1030,13 +1140,13 @@ class RunLoggingTests(unittest.IsolatedAsyncioTestCase):
             )
 
             async def evaluate(policies):
-                display = _current_run.get()["display"]
-                self.assertTrue(display.active)
-                self.assertEqual(display.completed, 1)
+                display = _current_run.get()
+                self.assertTrue(display.model.active)
+                self.assertEqual(display.model.completed, 1)
                 self.assertTrue(
-                    any(r["status"] == "evaluating" for r in display.candidates.values())
+                    any(r["status"] == "evaluating" for r in display.model.candidates.values())
                 )
-                return {p.id: Measurement({0: 3, 1: 5}) for p in policies}
+                return {p.id: episodes({0: 3, 1: 5}) for p in policies}
 
             with (
                 tempfile.TemporaryDirectory() as directory,
@@ -1064,11 +1174,11 @@ class RunLoggingTests(unittest.IsolatedAsyncioTestCase):
                         )
                     )
                     await agent.run()
-                    display = _current_run.get()["display"]
-                    self.assertEqual(display.completed, 2)
-                    self.assertEqual(display.total, 2)
-                    self.assertEqual(display.leaders[0]["score"], 4)
-                    self.assertTrue(display.columns)
+                    display = _current_run.get()
+                    self.assertEqual(display.model.completed, 2)
+                    self.assertEqual(display.model.total, 2)
+                    self.assertEqual(display.model.leaders[0]["score"], 4)
+                    self.assertTrue(display.model.columns)
 
     async def test_automatic_scoped_logging_and_cleanup(self):
         from rsikit import Run

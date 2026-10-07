@@ -10,7 +10,7 @@ from rsikit import Executor, Run
 from research.rollouts import Rollouts
 from research.rewards import mean_rewards
 
-# Inside an async function; policies are Policy definitions from generate/from_file.
+# Inside an async function; policies are PolicyDefinition objects from generate/from_file.
 with gym.make("CartPole-v1", max_episode_steps=500) as environment:
     async with Executor(concurrency=4) as executor, Run.create(name="comparison") as run:
         rollouts = Rollouts(environment, executor, run)
@@ -26,45 +26,48 @@ requires a new run. Old scalar scores remain readable, but are not fabricated in
 trajectories: missing episodes are executed again when requested.
 
 `mean_rewards` explicitly selects cumulative reward as fitness and averages the
-requested seeds. `measure_rewards` returns per-seed `Measurement` objects and
+requested seeds. `measure_rewards` returns per-seed `Episode` objects and
 candidate diagnostics. AlphaEvolve's `research.alphaevolve.paper.evaluation.assess`
-owns its richer `EvaluationResult`, descriptors, and screening thresholds.
+returns raw episodes and applies screening thresholds. AlphaEvolve
+constructs its richer `EvaluationResult` and derived descriptors during update.
 Infrastructure errors and cancellation propagate; these are not low fitness.
 
 ## Core execution
 
-`Evaluator(environment, policy).run(observation, info=info)` consumes caller-owned,
-already-reset instances and returns an `Episode`. It never creates, resets, seeds,
-or closes them. See [the inner-loop contract](INNER_LOOP.md).
+`evaluate(policy, environment, seed=..., max_steps=...)` runs one episode on
+caller-owned instances. `Evaluator(max_steps=...).evaluate(...)` is the reusable
+class API. Both reset the environment and policy exactly once with the same seed,
+and neither closes the caller's objects.
 
-`Executor.evaluate(jobs, environment)` is an async stream of
-`(policy_id, seed, episode)`, where each job is `(policy_id, source, seed)`.
-The environment is an unstarted, serializable Gymnasium instance used as a template.
-Each episode gets fresh environment and policy instances in a local child process,
-resets them, uses `Evaluator`, and closes them. The caller owns the template.
+`Job(policy, environment, seed=..., max_steps=...)` describes one worker episode.
+Its policy may be a live `Policy` or a `PolicyDefinition`; definitions load inside
+the worker deadline. `instructions` is an optional construction override for
+definitions. A worker copies the inputs, resets both with the job seed, runs the
+same Evaluator, closes its copies and returns native Episode fields using pickle.
 
-Use `async with Executor(concurrency=4, episode_timeout=60)` to bound evaluation
-work. Context exit cancels and reaps outstanding episodes. `Run` contexts only
-release storage. Candidate failures preserve successful siblings; runtime failures
-and cancellation propagate. There is no backend selector or persistent service.
+`await execute(jobs, concurrency=4)` returns the original jobs in observed readiness order.
+`await executor.execute(jobs)` also returns a list; `executor.iterate(jobs)`
+streams those jobs for incremental persistence. Each job
+has `result=None` until its result arrives; `done` means an Episode is available,
+including failed attempts. Jobs are single-use. Infrastructure failures raise after
+successful siblings finish. Cancellation revokes queued jobs; running jobs finish
+before the executor context closes. A detected worker crash aborts pending waits.
 
-The launcher puts the entire application in one container:
-
-```sh
-./scripts/run examples.inner_loop --output runs/comparison
-./scripts/run examples.inner_loop --resume runs/comparison
-```
-
-Rich renders in the main application process. Episode prints are saved as
-`episode.log` artifacts; failures include a bounded log tail. See
-[execution details](IN_PROCESS_SANDBOX.md).
+Use `async with Executor(concurrency=4, episode_timeout=60)` to share worker limits
+across submissions. Add `database="evaluations.sqlite"` to retain the queue;
+otherwise it uses temporary storage. Entry is required; each Executor instance
+has one context lifetime. Finish or cancel/await concurrent batch tasks before
+exit. Close partially consumed streams with `contextlib.aclosing`.
+Keep template instances unchanged until execution finishes; serialization occurs
+when each job is enqueued in Huey. Templates must be serializable and remain caller-owned.
+See [the direct-to-sweep examples](INNER_LOOP.md#from-interactive-evaluation-to-a-sweep).
 
 ## Storage and analysis
 
 ```python
-from rsikit import Policy, Run
+from rsikit import PolicyDefinition, Run
 
-policy = Policy.from_file("solution.py")
+policy = PolicyDefinition.from_file("solution.py")
 with Run.create(name="experiment") as run:
     run.save_policy(policy)
     run.save_episode(policy, 42, episode)
@@ -77,8 +80,10 @@ with Run.open(run.path) as restored:
     print(restored.scores(policy))
 ```
 
-`Policy.from_text`/`from_file` load source without validating or executing it.
-Optimizers explicitly call `rsikit.policy.validate_policy(policy)` after
+`PolicyDefinition.from_text`/`from_file` validate metadata without executing source.
+Definitions expose the exact Python as `.source` and derive `.id` from name and source.
+They are immutable; construct a new definition to change their fields.
+Optimizers explicitly call `policy.validate()` after
 generation; this checks syntax and the construction interface without execution.
 `to_text` and `to_file` preserve its name, description, source and ID, including
 invalid proposals retained for diagnosis. Run exports definitions to
@@ -87,10 +92,16 @@ on open. `policies()` reloads saved definitions.
 
 `run.sqlite` contains core `settings` and `policy` tables plus optimizer-defined
 records. Per-seed scores are explicit caller data; `None` denotes unfinished work.
-Raw trajectories are stored under `episodes/<policy-id>/<seed>.json`, preserving
-numeric arrays, tuples and byte payloads. Episode files are written atomically
+Raw trajectories are stored under `episodes/<policy-id>/<seed>.pkl`, preserving
+NumPy arrays and scalars, tuples and byte payloads using standard Python pickle.
+Episode files are written atomically
 after their artifacts. `load_episode` returns `None` when no episode was saved.
 Both storage and process transfer limit each episode to 64 MiB.
+Only load trusted run directories: unpickling can execute Python code. The loader
+also accepts older `.json` episodes that satisfy the current Episode contract;
+new `.pkl` files take precedence when both exist.
+Ocean panel measurements keep readable JSON summaries; when trajectories are
+recorded, `episode_file` points to a companion `.pkl` containing the native panel.
 
 Gymnasium recording wrappers run in the episode process, with output relocated to an
 isolated episode directory. Files and the final `info["artifacts"]` byte mapping
@@ -166,7 +177,7 @@ No UI setup is needed in application scripts:
 ```python
 async with Run.create(name="experiment") as run:
     # Construct the environment, executor and optimizer as usual.
-    await optimizer.run()
+    await search(optimizer, evaluate, on_checkpoint=lambda agent: run.save(*agent.records()))
 ```
 
 The optional `total_generations` field on `search_started` supplies the generation budget; the display counts completed batch events. `leaderboard_size` supplies the row capacity (default ten, display capped at ten); EliteSearch reports its configured elite count.
@@ -183,15 +194,31 @@ leaderboard_columns = {
 Their normal domain logs carry structured fields, for example:
 
 ```python
-logger.info("Starting search", extra={"progress": {
-    "kind": "search_started", "optimizer": "MyOptimizer",
-    "total_candidates": 50, "total_generations": 5,
-    "columns": leaderboard_columns, "resumed": False,
-}})
+logger.info(
+    "Starting search",
+    extra={
+        "progress": {
+            "kind": "search_started",
+            "optimizer": "MyOptimizer",
+            "total_candidates": 50,
+            "total_generations": 5,
+            "columns": leaderboard_columns,
+            "resumed": False,
+        }
+    },
+)
 ```
 
 Candidate events use stable attempt IDs and revisions; leaderboard events include already-ranked rows with standard fields and custom `extras` values. The dashboard preserves optimizer ranking and interprets model-provided strings literally. See the [event contract](superpowers/specs/2026-09-28-automatic-progress-dashboard.md#structured-logging-contract) for fields and lifecycle events. No registration, adapter, or renderer change is needed for another optimizer.
 
 Known-size batches finish when all their candidate slots settle, including standalone generate/update loops. Native paper searches resumed from only a population checkpoint recover known accepted completions; unknown historical outcomes stay unresolved. Application searches use their detailed Run history where available.
 
-AlphaEvolve and ShinkaEvolve's application loops live in `research.alphaevolve.search` and `research.shinkaevolve.search`. Their example entry points remain available. Test/application console injection belongs on `Run.create(..., console=...)` or `Run.open(..., console=...)`, not on the search loop.
+AlphaEvolve and ShinkaEvolve's persistence adapters live in `research.alphaevolve.search` and `research.shinkaevolve.search`. They delegate to `rsikit.search`. Their example entry points remain available. Test/application console injection belongs on `Run.create(..., console=...)` or `Run.open(..., console=...)`, not on the search loop.
+
+New unified search manifests record `optimization_schedule: round-v1`. Optimizer
+checkpoints retain complete-round boundaries, pending feedback, and queued repairs
+where recovery is supported. `Run.open` alone does not restore an optimizer.
+Unified Elite and the paper AlphaEvolve example support recovery; historical
+baseline AlphaEvolve, ShinkaEvolve, and LineageSearch do not gain resume support.
+Legacy provenance remains unchanged; schedule transitions are separate appended
+evidence. See [CLI recovery](CLI.md#resume-an-interrupted-search).

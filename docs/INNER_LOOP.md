@@ -1,20 +1,22 @@
 # Inner-loop API
 
 `Evaluator` runs one episode using an existing Gymnasium environment and an
-existing async `Policy`. The caller creates, seeds, resets, and closes both
-instances, and is responsible for not reusing stateful objects accidentally.
+existing async `Policy`. The evaluator resets both instances for each call;
+the caller creates and closes them. One evaluator can serve different pairs
+and repeated evaluations with different seeds.
 For generated policies and durable batch evaluations, see [Run](RUNS.md).
 
 `rsikit.evaluation.Evaluator` collects the rollout and returns an
 `rsikit.episode.Episode`. Both are also exported directly from `rsikit`.
-Fitness and screening belong to the research optimizers. AlphaEvolve owns its
-`EvaluationResult`; core execution returns raw episodes.
+Episode execution returns raw trajectories. Search evaluators report neutral
+`Episode` objects grouped by policy and seed; optimizers interpret them. AlphaEvolve constructs its own
+`EvaluationResult` inside `update()`.
 
 ```python
 from copy import deepcopy
 
 import gymnasium as gym
-from rsikit import Evaluator, Policy
+from rsikit import Policy, evaluate
 
 
 class RandomPolicy(Policy):
@@ -25,10 +27,7 @@ class RandomPolicy(Policy):
 with gym.make("LunarLander-v3", render_mode="human") as env:
     policy = RandomPolicy(deepcopy(env.observation_space), deepcopy(env.action_space))
     try:
-        observation, info = env.reset(seed=42)
-        await policy.reset(seed=42)
-        evaluator = Evaluator(env, policy, max_steps=1000)
-        episode = await evaluator.run(observation, info=info)
+        episode = await evaluate(policy, env, seed=42, max_steps=1000)
     finally:
         await policy.close()
 
@@ -37,21 +36,28 @@ observation, reward, terminated, truncated, info = episode.final_step
 ```
 
 The code above runs inside an async function or a notebook supporting top-level
-`await`. `run()` does not call `reset()` or `close()`, even on failure or
-cancellation. Pass the observation returned by the caller's reset; supplying its
-`info` is optional. The evaluator has no seed or factory parameters. It runs the
-supplied objects directly and does not provide a sandbox.
+`await`. `evaluate()` resets the environment, records the initial observation and
+info, then resets the policy. Both receive the same `seed` exactly once. A seed is
+a nonnegative integer or `None`; `None` requests no reproducibility guarantee.
+Each call starts a new episode, so policy `reset()` must clear episode state.
+`Evaluator(max_steps=...).evaluate(policy, env, seed=...)` is the reusable class API.
+The evaluator does not call `close()`, including on failure or cancellation.
+It runs the supplied objects directly and does not provide a sandbox.
 
 Existing Gymnasium episode limits apply. `max_steps` is an optional positive
 integer that marks the last recorded transition as truncated when the rollout
-reaches that many steps. It neither resets nor wraps the supplied environment,
-and cannot extend its existing limit. Like Gymnasium's `TimeLimit`, it can set
+reaches that many steps. It does not wrap the supplied environment and cannot
+extend its existing limit. Like Gymnasium's `TimeLimit`, it can set
 truncation on the same step as termination. Use a `TimeLimit` wrapper before
 resetting if other environment wrappers also need to observe that limit.
 
+Successful episodes include `info["episode"]` in their last recorded info, with
+`r` (total reward), `l` (step count), and `t` (elapsed seconds). Existing statistics
+supplied by the environment are preserved.
+
 ## Episode histories
 
-`run()` returns an `Episode`, with these ordinary Python lists:
+`evaluate()` returns an `Episode` Pydantic `BaseModel`, with these ordinary Python lists:
 
 | Field | Length after T steps | Meaning |
 | --- | --- | --- |
@@ -61,6 +67,15 @@ resetting if other environment wrappers also need to observe that limit.
 | `terminations` | T | Task termination flags |
 | `truncations` | T | Truncation flags, including the evaluator's step cap |
 | `infos` | T + 1 | Initial info (or `{}`), then each step's diagnostic info |
+
+Construct episodes with keyword arguments. Observations, actions, and info values
+accept Python scalars (`None`, bool, int, float, str, bytes), NumPy integer/float/bool
+scalars, real numeric or boolean NumPy arrays, and nested lists, tuples, and
+string-keyed dictionaries. Object, structured, and complex arrays and arbitrary
+Python objects are rejected. Each array is limited to 256 KiB.
+Rewards must be finite Python numbers (not booleans); end flags must be booleans.
+`artifacts` is a `dict[str, bytes]`; `error` is nonblank text or `None`.
+Field types and trajectory lengths are revalidated before storage and optimizer feedback.
 
 Transition `t` is:
 
@@ -76,8 +91,8 @@ info = episode.infos[t + 1]
 
 `episode.total_reward` is the undiscounted sum of rewards; `len(episode)` is the
 number of transitions. `episode.final_step` provides the final Gymnasium tuple,
-whose reward is only the last step's reward. No `info["episode"]` key is added by
-the evaluator; use the summary properties or wrap the environment yourself.
+whose reward is only the last step's reward. Successful episodes include the
+`info["episode"]` summary described above.
 
 Observations, actions, and infos are deep-copied so reused arrays or dictionaries
 cannot rewrite earlier transitions. These values must support deep copying.
@@ -109,45 +124,253 @@ Only copied observations reach `act`; diagnostic info stays in the episode.
 Goals and feedback the policy needs during the episode belong in observations.
 No weights are trained by the evaluator.
 
+## From interactive evaluation to a sweep
+
+```python
+from rsikit import Job, evaluate, execute
+
+# Inside an async function, with caller-owned policy/environment instances:
+episode = await evaluate(policy, environment, seed=42)
+score = episode.total_reward
+jobs = [Job(policy, environment, seed=seed) for seed in range(100)]
+completed_jobs = await execute(jobs, concurrency=8)
+for job in completed_jobs:
+    print(job.seed, job.result.total_reward, job.result.error)
+```
+
+`Job` construction only stores references. Each worker gets a private copy of the
+policy/environment pair and resets both once with `job.seed`; callers need not
+reset or prove freshness first. Worker cleanup closes only the copies. Direct
+`evaluate()` uses the actual instances and leaves cleanup to the caller.
+
+Keep inputs unchanged while execution is in progress: each snapshot is taken when
+the job is enqueued in Huey. Locally defined classes and wrappers are supported by
+cloudpickle, but live connections, event loops or native resources may not be
+serializable. If interactive use retained such resources, supply fresh instances
+or implement serialization for those types. Execution never silently falls back
+to the parent process.
+
+The returned jobs are the original submitted objects, in completion order.
+`job.result` starts as `None`; `job.done` becomes true when an Episode is attached,
+including policy failures. Each job is single-use. For infrastructure failure or
+cancellation, unfinished jobs have no result; the execution call raises. Create a
+new job to retry.
+
+For large runs, persist results as they arrive instead of collecting a list:
+
+```python
+from contextlib import aclosing
+from rsikit import Executor
+
+async with Executor(concurrency=8, episode_timeout=60) as executor:
+    async with aclosing(executor.iterate(jobs)) as results:
+        async for job in results:
+            persist(job)  # Your storage callback; job.result is an Episode.
+```
+
+Use new jobs for this example. `await executor.execute(jobs)` collects the same
+stream into a list. `aclosing()` revokes outstanding queued jobs on early exit;
+already-running jobs continue. An Executor shares its concurrency limit across
+submissions and reuses Huey process workers. Closing it waits for running work.
+
+The context is required even for empty submissions. Each Executor has one context
+lifetime; create a new instance after exit. The standalone `execute()` helper
+opens its own context. Concurrent batches are allowed while it is open, but the
+caller must finish or cancel and await their tasks before exiting:
+
+```python
+import asyncio
+
+async with Executor(concurrency=4) as executor:
+    batch = asyncio.create_task(executor.execute(jobs))
+    try:
+        await generate_more_policies()
+        completed = await batch
+    finally:
+        batch.cancel()
+        await asyncio.gather(batch, return_exceptions=True)
+```
+
+Each batch uses one nonblocking result loop. Short SQLite operations run in
+asyncio's thread pool; the thread never waits for a whole evaluation. An unfinished
+sweep sleeps for 10 ms, letting other coroutines run. Results are yielded as
+readiness is observed, with no ordering guarantee between results ready in the
+same sweep.
+
+The SQLite queue is temporary by default. Pass `database="evaluations.sqlite"`
+to retain pending tasks and results, with queue name `evaluations` and
+`fsync=True` handled internally. `job.task_id` identifies the stored result.
+Pending jobs can run when a new executor opens the database, but this does not
+reconstruct original Job objects or write Run episodes automatically. Huey does
+not recover tasks already taken by a worker that crashes; a detected local worker
+exit raises InfrastructureError. Create a new Executor before submitting new work.
+
+Huey process workers use POSIX fork. Each task gets private policy/environment
+copies and a temporary working directory, but process globals can persist between
+tasks. Timeouts use Huey's SIGALRM handler, not parent-enforced process killing.
+Running cancellation and descendant-process termination are not provided.
+
 ## Generated programs
 
 ```python
-from pathlib import Path
-from rsikit import run_program
+import gymnasium as gym
+from rsikit import Job, PolicyDefinition, execute
 
-episode = await run_program(Path("solution.py"), "CartPole-v1", max_steps=100)
-print(episode.total_reward, episode.actions)
+policy = PolicyDefinition.from_file("solution.py")
+with gym.make("CartPole-v1") as environment:
+    jobs = await execute([Job(policy, environment, seed=42, max_steps=100)])
+    print(jobs[0].result.error, jobs[0].result.total_reward)
 ```
 
-`run_program` creates an environment template, then runs reset, policy execution,
-steps and scoring in a fresh local child. The source must export `Solution(Policy)`.
-`env_seed`, `policy_seed`, `instructions`, and `max_steps` apply inside that child.
-The episode deadline defaults to 60 seconds and includes policy loading, reset,
-actions, cleanup and result preparation. Direct `Evaluator` calls have no deadline.
+Job accepts `PolicyDefinition` as well as a live Policy. Source must export
+`Solution(Policy)`; loading and construction occur inside the timed worker, so
+constructor failures remain repairable. `instructions` on a definition job can
+override the environment's task text. Instance jobs already own their instructions.
+`max_steps` is a per-job step cap. There is one seed for both objects.
+
+The episode deadline defaults to 60 seconds and includes worker loading, reset,
+actions, cleanup and result preparation. Caller-side construction and serialization
+are outside this deadline. Direct evaluation has no hard deadline.
 
 Run application modules through `scripts/run MODULE [ARGS...]` to isolate the whole
 application in Docker. Calling this Python API directly uses local processes.
 Generated code shares application credentials, network, outputs and scoring state.
 See [application execution](IN_PROCESS_SANDBOX.md).
 
-Caller-provided environment templates use cloudpickle to reach the child; its
-imports must be installed in the application image. Complete `Episode` objects
-return over a multiprocessing connection, with a 64 MiB result ceiling. Saved
-JSON serialization lives with `Episode` and retains the existing representation.
+Inputs use cloudpickle; required imports must be installed in the application
+image. Workers return native Episode fields using pickle over a multiprocessing
+connection, with a 64 MiB result ceiling. Pickle preserves arrays, NumPy scalars,
+tuples, and binary artifacts without JSON conversion. Only load trusted worker
+outputs and run directories; pickle can execute Python code. New saved episodes
+use `.pkl`; older compatible `.json` episodes remain readable.
 
 ## Failures
 
-Actions outside `action_space` raise `PolicyError` before `env.step()`.
-Environments should raise `gymnasium.error.InvalidAction` for state-dependent
-illegal actions; the evaluator converts this to `PolicyError`. Other environment
-and trusted-policy exceptions retain their types. Cancellation propagates.
-Failed execution returns no normal `Episode`.
+Candidate errors are recorded in `Episode.error`. Invalid actions, constructor/reset
+errors, and crashes during `act()` return the completed trajectory so far. An attempt
+that fails before reset can have empty tracks; one that fails on its first action
+has the initial observation but no transitions. A normal episode has `error=None`.
+The numerical `total_reward` remains the sum of recorded rewards; always check
+`error` before treating that sum as fitness.
 
-The caller must clean up after `Evaluator.run()`, including on failure. The
-execution helpers perform their own cleanup and log secondary cleanup
-failures without replacing the original exception. Child execution failures raise
-`PolicyError`, `PolicyTimeout`, or `InfrastructureError` from `rsikit.evaluation`.
+Environments should raise `gymnasium.error.InvalidAction` for state-dependent
+illegal actions. Other environment errors, infrastructure errors, and cancellation
+propagate as exceptions. A process deadline returns an error episode without a
+trajectory because the terminated worker cannot return its memory.
+
+The caller owns cleanup after `Evaluator.evaluate()`. Execution helpers clean up their
+instances and preserve the original candidate diagnostic if cleanup also fails.
+Successful and failed episodes use the same persistence API. Legacy successful
+saved episodes remain readable; failed cached episodes are retried on the next
+explicit evaluation request.
 
 Termination does not imply success: rewards and task-specific info define that.
 Search and cross-episode aggregation remain outside the evaluator. `Run` persists
 supplied scores, checkpoints, and raw episodes through `save_episode`/`load_episode`.
+
+## One optimization loop
+
+All three AlphaEvolve variants, ShinkaEvolve, EliteSearch, and LineageSearch
+implement the structural `rsikit.Optimizer` protocol:
+
+```python
+from collections.abc import Mapping
+from rsikit import Episode, PolicyDefinition
+
+
+async def propose() -> list[PolicyDefinition]: ...
+def update(results: Mapping[str, Mapping[int, Episode]]) -> None: ...
+
+
+# Read-only properties: done: bool; best: PolicyDefinition | None
+```
+
+Configure an optimizer using its algorithm's `Config`, then pass the same evaluator
+function and runner to any implementation:
+
+```python
+from rsikit import Episode, search
+from research.rewards import measure_rewards
+
+
+# rollouts is a caller-owned Rollouts(environment, executor, run).
+async def evaluate(policies):
+    return await measure_rewards(rollouts, policies, seeds=(0, 1, 2))
+
+
+best = await search(optimizer, evaluate)
+```
+
+An evaluator object's bound method works too: `await search(optimizer, evaluator.evaluate)`.
+No evaluator superclass is required. `search` returns the optimizer's best policy
+definition, or `None`; histories and domain records remain on the optimizer and Run.
+The caller owns environment, provider, evaluator, and database cleanup.
+
+The evaluator returns the raw episodes for each seed. The optimizer derives scores
+from their cumulative rewards, retaining seed identity for paired comparisons and
+uncertainty estimates. Use one fixed search panel and keep validation/test episodes
+out of optimizer feedback. No `Measurement` class is required.
+
+Return exactly one seed mapping per proposed policy ID, including failures:
+
+```python
+results = {
+    good.id: {0: first_episode, 1: second_episode},
+    broken.id: {0: Episode(error="Invalid action")},
+    screened.id: {},  # Explicitly screened out; no full evaluation panel.
+}
+optimizer.update(results)
+```
+
+An empty seed mapping rejects a candidate without repair. Screening adapters keep
+any preliminary episodes in Run; they do not pass a partial successful panel as a
+full evaluation. Missing policy IDs remain an error. For ordinary evaluation,
+return an episode for every requested seed, with `error` set on failed attempts.
+
+A failure queues bounded repair; a screening rejection does not. The next
+`propose()` generates replacements only for failed candidates. Repairs retain
+original attempt identities and do not consume a new population generation.
+Duplicate internal attempts may share episode evidence, but returned proposal IDs
+are unique. Missing, extra, repeated, or incompatible feedback raises before
+selection changes. Calling `propose()` while feedback is outstanding raises.
+
+The optimizer chooses round sizes and stopping limits. A round can be a batch,
+a generation, a family sweep, or queued repairs. `update()` is synchronous and
+performs no evaluation or model calls. An empty proposal list means completion;
+`search` raises if an optimizer returns an empty list while `done` is false.
+For manual orchestration, the same contract is:
+
+```python
+while not optimizer.done:
+    policies = await optimizer.propose()
+    if policies:
+        optimizer.update(await evaluate(policies))
+```
+
+The shared runner also validates batches and invokes optional `on_checkpoint`
+after proposals, after updates, and on exceptional exit. Algorithms keep any
+additional checkpoints needed during generation. Cancellation, infrastructure
+errors, and provider budget exhaustion propagate; they are interrupted outcomes.
+On ordinary generation errors, built-ins retain already generated siblings and
+return them for external evaluation before surfacing the saved error on the next
+proposal. This lets budget-limited runs keep candidates they already paid to
+generate. No new model calls are admitted while that error is pending.
+Cancellation propagates immediately. An interrupted optimizer does not report
+completion; paper AlphaEvolve can reopen its checkpoint and retry unfinished
+original attempts with their IDs, parents, and repair budgets intact.
+
+### Scheduling and migration
+
+New search manifests record `optimization_schedule: round-v1`. Generation
+finishes before evaluation, and evaluation finishes before update. Model calls
+within proposal generation and episodes within evaluation remain concurrent.
+This replaces the previous paper AlphaEvolve streaming pipeline and EliteSearch
+cross-stage overlap. It can change throughput and search trajectories; there is
+no claim of benchmark equivalence.
+
+Replace `propose(n)` with a configured batch size and `propose()`. Replace
+policy–Episode pairs or scalar-score mappings with nested policy-ID → seed →
+`Episode` mappings. The old `Measurement` class and its re-exports have been removed.
+EliteSearch/LineageSearch `run()` and historical application entry points remain
+thin compatibility wrappers over `rsikit.search`; they retain their legacy
+return shapes. No `fit()` method or alternate optimization loop is needed.

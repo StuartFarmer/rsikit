@@ -16,7 +16,7 @@ examples. Variants within one algorithm may reuse that algorithm's internals.
 Run these commands from the repository root after following the
 [setup instructions](../README.md#setup). Searches require the Docker worker and
 an API key and make paid model calls. Research code is included in the source
-distribution; the installable library wheel contains only `rsikit`.
+distribution and wheel, alongside `rsikit`.
 
 Imports now use the `research` namespace, for example:
 
@@ -30,18 +30,26 @@ from research.elitesearch import Config, EliteSearch
 prompts.TEMPLATE_ROOT = Path(elitesearch.__file__).parent / "prompts"
 ```
 
+The [EliteTable meta-experiment](../docs/ELITETABLE_META_EXPERIMENT.md) writes and ranks
+sub-evolver programs across 2048, Breakout and Maze. Each program runs five inner
+generations capped at 50 game policies. The [earlier GEPA experiment](../docs/GEPA_META_EXPERIMENT.md)
+remains available through its original config: `python -m research.meta_ocean --help`.
+
 Shared modules available to every algorithm and runner:
 
-- `rsikit.policy.validate_policy`: explicit source checks after policy generation.
-- `rsikit.Evaluator` and `rsikit.Episode`: rollout execution and raw trajectories.
+- `PolicyDefinition.validate()`: explicit source checks after policy generation.
+- `rsikit.evaluate`, `rsikit.Evaluator` and `rsikit.Episode`: rollout execution and raw trajectories.
+- `rsikit.Optimizer`, `Episode`, and `search`: one external propose/evaluate/update loop
+  across all six implementations. See [the contract](../docs/INNER_LOOP.md#one-optimization-loop).
 - `research.rollouts.Rollouts`: execution, episode persistence, and experiment-local reuse.
 - `research.rewards`: cumulative-reward fitness callbacks and per-seed measurements.
-  AlphaEvolve owns its richer `EvaluationResult` and screening in its own package.
-- `rsikit.Policy.from_text` / `from_file` and `to_text` / `to_file`: canonical solution
+  Evaluators return raw episodes by policy and seed. AlphaEvolve builds its richer
+  `EvaluationResult` in update; screening stays in evaluator composition.
+- `rsikit.PolicyDefinition.from_text` / `from_file` and `to_text` / `to_file`: canonical solution
   loading and saving, preserving source and identity without host execution.
 - `rsikit.envs.tasks`: environment presets and `make_environment`.
 - `rsikit.progress`: automatic Run-scoped logging and the shared Rich dashboard; optimizers emit domain events and declare optional leaderboard columns.
-- `rsikit`: `Policy`, `Run`, and `Executor` with Docker evaluation.
+- `rsikit`: `Policy`, `PolicyDefinition`, `Job`, `Run`, and `Executor` for local workers inside the application container.
 
 Each optimizer composes its own `SelfHealer` in `healing.py`, with task context,
 provider, and a local repair prompt. It proposes a repair; the optimizer owns
@@ -50,12 +58,18 @@ the original variant's healer. Prompt operations use Slick's `render` and `parse
 with the provider's `acall`; raw responses go into optimizer attempt records
 before parsing, including malformed responses.
 
-Generation and healing operations return `type[Policy]`. Their private response
+Generation and healing operations return `PolicyDefinition`. Their private response
 schemas and mutation contracts live in each algorithm's `generation.py`.
 Optimizers validate generated policy source explicitly before accepting proposals;
-loading a policy does not validate it. AlphaEvolve, ShinkaEvolve, and LineageSearch
-own their protected-region rules. EliteSearch edits the whole organism and gives
+loading validates metadata but retains invalid Python for repair. AlphaEvolve,
+ShinkaEvolve, and LineageSearch own their protected-region rules. EliteSearch edits the whole organism and gives
 evolution-marker comments no special meaning.
 
 The dependency boundary is checked with
 `python -m unittest tests.test_package_boundaries -v`.
+
+The unified CLI exposes `alphaevolve` (`--variant paper|original|improved`),
+`shinka`, `elite`, and `lineage`. Construction and records remain algorithm-specific;
+feedback and orchestration are shared. Each optimizer selects complete evaluation
+rounds; within-stage concurrency remains, while generation/evaluation overlap is
+removed. New manifests identify this schedule as `round-v1`.

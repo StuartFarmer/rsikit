@@ -113,9 +113,7 @@ from rsikit import Evaluator
 with BitcoinEnv() as env:
     policy = Solution(deepcopy(env.observation_space), deepcopy(env.action_space))
     try:
-        observation, info = env.reset(seed=0)
-        await policy.reset(seed=1)
-        episode = await Evaluator(env, policy).run(observation, info=info)
+        episode = await Evaluator().evaluate(policy, env, seed=0)
     finally:
         await policy.close()
 print(episode.total_reward, len(episode))
@@ -147,7 +145,7 @@ from functools import partial
 
 make_validation_env = partial(BitcoinEnv, data_path="data/bitcoin/validation.csv")
 # Only after freezing the policy:
-# Create/reset fresh policy and environment instances, then use Evaluator.
+# Create policy and environment instances; Evaluator resets them.
 # For isolated execution, construct this environment on the host and pass it
 # to Executor with a separate Run for storage; loaded price tuples serialize.
 ```
@@ -169,8 +167,18 @@ With the existing `video` extra installed, export a saved EliteSearch generation
 ```
 
 Open `index.html` in the output directory. Each policy has a 1280×720 MP4 at
-30 fps, one day/action per frame, and a final PNG chart for the last seed.
-The charts show BTC price with buy/sell fills and a separate final-liquidation
+30 fps, one day/action per frame, and final PNG and standalone SVG charts for the
+last seed. SVG is the source frame: `render_svg()` returns vector geometry/text,
+and `render()` rasterizes the same source with resvg for Gymnasium and video.
+Install the `video` extra; Latin Modern fonts are bundled, with no TeX requirement.
+
+Each MP4 also has a `.svg.zip` archive containing one SVG per action, a shared
+`fonts/` directory, and `timeline.json` with fps and seed boundaries. The archive
+preserves the source vectors for later web animation. Extract it intact to preserve
+font paths; standalone final SVGs embed their fonts. Rendering remains independent
+of training; style-version changes reuse recorded action traces.
+
+The charts show BTC price with buy/sell fills in an aligned strip and a distinct final-liquidation
 marker, equity after fees, a buy-and-hold baseline with the same fees, BTC
 allocation, and drawdown from the running equity peak. Net profit, cumulative
 fees, and maximum drawdown are displayed. `manifest.json` includes per-seed

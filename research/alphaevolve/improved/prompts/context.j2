@@ -30,7 +30,7 @@ Previously evaluated programs for inspiration:
 Program {{ item.policy.name }}, score {{ item.score }}
 Per-seed rewards: {{ item.seed_scores | tojson }}
 <source>
-{{ item.policy._implementation }}
+{{ item.policy.source }}
 </source>
 {% endfor %}
 
@@ -38,7 +38,7 @@ Current program to improve: {{ parent.policy.name }}
 Score: {{ parent.score }}
 Per-seed rewards: {{ parent.seed_scores | tojson }}
 <source>
-{{ parent.policy._implementation }}
+{{ parent.policy.source }}
 </source>
 
 Search guidance:

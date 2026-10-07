@@ -17,7 +17,7 @@ from sqlmodel import Field, SQLModel, select
 
 import rsikit.generation as generation
 from research.rewards import mean_rewards
-from rsikit import Policy, generate
+from rsikit import Job, PolicyDefinition, generate
 from rsikit.evaluation import InfrastructureError, PolicyError
 from rsikit.policy import InvalidPolicy
 from tests.helpers import fake_executor, finish_pending, recorded_run
@@ -126,9 +126,14 @@ class RunTests(unittest.IsolatedAsyncioTestCase):
 
         async def batch(seeds):
             return [
-                item
-                async for item in self.executor.evaluate(
-                    [(str(seed), RESPONSE["implementation"], seed) for seed in seeds], self.env
+                (job.policy.id, job.seed, job.result)
+                async for job in self.executor.iterate(
+                    [
+                        Job(
+                            PolicyDefinition(source=RESPONSE["implementation"]), self.env, seed=seed
+                        )
+                        for seed in seeds
+                    ]
                 )
             ]
 
@@ -236,7 +241,7 @@ class RunTests(unittest.IsolatedAsyncioTestCase):
     async def test_policy_scores_exports_and_reuse(self):
         self.assertIn("scipy.linalg.solve_discrete_are", self.provider.calls[0])
         self.assertIn("CPU-only PyTorch", self.provider.calls[0])
-        self.assertTrue(issubclass(self.policy, Policy))
+        self.assertTrue(isinstance(self.policy, PolicyDefinition))
         self.assertEqual(self.policy.name, RESPONSE["name"])
         self.assertEqual(self.policy.description, RESPONSE["description"])
         with self.create() as (run, rollouts):
@@ -249,11 +254,11 @@ class RunTests(unittest.IsolatedAsyncioTestCase):
             await mean_rewards(rollouts, [self.policy], seeds=[0, 1])
             self.assertEqual(self.evaluation.evaluate.await_count, 2)
             (export,) = (self.path / "exports").glob("*.py")
-            restored = Policy.from_file(export)
+            restored = PolicyDefinition.from_file(export)
             self.assertEqual(restored.id, self.policy.id)
             self.assertEqual(restored.name, self.policy.name)
             self.assertEqual(restored.description, self.policy.description)
-            self.assertEqual(restored._implementation, RESPONSE["implementation"])
+            self.assertEqual(restored.source, RESPONSE["implementation"])
         export.unlink()
         with self.reopen() as (run, rollouts):
             (restored,) = run.policies()
@@ -323,8 +328,13 @@ class RunTests(unittest.IsolatedAsyncioTestCase):
         with self.create() as (run, rollouts):
             task = asyncio.create_task(mean_rewards(rollouts, [self.policy], seeds=[0, 1, 2]))
             await started.wait()
+
             # Allow the completed seed's result to reach the persistence consumer.
-            await asyncio.sleep(0)
+            async def wait_persisted():
+                while run.scores(self.policy)[0] is None:
+                    await asyncio.sleep(0.01)
+
+            await asyncio.wait_for(wait_persisted(), 1)
             task.cancel()
             with self.assertRaises(asyncio.CancelledError):
                 await task
@@ -416,13 +426,15 @@ class RunTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(active, 0)
 
     async def test_invalid_results_artifact_paths_and_startup_failure_remain_pending(self):
+        mutated = trajectory()
+        mutated.rewards[0] = float("nan")
         with self.create() as (run, rollouts):
-            for outcome, diagnostic in [
-                (trajectory(float("nan")), "finite"),
-                (trajectory(1.0, {"../../../../outside": b"bad"}), "Artifact path"),
+            for outcome, error, diagnostic in [
+                (mutated, InfrastructureError, "finite"),
+                (trajectory(1.0, {"../../../../outside": b"bad"}), ValueError, "Artifact path"),
             ]:
                 self.evaluation.evaluate.return_value = outcome
-                with self.assertRaisesRegex(ValueError, diagnostic):
+                with self.assertRaisesRegex(error, diagnostic):
                     await mean_rewards(rollouts, [self.policy])
                 self.assertEqual(run.scores(self.policy), {0: None})
             self.evaluation.evaluate.side_effect = InfrastructureError("start failed")
@@ -435,9 +447,15 @@ class RunTests(unittest.IsolatedAsyncioTestCase):
             with self.assertRaises(BlockingIOError):
                 self.reopen()
             await mean_rewards(rollouts, [self.policy])
-            with patch.object(self.policy, "name", "changed"):
-                with self.assertRaisesRegex(ValueError, "cannot change"):
-                    await mean_rewards(rollouts, [self.policy])
+            from rsikit.run import _StoredPolicy
+
+            with run.database() as db:
+                stored = db.get(_StoredPolicy, self.policy.id)
+                stored.name = "changed"
+                db.add(stored)
+                db.commit()
+            with self.assertRaisesRegex(ValueError, "cannot change"):
+                await mean_rewards(rollouts, [self.policy])
             self.assertFalse((self.path / "exports").exists())
         with self.assertRaisesRegex(RuntimeError, "closed"):
             await finish_pending(rollouts)
@@ -454,15 +472,14 @@ class RunTests(unittest.IsolatedAsyncioTestCase):
             await mean_rewards(rollouts, [policy])
             (export,) = (self.path / "exports").glob("*.py")
             self.assertEqual(export.parent, self.path / "exports")
-        from rsikit.policy import validate_policy
 
         candidate = await generate(
             "task",
             provider=ScriptedProvider([json.dumps({**RESPONSE, "implementation": "pass"})]),
         )
-        self.assertEqual(candidate._implementation, "pass")
+        self.assertEqual(candidate.source, "pass")
         with self.assertRaisesRegex(InvalidPolicy, "Solution"):
-            validate_policy(candidate)
+            candidate.validate()
 
 
 if __name__ == "__main__":

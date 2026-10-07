@@ -34,31 +34,46 @@ network, mounted outputs and scoring state. This protects the rest of the host;
 it does not isolate mutually hostile policies or protect scores from tampering.
 
 ```python
-from rsikit import Executor
+from rsikit import Executor, Job
 
 async with Executor(concurrency=4, episode_timeout=60) as executor:
-    async for policy_id, seed, episode in executor.evaluate(jobs, environment):
-        print(policy_id, seed, episode.total_reward)
+    jobs = [Job(policy, environment, seed=seed) for seed in range(4)]
+    for job in await executor.execute(jobs):
+        print(job.seed, job.result.total_reward, job.result.error)
 ```
 
-`Executor` runs fresh episode processes in the current application. Calling it
-outside Docker runs locally. Linux uses a clean Python forkserver to amortize
-imports; macOS development uses spawn. The policy is an ordinary `Solution`
-instance sharing its child's environment. No policy wrapper or Docker service
-is involved. Each child has its own temporary working directory.
+`Executor` uses Huey process workers in the current application. Calling it
+outside Docker runs locally. Native Huey workers use POSIX fork on Linux/macOS
+and reuse processes across tasks. Each job deserializes private input copies,
+resets both with the same seed, and uses its own temporary working directory.
+Process globals and inherited application state are not isolated across jobs.
 
-The parent enforces whole-episode deadlines and kills ordinary descendants on
-completion, timeout or cancellation. Deliberately detached descendants are only
-guaranteed to disappear when the whole container exits. There is no per-action
-deadline. Candidate errors and timeouts preserve successful sibling episodes;
-runtime failures propagate. A later evaluation starts a fresh process.
+Huey enforces signal-based whole-task timeouts. These are not hard process-kill
+deadlines: native code can delay signal handling, and policies can catch signals.
+Cancellation revokes queued jobs; already-running jobs finish, and closing the
+executor joins the workers. Descendant processes are not killed per episode;
+container shutdown remains the boundary for their lifetime. Candidate errors and
+timeouts preserve successful sibling episodes; infrastructure errors propagate.
+A detected local worker crash aborts pending waits; reopen the executor afterward.
+Huey does not automatically recover an interrupted task.
 
-Results use a multiprocessing connection, capped at 64 MiB. Saved episode JSON
-keeps its existing representation. Episode stdout/stderr becomes an `episode.log`
-artifact; failures include at most 4 KiB of its tail. Rich stays in the main process.
+Inputs use cloudpickle to copy the policy/environment pair. Huey serializes and
+stores validated native Episode fields in SQLite. Successful task result payloads
+are capped at 64 MiB; saved episodes use the same native representation in `.pkl`
+files. Workers and saved runs must be trusted: unpickling can execute Python code.
+Episode stdout/stderr becomes an `episode.log` artifact. Completed policy errors
+are logged in the submitting application's Run context.
+
+Use `database="evaluations.sqlite"` to retain the queue and results; otherwise
+storage is temporary. `Executor` sets queue name `evaluations` and `fsync=True`.
+Queue storage does not replace Run storage or recreate the original Job objects. The
+async context is mandatory; create a new executor for a later context. Callers
+finish or cancel/await their concurrent batch tasks before exit. One collector
+per batch checks native Huey result handles using short queue-I/O operations in
+pooled threads, leaving the main event loop free during evaluation.
 
 The old `rsikit.sandbox` package and `DockerSandbox` are removed. Use
-`Executor(episode_timeout=...)` or `run_program(episode_timeout=...)`.
+`Executor(episode_timeout=...)` for both individual episodes and batches.
 Poker retains its separate Docker service and private player processes; use its
 [own launcher in the paper repository](../../elitelist_papers/poker/README.md).
 
@@ -69,6 +84,8 @@ Measure evaluation within the application:
 ```
 
 ## Application migration measurements — 2026-09-28
+
+These measurements predate the Huey executor.
 
 Same reviewed policies and seed 1 on local ARM64 Docker Desktop; baseline medians
 use 3 samples and application medians use 7. All scores match. Controller location

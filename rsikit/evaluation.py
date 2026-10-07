@@ -1,11 +1,10 @@
 """Evaluate a policy in a Gymnasium environment and collect its episode."""
 
-import logging
-import sys
-from collections.abc import Callable
+import asyncio
+import traceback
 from contextlib import contextmanager
 from copy import deepcopy
-from typing import Any
+from time import perf_counter
 
 import gymnasium as gym
 import numpy as np
@@ -31,134 +30,105 @@ class PolicyTimeout(PolicyError):
 
 
 @contextmanager
-def _policy_boundary(convert):
-    """Normalize generated-code calls; direct Evaluator callers keep native errors."""
+def _policy_boundary():
+    """Distinguish candidate errors from cancellation and infrastructure failures."""
     try:
         yield
     except BaseException as exc:
-        if not convert or isinstance(exc, PolicyError):
+        if isinstance(exc, (PolicyError, InfrastructureError, asyncio.CancelledError)):
             raise
         raise PolicyError(f"{type(exc).__name__}: {str(exc)[:2000]}") from exc
 
 
-class Evaluator:
-    """Collect one episode from existing, already-reset environment and policy.
+def _validate_seed(seed):
+    if seed is not None and (type(seed) is not int or seed < 0):
+        raise ValueError("seed must be a nonnegative integer or None")
 
-    The caller owns creation, seeding, reset, and cleanup, including on failure.
-    This class neither isolates code nor prevents reuse of stateful instances.
+
+class Evaluator:
+    """Reset and evaluate caller-owned policy and environment instances.
+
+    Each call starts a new episode. The caller owns construction and cleanup,
+    including on failure or cancellation. Process isolation belongs to Executor.
     """
 
-    def __init__(
-        self,
-        environment: gym.Env,
-        policy: Policy,
-        *,
-        max_steps: int | None = None,
-        _policy_errors: bool = False,
-    ):
+    def __init__(self, *, max_steps: int | None = None):
         if max_steps is not None and (
             isinstance(max_steps, bool) or not isinstance(max_steps, int) or max_steps < 1
         ):
             raise ValueError("max_steps must be a positive integer or None")
-        self.environment = environment
-        self.policy = policy
         self.max_steps = max_steps
-        self._policy_errors = _policy_errors
 
-    async def run(self, observation: Any, *, info: dict[str, Any] | None = None) -> Episode:
-        """Start from the supplied reset result and stop at termination/truncation.
+    async def evaluate(
+        self,
+        policy: Policy,
+        environment: gym.Env,
+        seed: int | None = None,
+    ) -> Episode:
+        """Reset both objects, then collect transitions until termination or truncation.
 
-        Observations, applied actions, and infos are deep-copied for later analysis.
-        max_steps caps this rollout without resetting or wrapping the environment.
+        Both objects reset once with the same seed.
+        Observations, actions, and infos are copied to preserve the trajectory.
+        Successful episodes include reward/length/time statistics in their final info.
         """
-        env = self.environment
-        episode = Episode(
-            observations=[deepcopy(observation)],
-            infos=[deepcopy(info) if info is not None else {}],
-        )
-        while True:
-            policy_observation = deepcopy(observation)
-            with _policy_boundary(self._policy_errors):
-                action = await self.policy.act(policy_observation)
-            try:
-                valid = env.action_space.contains(action)
-            except (ValueError, TypeError, OverflowError):
-                valid = False
-            if not valid:
-                raise PolicyError("Action outside action_space")
-            # Discrete.contains accepts scalar arrays, but toy-text uses dict keys.
-            if isinstance(env.action_space, gym.spaces.Discrete):
-                action = int(action)
-            elif isinstance(env.action_space, gym.spaces.Box):
-                # Box.contains validates lists via a temporary array; pass that representation.
-                action = np.asarray(action, dtype=env.action_space.dtype)
-            applied_action = deepcopy(action)
-            try:
-                observation, reward, terminated, truncated, info = env.step(action)
-            except gym.error.InvalidAction as exc:
-                raise PolicyError(str(exc)) from exc
-            if self.max_steps is not None and len(episode) + 1 >= self.max_steps:
-                truncated = True
-            episode.observations.append(deepcopy(observation))
-            episode.actions.append(applied_action)
-            episode.rewards.append(float(reward))
-            episode.terminations.append(bool(terminated))
-            episode.truncations.append(bool(truncated))
-            episode.infos.append(deepcopy(info))
-            if terminated or truncated:
-                return episode
-
-
-async def _run_episode(
-    make_env: str | Callable[[], gym.Env],
-    make_policy: Callable[..., Policy],
-    *,
-    env_seed: int | None = None,
-    policy_seed: int | None = None,
-    max_steps: int | None = None,
-    instructions: str | None = None,
-    _policy_errors: bool = False,
-) -> Episode:
-    """Prepare and clean up instances for one episode.
-
-    Accept an environment ID or a factory returning a fresh environment. Existing
-    Gymnasium time limits apply unless max_steps supplies an additional cap.
-    Instructions are optional. Exceptions propagate after resources are closed.
-    """
-    env = gym.make(make_env) if isinstance(make_env, str) else make_env()
-    policy = None
-    try:
-        if max_steps is not None:
-            env = gym.wrappers.TimeLimit(env, max_episode_steps=max_steps)
-        env = gym.wrappers.RecordEpisodeStatistics(env, buffer_length=1)
-        if instructions is None:
-            instructions = (
-                env.get_wrapper_attr("instructions") if env.has_wrapper_attr("instructions") else ""
-            )
-        with _policy_boundary(_policy_errors):
-            policy = make_policy(
-                deepcopy(env.observation_space),
-                deepcopy(env.action_space),
-                instructions=instructions,
-            )
-        observation, info = env.reset(seed=env_seed)
-        with _policy_boundary(_policy_errors):
-            await policy.reset(seed=policy_seed)
-        episode = await Evaluator(env, policy, _policy_errors=_policy_errors).run(
-            observation, info=info
-        )
-        return episode
-    finally:
-        primary = sys.exc_info()[1]
+        _validate_seed(seed)
+        env = environment
+        observation, info = env.reset(seed=seed)
+        started = perf_counter()
+        episode = Episode(observations=[deepcopy(observation)], infos=[deepcopy(info)])
         try:
-            try:
-                if policy is not None:
-                    with _policy_boundary(_policy_errors):
-                        await policy.close()
-            finally:
-                env.close()
-        except BaseException:
-            if primary is None:
-                raise
-            # Keep the original failure/cancellation; expose secondary cleanup errors.
-            logging.getLogger(__name__).exception("Cleanup failed while handling an episode error")
+            with _policy_boundary():
+                await policy.reset(seed=seed)
+            while True:
+                policy_observation = deepcopy(observation)
+                with _policy_boundary():
+                    action = await policy.act(policy_observation)
+                try:
+                    valid = env.action_space.contains(action)
+                except (ValueError, TypeError, OverflowError):
+                    valid = False
+                if not valid:
+                    raise PolicyError("Action outside action_space")
+                # Discrete.contains accepts scalar arrays, but toy-text uses dict keys.
+                if isinstance(env.action_space, gym.spaces.Discrete):
+                    action = int(action)
+                elif isinstance(env.action_space, gym.spaces.Box):
+                    # Box.contains validates lists via a temporary array; pass that representation.
+                    action = np.asarray(action, dtype=env.action_space.dtype)
+                applied_action = deepcopy(action)
+                try:
+                    observation, reward, terminated, truncated, info = env.step(action)
+                except gym.error.InvalidAction as exc:
+                    raise PolicyError(str(exc)) from exc
+                if self.max_steps is not None and len(episode) + 1 >= self.max_steps:
+                    truncated = True
+                episode.observations.append(deepcopy(observation))
+                episode.actions.append(applied_action)
+                episode.rewards.append(float(reward))
+                episode.terminations.append(bool(terminated))
+                episode.truncations.append(bool(truncated))
+                episode.infos.append(deepcopy(info))
+                if terminated or truncated:
+                    episode.infos[-1].setdefault(
+                        "episode",
+                        {
+                            "r": episode.total_reward,
+                            "l": len(episode),
+                            "t": round(perf_counter() - started, 6),
+                        },
+                    )
+                    return episode
+        except PolicyError as exc:
+            episode.error = "".join(traceback.format_exception(exc))
+            return episode
+
+
+async def evaluate(
+    policy: Policy,
+    environment: gym.Env,
+    *,
+    seed: int | None = None,
+    max_steps: int | None = None,
+) -> Episode:
+    """Start one episode on caller-owned instances, resetting both with seed."""
+    return await Evaluator(max_steps=max_steps).evaluate(policy, environment, seed=seed)

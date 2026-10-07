@@ -5,20 +5,30 @@ import hashlib
 import json
 import math
 import sqlite3
-from dataclasses import dataclass, field
+from dataclasses import field
 from numbers import Real
 
-from rsikit.policy import Policy
+from pydantic import ConfigDict, TypeAdapter
+from pydantic.dataclasses import dataclass
+
+from rsikit.policy import PolicyDefinition
+
+from .evaluation import FiniteNumber, NamedValues, SeedScores
 
 
-@dataclass(frozen=True)
+@dataclass(
+    frozen=True, config=ConfigDict(strict=True, extra="forbid", revalidate_instances="always")
+)
 class Candidate:
-    policy: type[Policy]
-    score: float
-    metrics: dict[str, float]
-    features: dict[str, float]
+    policy: PolicyDefinition
+    score: FiniteNumber
+    metrics: NamedValues
+    features: NamedValues
     feedback: str = ""
-    seed_scores: dict[int, float] = field(default_factory=dict)
+    seed_scores: SeedScores = field(default_factory=dict)
+
+
+_CANDIDATE = TypeAdapter(Candidate)
 
 
 def _finite(value):
@@ -131,24 +141,11 @@ class Database:
             raise ValueError("island index is out of range")
 
     def _validate(self, candidate):
-        if not _finite(candidate.score):
-            raise ValueError("score must be finite")
-        for mapping in (candidate.metrics, candidate.features):
-            if not isinstance(mapping, dict) or any(
-                not isinstance(k, str) or not k or not _finite(v) for k, v in mapping.items()
-            ):
-                raise ValueError("metrics and descriptors require named finite numeric values")
+        _CANDIDATE.validate_python(candidate)
         if candidate.metrics.get(self.objective) != candidate.score:
             raise ValueError("score must equal the required objective metric")
         if set(candidate.features) != set(self.features):
             raise ValueError("descriptors must match the configured schema exactly")
-        if not isinstance(candidate.feedback, str):
-            raise ValueError("feedback must be text")
-        if not isinstance(candidate.seed_scores, dict) or any(
-            isinstance(k, bool) or not isinstance(k, int) or not _finite(v)
-            for k, v in candidate.seed_scores.items()
-        ):
-            raise ValueError("seed scores require integer seeds and finite numeric values")
         schema = self._connection.execute(
             "SELECT value FROM metadata WHERE key = 'metrics'"
         ).fetchone()
@@ -159,15 +156,6 @@ class Database:
         """Check registration inputs against saved configuration without changing state."""
         self._island(island)
         self._validate(candidate)
-        policy = candidate.policy
-        if not isinstance(policy, type) or not issubclass(policy, Policy):
-            raise ValueError("candidate policy must be a Policy class")
-        try:
-            restored = Policy.from_text(policy._implementation, name=policy.name)
-            if restored.id != policy.id:
-                raise ValueError("policy id must match its name and implementation")
-        except (AttributeError, SyntaxError, TypeError) as error:
-            raise ValueError("candidate policy needs valid stored source, name, and id") from error
         if (
             parent_id is not None
             and self._connection.execute(
@@ -202,7 +190,7 @@ class Database:
     def register(self, candidate: Candidate, island, parent_id=None) -> Candidate:
         """Register without executing source; duplicate syntax keeps its canonical evaluation."""
         self.validate(candidate, island, parent_id)
-        source = candidate.policy._implementation
+        source = candidate.policy.source
         syntax = hashlib.sha256(
             ast.dump(ast.parse(source), include_attributes=False).encode()
         ).hexdigest()
@@ -240,7 +228,7 @@ class Database:
 
     def _decode(self, row):
         if row["id"] not in self._policies:
-            self._policies[row["id"]] = Policy.from_text(
+            self._policies[row["id"]] = PolicyDefinition.from_text(
                 row["source"], name=row["name"], description=row["description"]
             )
         return Candidate(

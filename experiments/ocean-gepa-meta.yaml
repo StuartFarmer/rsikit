@@ -1,0 +1,30 @@
+# Mixed-environment pilot: separate GEPA campaigns; no automatic paid launch.
+model: gpt-oss-120b:nitro
+image: rsikit-meta-worker:local
+objective: all
+environments: [g2048, breakout, maze]
+development: [0, 1]
+validation: [2, 3, 4]
+test: [5, 6, 7, 8, 9]
+evaluations: 50
+audit_cases: 64
+final_audit_cases: 512
+calibration_cases: 64
+batch_size: 32
+max_steps: 2000
+benchmark_limit: 9
+revisions: 2
+search_seed: 0
+output_tokens: 250000
+max_input_tokens: 65536
+max_output_tokens: 4096
+editor_output_tokens: 16384
+# User-set USD / million-token ceilings, not provider price quotations.
+input_price: 1
+output_price: 5
+trial_spend_cap: 5
+editor_spend_cap: 5
+trial_timeout: 7200
+# Full final audits can require 16 batches of 2,000 remote policy calls.
+panel_timeout: 1800
+generation_timeout: 120

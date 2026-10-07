@@ -13,6 +13,28 @@ from rsikit.envs import BlackjackEnv
 
 
 class BlackjackRenderTests(unittest.TestCase):
+    def test_task_factory_records_blackjack_video(self):
+        import gymnasium as gym
+        from imageio_ffmpeg import count_frames_and_secs
+
+        from rsikit.envs.tasks import make_environment
+
+        with TemporaryDirectory() as temporary:
+            env = make_environment(
+                "Blackjack", render_mode="rgb_array", max_steps=3, shoes_per_episode=2
+            )
+            self.assertIn("2 shoes", env.instructions)
+            with gym.wrappers.RecordVideo(
+                env, str(Path(temporary) / "videos"), disable_logger=True
+            ) as recording:
+                obs, _ = recording.reset(seed=0)
+                for _ in range(3):
+                    obs, _, done, truncated, _ = recording.step(choose_action(obs))
+                self.assertFalse(done)
+                self.assertTrue(truncated)
+            (video,) = Path(temporary).rglob("*.mp4")
+            self.assertEqual(count_frames_and_secs(str(video))[0], 4)
+
     def test_all_seed_video_has_one_frame_per_action_at_30_fps(self):
         from imageio_ffmpeg import count_frames_and_secs
         from moviepy import VideoFileClip

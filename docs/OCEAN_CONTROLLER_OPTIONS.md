@@ -1,5 +1,7 @@
 # Ocean search controllers: GEPA, RRSI and alternatives
 
+> Implementation update (2026-10-03): evaluation now uses patched upstream Ocean bindings with one episode per seed; batch size only limits concurrency. See [the current protocol](OCEAN_BENCHMARK.md). Earlier episode counts, native-version details, and timing projections below are historical.
+
 Investigated 2026-10-02. This is a source-backed integration recommendation,
 not an Ocean performance comparison. No competitor was installed or run against
 Ocean, and no paid model calls were made.
@@ -212,8 +214,8 @@ agent/generation/healing files in the sibling EliteTable repository at inspectio
 The Ocean runner now exposes its population, generation, elite, repair and episode
 seed settings. The search algorithm itself is unchanged.
 
-Only **Ocean 2048 (`g2048`) is runnable today**. Breakout and Maze are proposed
-adapters, and the earlier six-environment timing was a 2048 cost projection.
+**Ocean 2048 (`g2048`) and Breakout are runnable through upstream bindings**.
+Maze is not included. The earlier six-environment timing was a historical 2048 cost projection.
 
 From this checkout, set `MODEL` to your OpenRouter model ID, `SPEND_CAP` to your
 chosen USD limit, and `INPUT_PRICE`/`OUTPUT_PRICE` to conservative USD prices per

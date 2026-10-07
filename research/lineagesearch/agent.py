@@ -13,20 +13,22 @@ import math
 import random
 from collections import Counter
 from collections.abc import Awaitable, Callable, Sequence
-from dataclasses import asdict, dataclass
+from dataclasses import asdict
 from statistics import fmean, stdev
 from typing import Annotated
 
-from pydantic import BaseModel, Field, StrictInt, StringConstraints, ValidationError
+from pydantic import BaseModel, ConfigDict, Field, StrictInt, StringConstraints, ValidationError
+from pydantic.dataclasses import dataclass
 from rich.table import Column
 from slick import parse, render
 from slick.providers import Provider
 from sqlmodel import SQLModel
 
-from research.rewards import Measurement
-from rsikit import Policy
+from research.rewards import episode_error, episode_scores
+from rsikit import Episode, PolicyDefinition, search
 from rsikit.generation import WORKER_LIBRARIES
-from rsikit.policy import InvalidPolicy, validate_policy
+from rsikit.optimization import validate_results
+from rsikit.policy import InvalidPolicy
 
 from .generation import InvalidCandidate, _PolicyResponse, check_rewrite, evolution_regions
 from .healing import SelfHealer
@@ -36,29 +38,25 @@ logger = logging.getLogger(__name__)
 Text = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1)]
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, config=ConfigDict(strict=True, extra="forbid", allow_inf_nan=False))
 class Config:
-    families: int = 10
-    initial_per_family: int = 10
-    batch_size: int = 10
-    frontier_per_family: int | None = None
-    cull_percent: float = 90.0
-    exploration: float = 0.2
-    bonus_batches: int = 2
-    patience: int = 3
-    min_delta: float = 0.0
-    uncertainty: float = 2.0
-    max_attempts: int = 500
-    generation_concurrency: int = 100
-    generation_timeout: float = 120
-    discovery_attempts: int = 3
-    max_repairs: int = 2
-    decomposition_k: int = 3
-    decomposition_max_votes: int = 40
-
-    def __post_init__(self):
-        if not 0 <= self.cull_percent < 100:
-            raise ValueError("cull_percent must be between 0 (inclusive) and 100 (exclusive)")
+    families: int = Field(default=10, ge=1)
+    initial_per_family: int = Field(default=10, ge=1)
+    batch_size: int = Field(default=10, ge=1)
+    frontier_per_family: int | None = Field(default=None, ge=1)
+    cull_percent: float = Field(default=90.0, ge=0, lt=100)
+    exploration: float = Field(default=0.2, ge=0, le=1)
+    bonus_batches: int = Field(default=2, ge=0)
+    patience: int = Field(default=3, ge=1)
+    min_delta: float = Field(default=0.0, ge=0)
+    uncertainty: float = Field(default=2.0, ge=0)
+    max_attempts: int = Field(default=500, ge=0)
+    generation_concurrency: int = Field(default=100, ge=1)
+    generation_timeout: float = Field(default=120, gt=0)
+    discovery_attempts: int = Field(default=3, ge=1)
+    max_repairs: int = Field(default=2, ge=0)
+    decomposition_k: int = Field(default=3, ge=1)
+    decomposition_max_votes: int = Field(default=40, ge=1)
 
 
 class FamilyBrief(BaseModel, extra="forbid"):
@@ -100,7 +98,8 @@ class LineageSearch:
         self,
         task: str,
         provider: Provider,
-        evaluate: Callable[[Sequence[type[Policy]]], Awaitable[dict[str, Measurement]]],
+        evaluate: Callable[[Sequence[PolicyDefinition]], Awaitable[dict[str, dict[int, Episode]]]]
+        | None = None,
         *,
         context: str = "",
         config: Config = Config(),
@@ -114,14 +113,19 @@ class LineageSearch:
         self.study = Study(task=task, context=context, config={**asdict(config), "seed": seed})
         self.families: list[Family] = []
         self.trials: list[Trial] = []
-        self._policies: dict[int, type[Policy]] = {}
+        self._policies: dict[int, PolicyDefinition] = {}
         self._sources: set[str] = set()
         self._seed_panel: set[int] | None = None
         self._call_slots: asyncio.Semaphore | None = None
-        self._evaluation_lock = asyncio.Lock()
+        self._round = {}
+        self._expansions = []
+        self._proposing = False
+        self._proposal_error = None
+        self._phase = "discover"
+        self._bonus_remaining = 0
 
     @property
-    def best(self) -> type[Policy] | None:
+    def best(self) -> PolicyDefinition | None:
         incumbents = [self.trials[f.best_id - 1] for f in self.families if f.best_id is not None]
         return self._policies[max(incumbents, key=lambda t: t.score).id] if incumbents else None
 
@@ -254,7 +258,9 @@ class LineageSearch:
             raise InvalidCandidate("Vote must identify one of the numbered proposals")
         return generated.candidate - 1
 
-    async def implement(self, data: dict, approach: dict, *, provider, record=None) -> type[Policy]:
+    async def implement(
+        self, data: dict, approach: dict, *, provider, record=None
+    ) -> PolicyDefinition:
         schema = _PolicyResponse.model_json_schema()
         context = render("implement.j2", instance=self, schema=schema, data=data, approach=approach)
         raw, _ = await provider.acall(context)
@@ -506,9 +512,9 @@ class LineageSearch:
         row.policy_id = None
         self._policies.pop(row.id, None)
         row.name, row.description = policy.name, policy.description
-        row.implementation = policy._implementation
+        row.implementation = policy.source
         evolution_regions(row.implementation)
-        validate_policy(policy)
+        policy.validate()
         if parent is not None:
             check_rewrite(parent.implementation, row.implementation)
         key = ast.dump(ast.parse(row.implementation), include_attributes=False)
@@ -601,55 +607,6 @@ class LineageSearch:
 
         await self._parallel(generate(row) for row in rows)
 
-    async def _measure(self, rows, data, parent):
-        while any(row.status == "generated" for row in rows):
-            await self._evaluate_pending(rows)
-            failed = [
-                row
-                for row in rows
-                if row.status == "execution_failed" and row.repairs < self.config.max_repairs
-            ]
-            self._checkpoint()
-            if failed:
-                await self._generate(failed, data, parent)
-                self._checkpoint()
-
-    async def _evaluate_pending(self, rows):
-        generated = [row for row in rows if row.status == "generated"]
-        if not generated:
-            return
-        # The evaluator owns its worker pool; model calls in other families keep running.
-        async with self._evaluation_lock:
-            for row in generated:
-                row.status = "evaluating"
-                self._log_candidate(row)
-            self._checkpoint()
-            results = await self.evaluate([self._policies[row.id] for row in generated])
-        if set(results) != {row.policy_id for row in generated}:
-            raise ValueError("Evaluator must return exactly the requested policy IDs")
-        panel = self._seed_panel
-        for result in results.values():
-            if not result.accepted:
-                continue
-            if not result.scores or any(not math.isfinite(s) for s in result.scores.values()):
-                raise ValueError("Measurements must contain finite per-seed scores")
-            if panel is not None and set(result.scores) != panel:
-                raise ValueError("Every measurement must use the same seed panel")
-            panel = set(result.scores)
-        self._seed_panel = panel
-        for row in generated:
-            result = results[row.policy_id]
-            row.feedback = result.feedback
-            if result.failure is not None:
-                row.status, row.error = "execution_failed", result.failure
-                logger.warning("Policy %s failed: %s", row.name, row.error)
-            elif not result.accepted:
-                row.status, row.error = "rejected", result.feedback or "Evaluation rejected"
-            else:
-                row.seed_scores = {str(seed): score for seed, score in result.scores.items()}
-                row.score, row.status = fmean(result.scores.values()), "evaluated"
-            self._log_candidate(row)
-
     def _improves(self, child, parent, minimum=0.0):
         differences = [
             score - parent.seed_scores[seed] for seed, score in child.seed_scores.items()
@@ -729,7 +686,7 @@ class LineageSearch:
         )
         self._checkpoint()
 
-    async def _expand(self, family, initial_approaches=None):
+    async def _prepare_expansion(self, family, initial_approaches=None):
         parent = self._select_parent(family)
         wanted = self.config.initial_per_family if parent is None else self.config.batch_size
         count = min(wanted, self.config.max_attempts - self.study.attempts)
@@ -753,6 +710,7 @@ class LineageSearch:
             for i in range(count)
         ]
         data = self._evidence(family, parent)
+        self._expansions.append((family, rows, count == wanted, data, parent))
         logger.info(
             "Starting batch %s",
             rows[0].batch,
@@ -788,21 +746,6 @@ class LineageSearch:
                     setattr(row, key, value)
             await self._generate(rows, data, parent)
             self._checkpoint()
-            await self._measure(rows, data, parent)
-        for row in rows:
-            self._log_candidate(row, terminal=True)
-        self._update(family, rows, count == wanted)
-        self._log_leaderboard()
-        logger.info(
-            "Finished batch %s",
-            rows[0].batch,
-            extra={
-                "progress": dict(
-                    kind="batch_finished", batch_id=str(rows[0].batch), status="completed"
-                )
-            },
-        )
-        self._checkpoint()
 
     def _sample_family(self):
         active = [f for f in self.families if f.status == "active"]
@@ -818,9 +761,162 @@ class LineageSearch:
         ]
         return self.rng.choices(ranked, weights=weights)[0]
 
+    @property
+    def done(self):
+        return (
+            not self._proposing
+            and not self._round
+            and not self._expansions
+            and self.study.reason in ("completed", "budget_exhausted", "generation_exhausted")
+        )
+
+    def _finish_study(self):
+        if self._expansions or self._round:
+            return
+        if self.study.reason == "generation_exhausted":
+            return
+        active = any(f.status == "active" for f in self.families)
+        if not active or self.study.attempts >= self.config.max_attempts:
+            self.study.reason = "completed" if self.families and not active else "budget_exhausted"
+
+    def _settle_expansions(self):
+        if self._proposal_error is not None:
+            return
+        if any(
+            row.status == "execution_failed" and row.repairs < self.config.max_repairs
+            for _, rows, _, _, _ in self._expansions
+            for row in rows
+        ):
+            return
+        all_rows = []
+        for family, rows, full_batch, _, _ in self._expansions:
+            for row in rows:
+                self._log_candidate(row, terminal=True)
+            self._update(family, rows, full_batch)
+            all_rows.extend(rows)
+            logger.info(
+                "Finished batch %s",
+                rows[0].batch,
+                extra={
+                    "progress": dict(
+                        kind="batch_finished", batch_id=str(rows[0].batch), status="completed"
+                    )
+                },
+            )
+        self._expansions.clear()
+        self._log_leaderboard()
+        self._cull(all_rows)
+        if self._phase == "explore":
+            self._bonus_remaining = self.config.bonus_batches
+            self._phase = "bonus" if self._bonus_remaining else "explore"
+        else:
+            self._bonus_remaining -= 1
+            if not self._bonus_remaining:
+                self._phase = "explore"
+        self._finish_study()
+        self._checkpoint()
+
+    async def propose(self):
+        if self._proposing or self._round:
+            raise RuntimeError("Previous proposal round is still outstanding")
+        if self.done:
+            return []
+        if self._proposal_error is not None:
+            raise self._proposal_error
+        self._proposing = True
+        try:
+            if self._phase == "discover":
+                self.study.reason = "running"
+                if self.config.max_attempts:
+                    await self._discover()
+                    if self.study.reason == "generation_exhausted":
+                        return []
+                    await self._plan_founders()
+                self._phase = "explore"
+            while True:
+                if self._expansions:
+                    await self._parallel(
+                        self._generate(
+                            [
+                                row
+                                for row in rows
+                                if row.status == "execution_failed"
+                                and row.repairs < self.config.max_repairs
+                            ],
+                            data,
+                            parent,
+                        )
+                        for _, rows, _, data, parent in self._expansions
+                    )
+                else:
+                    self._finish_study()
+                    if self.study.reason in (
+                        "completed",
+                        "budget_exhausted",
+                        "generation_exhausted",
+                    ):
+                        return []
+                    if self._phase == "explore":
+                        await self._parallel(
+                            self._prepare_expansion(
+                                family, family.initial_approaches if family.batches == 0 else None
+                            )
+                            for family in self.families
+                            if family.status == "active"
+                        )
+                    else:
+                        await self._prepare_expansion(self._sample_family())
+                self._round = {
+                    row.policy_id: row
+                    for _, rows, _, _, _ in self._expansions
+                    for row in rows
+                    if row.status == "generated"
+                }
+                if self._round:
+                    for row in self._round.values():
+                        row.status = "evaluating"
+                        self._log_candidate(row)
+                    return [self._policies[row.id] for row in self._round.values()]
+                self._settle_expansions()
+        except BaseException as exc:
+            self._proposal_error = exc
+            if isinstance(exc, Exception):
+                self._round = {
+                    row.policy_id: row for row in self.trials if row.status == "generated"
+                }
+                if self._round:
+                    for row in self._round.values():
+                        row.status = "evaluating"
+                        self._log_candidate(row)
+                    return [self._policies[row.id] for row in self._round.values()]
+            raise
+        finally:
+            self._proposing = False
+
+    def update(self, results):
+        panel = validate_results(results, self._round, seed_panel=self._seed_panel)
+        score_panels = {id: episode_scores(r) for id, r in results.items()}
+        for id, result in results.items():
+            error = episode_error(result)
+            row = self._round[id]
+            row.feedback = ""
+            if error is not None:
+                row.status, row.error = "execution_failed", error
+            elif not result:
+                row.status, row.error = "rejected", "Evaluation rejected"
+            else:
+                row.seed_scores = {str(seed): score for seed, score in score_panels[id].items()}
+                row.score, row.status = fmean(score_panels[id].values()), "evaluated"
+            self._log_candidate(row)
+        self._seed_panel = panel
+        self._round.clear()
+        self._checkpoint()
+        self._settle_expansions()
+
     async def run(self) -> Study:
-        """Elect the complete initial tree, then expand by measured fitness until stopped."""
-        self.study.reason = "running"
+        """Compatibility wrapper around the shared proposal/evaluation runner."""
+        if self.evaluate is None:
+            raise ValueError("Pass an evaluator to rsikit.search(optimizer, evaluate)")
         logger.info(
             "Starting LineageSearch",
             extra={
@@ -834,44 +930,17 @@ class LineageSearch:
             },
         )
         try:
-            if self.config.max_attempts > 0:
-                await self._discover()
-            if self.study.reason == "generation_exhausted":
-                return self.study
-            await self._plan_founders()
-            while self.study.attempts < self.config.max_attempts:
-                active = [f for f in self.families if f.status == "active"]
-                if not active:
-                    break
-                start = len(self.trials)
-                await self._parallel(
-                    self._expand(
-                        family,
-                        family.initial_approaches if family.batches == 0 else None,
-                    )
-                    for family in active
-                )
-                self._cull(self.trials[start:])
-                for _ in range(self.config.bonus_batches):
-                    if self.study.attempts >= self.config.max_attempts or all(
-                        f.status != "active" for f in self.families
-                    ):
-                        break
-                    start = len(self.trials)
-                    await self._expand(self._sample_family())
-                    self._cull(self.trials[start:])
-            self.study.reason = (
-                "completed"
-                if self.families and all(f.status != "active" for f in self.families)
-                else "budget_exhausted"
-            )
+            await search(self, self.evaluate, on_checkpoint=lambda agent: agent._checkpoint())
             return self.study
         except BaseException as exc:
             self.study.reason = "cancelled" if isinstance(exc, asyncio.CancelledError) else "error"
             self.study.error = f"{type(exc).__name__}: {exc}"
+            try:
+                self._checkpoint()
+            except BaseException:
+                logger.exception("Checkpoint failed while handling search error")
             raise
         finally:
-            self._checkpoint()
             logger.info(
                 "Search %s",
                 self.study.reason,

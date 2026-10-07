@@ -123,7 +123,7 @@ class BitcoinTests(unittest.TestCase):
             async def act(self, observation):
                 return np.array([0.0])
 
-        result = asyncio.run(run_episode(envs.BitcoinEnv, Cash, env_seed=7))
+        result = asyncio.run(run_episode(envs.BitcoinEnv, Cash, seed=7))
         self.assertEqual(result[4]["episode"]["r"], 0)
         self.assertEqual(result[4]["episode"]["l"], len(dates) - 1)
 

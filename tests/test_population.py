@@ -6,16 +6,37 @@ import unittest
 from dataclasses import replace
 from pathlib import Path
 
+import numpy as np
+
 from research.alphaevolve.paper.database import Candidate, Database
-from rsikit.policy import Policy
+from rsikit.policy import PolicyDefinition
 
 
 def candidate(value, score, niche=0, stability=0):
-    policy = Policy.from_text(f"class Solution:\n    value = {value}\n", name=str(value))
+    policy = PolicyDefinition.from_text(f"class Solution:\n    value = {value}\n", name=str(value))
     return Candidate(policy, score, {"reward": score, "stability": stability}, {"x": niche})
 
 
 class PopulationTests(unittest.TestCase):
+    def test_candidate_constructor_and_registration_reject_invalid_fields(self):
+        good = candidate(1, 2)
+        for values in (
+            {"score": True},
+            {"score": np.bool_(True)},
+            {"score": float("nan")},
+            {"metrics": {"reward": "2"}},
+            {"features": {"x": float("inf")}},
+            {"seed_scores": {True: 2}},
+            {"feedback": 3},
+        ):
+            with self.subTest(values=values), self.assertRaises(ValueError):
+                replace(good, **values)
+        db = self.database(islands=1)
+        good.metrics["reward"] = float("nan")
+        with self.assertRaises(ValueError):
+            db.register(good, 0)
+        self.assertEqual(db.all(), [])
+
     def database(self, **kwargs):
         db = Database(features={"x": (0, 10, 5)}, **kwargs)
         self.addCleanup(db.close)
@@ -62,7 +83,9 @@ class PopulationTests(unittest.TestCase):
     def test_dedup_ignores_comments_names_and_does_not_replace_evaluation(self):
         db = self.database(islands=2)
         original = db.register(candidate(1, 10), 0)
-        renamed = Policy.from_text("# comment\nclass Solution:\n    value=1\n", name="new name")
+        renamed = PolicyDefinition.from_text(
+            "# comment\nclass Solution:\n    value=1\n", name="new name"
+        )
         duplicate = db.register(replace(candidate(1, 999), policy=renamed), 1)
         self.assertEqual(duplicate, original)
         self.assertEqual(duplicate.policy.id, original.policy.id)
@@ -72,14 +95,14 @@ class PopulationTests(unittest.TestCase):
 
     def test_validation_and_storage_do_not_execute_source(self):
         db = self.database(islands=1)
-        policy = Policy.from_text(
+        policy = PolicyDefinition.from_text(
             "raise RuntimeError('never execute')\nclass Solution: pass", name="untrusted"
         )
         item = replace(candidate(1, 2), policy=policy)
         db.validate(item, 0)
         self.assertEqual(db.all(), [])
         db.register(item, 0)
-        self.assertEqual(db.best.policy._implementation, policy._implementation)
+        self.assertEqual(db.best.policy.source, policy.source)
 
     def test_reopening_restores_history_cells_feedback_seeds_and_state(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -123,17 +146,17 @@ class PopulationTests(unittest.TestCase):
                 Database(**kwargs)
         db = self.database(islands=1)
         good = candidate(1, 2)
-        for bad in [
-            replace(good, score=3),
-            replace(good, metrics={"other": 2}),
-            replace(good, features={}),
-            replace(good, features={"x": 0, "extra": 1}),
-            replace(good, features={"x": float("inf")}),
-            replace(good, metrics={"reward": 2, "stability": float("nan")}),
-            replace(good, seed_scores={1: float("nan")}),
+        for values in [
+            {"score": 3},
+            {"metrics": {"other": 2}},
+            {"features": {}},
+            {"features": {"x": 0, "extra": 1}},
+            {"features": {"x": float("inf")}},
+            {"metrics": {"reward": 2, "stability": float("nan")}},
+            {"seed_scores": {1: float("nan")}},
         ]:
-            with self.subTest(bad=bad), self.assertRaises(ValueError):
-                db.register(bad, 0)
+            with self.subTest(values=values), self.assertRaises(ValueError):
+                db.register(replace(good, **values), 0)
         self.assertEqual(db.all(), [])
         with self.assertRaises(ValueError):
             db.sample(random.Random(1))

@@ -1,0 +1,37 @@
+# EliteTable writes sub-evolver programs; the host enforces their inner generations.
+optimizer: elitetable
+model: gpt-oss-120b:nitro
+image: rsikit-meta-worker:local
+objective: performance
+environments: [g2048, breakout, maze]
+# Outer EliteTable: 100 sub-evolver proposals, retaining 10 elites, plus bounded repairs.
+population: 20
+generations: 5
+elites: 10
+max_repairs: 5
+inner_max_repairs: 5
+# Each proposal is evaluated as a five-generation policy evolver.
+inner_generations: 5
+generation_size: 25
+trial_workers: 8
+evaluation_workers: 16
+model_workers: 8
+# One optimizer run per environment in each split; game panels still use 10 seeds.
+development: [0]
+validation: [2]
+test: [5]
+audit_cases: 64
+final_audit_cases: 512
+batch_size: 32
+max_steps: 2000
+output_tokens: 1024000
+max_input_tokens: 65536
+max_output_tokens: 4096
+editor_output_tokens: 16384
+input_price: 1
+output_price: 5
+trial_spend_cap: 25
+editor_spend_cap: 25
+trial_timeout: 7200
+panel_timeout: 1800
+generation_timeout: 120

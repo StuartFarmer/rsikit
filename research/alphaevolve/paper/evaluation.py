@@ -1,36 +1,34 @@
 """Trusted evaluator callbacks and maximized-threshold cascades (paper §2.4)."""
 
-import math
 from collections.abc import Awaitable, Callable, Sequence
-from dataclasses import dataclass, field, replace
+from dataclasses import field
 from numbers import Real
-from statistics import fmean, pstdev
-from typing import Any
+from statistics import fmean
+from typing import Annotated, Any
 
-from research.rewards import measure_rewards
+from pydantic import BeforeValidator, ConfigDict, Field, StrictInt, TypeAdapter
+from pydantic.dataclasses import dataclass
 
-
-def _numbers(values, *, seeds=False):
-    if not isinstance(values, dict):
-        raise ValueError("Evaluation values must be a dictionary")
-    for name, value in values.items():
-        valid_name = (
-            isinstance(name, int) and not isinstance(name, bool)
-            if seeds
-            else isinstance(name, str) and bool(name.strip())
-        )
-        if not valid_name:
-            raise ValueError("Evaluation names must be nonempty strings; seed IDs must be integers")
-        if isinstance(value, bool) or not isinstance(value, Real) or not math.isfinite(value):
-            raise ValueError(
-                "Measurements must contain finite per-seed scores"
-                if seeds
-                else "Evaluation values must be finite numbers"
-            )
-    return dict(values)
+from research.rewards import episode_error, episode_scores, measure_rewards
+from rsikit import Episode
 
 
-@dataclass(frozen=True)
+def _real_number(value):
+    if isinstance(value, bool) or not isinstance(value, Real):
+        raise ValueError("Evaluation values must be real numbers")
+    return value
+
+
+NonemptyText = Annotated[str, Field(strict=True, pattern=r"\S")]
+FiniteNumber = Annotated[
+    float, BeforeValidator(_real_number), Field(strict=True, allow_inf_nan=False)
+]
+NamedValues = Annotated[dict[NonemptyText, FiniteNumber], Field(strict=True)]
+SeedScores = Annotated[dict[StrictInt, FiniteNumber], Field(strict=True)]
+NAMED_VALUES = TypeAdapter(NamedValues)
+
+
+@dataclass(config=ConfigDict(strict=True, extra="forbid"))
 class EvaluationResult:
     """Measured evidence, screening rejection, or candidate execution failure.
 
@@ -40,38 +38,24 @@ class EvaluationResult:
     intermediate evaluations; optimizers validate their required measurements.
     """
 
-    metrics: dict[str, float] = field(default_factory=dict)
-    features: dict[str, float] = field(default_factory=dict)
+    metrics: NamedValues = field(default_factory=dict)
+    features: NamedValues = field(default_factory=dict)
     feedback: str = ""
-    seed_scores: dict[int, float] = field(default_factory=dict)
+    seed_scores: SeedScores = field(default_factory=dict)
     accepted: bool = True
-    failure: str | None = None
+    failure: NonemptyText | None = None
 
     def __post_init__(self):
-        object.__setattr__(self, "metrics", _numbers(self.metrics))
-        object.__setattr__(self, "features", _numbers(self.features))
-        object.__setattr__(self, "seed_scores", _numbers(self.seed_scores, seeds=True))
-        if not isinstance(self.feedback, str):
-            raise ValueError("Evaluation feedback must be text")
-        if not isinstance(self.accepted, bool):
-            raise ValueError("Evaluation acceptance must be boolean")
         if self.failure is not None:
-            if not isinstance(self.failure, str) or not self.failure.strip():
-                raise ValueError("Evaluation failure must be nonempty text")
-            object.__setattr__(self, "accepted", False)
+            self.accepted = False
 
 
-@dataclass(frozen=True)
+@dataclass(config=ConfigDict(strict=True, extra="forbid"))
 class EvaluationStage:
     """Run evaluate(policy); each named objective must meet its lower bound."""
 
     evaluate: Callable[[Any], Awaitable[EvaluationResult]]
-    thresholds: dict[str, float] = field(default_factory=dict)
-
-    def __post_init__(self):
-        if not callable(self.evaluate):
-            raise ValueError("Evaluation stage requires a callable evaluator")
-        object.__setattr__(self, "thresholds", EvaluationResult(self.thresholds).metrics)
+    thresholds: NamedValues = field(default_factory=dict)
 
 
 async def evaluate_cascade(
@@ -90,13 +74,15 @@ async def evaluate_cascade(
     stages = tuple(stages)
     if not stages or any(not isinstance(stage, EvaluationStage) for stage in stages):
         raise ValueError("A cascade requires at least one valid EvaluationStage")
+    stages = tuple(EvaluationStage(**vars(stage)) for stage in stages)
     if feedback_evaluator is not None and not callable(feedback_evaluator):
         raise ValueError("Feedback evaluator must be callable")
-    result = EvaluationResult({})
+    result = EvaluationResult(accepted=False)
 
     def combine(next_result, thresholds):
         if not isinstance(next_result, EvaluationResult):
             raise ValueError("Evaluators must return EvaluationResult")
+        next_result = EvaluationResult(**vars(next_result))
         metrics = {**result.metrics, **next_result.metrics}
         missing = thresholds.keys() - metrics.keys()
         if missing and next_result.failure is None:
@@ -122,11 +108,11 @@ async def evaluate_cascade(
 
 async def assess(
     rollouts, policies, seeds=(0,), *, features=(), screening_seeds=(), screening_min_reward=None
-) -> dict[str, EvaluationResult]:
-    """Apply AlphaEvolve objectives and screening to requested rollouts.
+) -> dict[str, dict[int, Episode]]:
+    """Return per-seed evidence; the optimizer derives objectives and descriptors.
 
-    Return reward, worst_reward and stability (-population standard deviation).
-    Optional descriptors are mean_reward and reward_std. Screening uses a cheap
+    The features argument validates the requested reward-derived descriptors.
+    Screening uses a cheap
     seed panel first; rejected/failed candidates skip the full panel. Full results
     contain only the requested evaluation seeds, even when Run has other scores.
     The caller owns rollout execution and run persistence.
@@ -141,7 +127,7 @@ async def assess(
     if bool(screening_seeds) != (screening_min_reward is not None):
         raise ValueError("screening_seeds and screening_min_reward must be supplied together")
     if screening_min_reward is not None:
-        _numbers({"screening_min_reward": screening_min_reward})
+        NAMED_VALUES.validate_python({"screening_min_reward": screening_min_reward})
     unknown = set(features) - {"mean_reward", "reward_std"}
     if unknown:
         raise ValueError(f"Unsupported Gym descriptors: {', '.join(sorted(unknown))}")
@@ -151,33 +137,15 @@ async def assess(
         if not batch:
             return {}
         measured = await measure_rewards(rollouts, batch, panel)
-        results = {}
-        for policy in batch:
-            measurement = measured[policy.id]
-            if measurement.failure is not None:
-                results[policy.id] = EvaluationResult(failure=measurement.failure)
-                continue
-            scores = measurement.scores
-            mean, std = fmean(scores.values()), pstdev(scores.values())
-            descriptors = {"mean_reward": mean, "reward_std": std}
-            results[policy.id] = EvaluationResult(
-                metrics={"reward": mean, "worst_reward": min(scores.values()), "stability": -std},
-                features={name: descriptors[name] for name in features},
-                seed_scores=scores,
-            )
-        return results
+        return measured
 
     results = {}
     if screening_seeds:
         for policy_id, result in (await measure(policies, screening_seeds)).items():
-            if result.failure is not None:
+            if episode_error(result) is not None:
                 results[policy_id] = result
-            elif result.metrics["reward"] < screening_min_reward:
-                results[policy_id] = replace(
-                    result,
-                    accepted=False,
-                    feedback=f"Screening reward below {screening_min_reward}",
-                )
+            elif fmean(episode_scores(result).values()) < screening_min_reward:
+                results[policy_id] = {}
         policies = [policy for policy in policies if policy.id not in results]
     results.update(await measure(policies, seeds))
     return results

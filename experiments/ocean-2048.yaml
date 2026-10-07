@@ -1,0 +1,49 @@
+version: 1
+env: ocean:g2048
+optimizer: elite
+model: gpt-oss-120b:nitro
+output: ../runs/ocean-elitetable-2048-1
+search_seed: 0
+environment: {}
+optimizer_options:
+  population: 50
+  generations: 10
+  elites: 10
+  max_repairs: 2
+  new_fraction: 0.2
+  remix_fraction: 0.4
+  remix_parents: 3
+generation:
+  provider: openrouter
+  concurrency: 25
+  timeout: 120
+  max_input_tokens: 65536
+  max_output_tokens: 16384
+evaluation:
+  seeds:
+  - 0
+  - 1
+  - 2
+  - 3
+  - 4
+  - 5
+  - 6
+  - 7
+  - 8
+  - 9
+  workers: 4
+  timeout_per_seed: 60
+  batch_size: 32
+  max_steps: 2000
+  score_key: merge_score
+selection:
+  finalists: 5
+  validation_seeds:
+    start: 1000
+    stop: 1128
+  test_seeds:
+    start: 2000
+    stop: 2512
+videos:
+  top: 0
+  workers: 1

@@ -1,0 +1,28 @@
+#!/usr/bin/env bash
+# Usage: scripts/blackjack-videos [runs/RUN [export options...]]
+set -euo pipefail
+root=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
+cd -- "$root"
+run=${1:-runs/blackjack-parallel-20261003-225001}
+case "$run" in
+    runs/*) ;;
+    *) echo "Use a run path relative to the repository: runs/RUN" >&2; exit 2 ;;
+esac
+runs=${RSIKIT_RUNS_DIR:-"$root/runs"}
+snapshot=$(mktemp -d "$runs/.blackjack-video-XXXXXX")
+trap 'rm -rf -- "$snapshot"' EXIT
+# SQLite's host-side backup includes committed WAL pages and coordinates with writers.
+# Docker Desktop must not read a live database across the host/VM file share.
+python3 - "$runs/${run#runs/}/run.sqlite" "$snapshot/run.sqlite" <<'PY'
+import sqlite3
+import sys
+from contextlib import closing
+from pathlib import Path
+
+with closing(sqlite3.connect(Path(sys.argv[1]).resolve().as_uri() + "?mode=ro", uri=True)) as source:
+    with closing(sqlite3.connect(sys.argv[2])) as destination:
+        source.backup(destination)
+PY
+"$root/scripts/run" examples.blackjack_videos "$run" \
+    --top 1 --output "$run/videos" "${@:2}" \
+    --database "runs/$(basename -- "$snapshot")/run.sqlite"

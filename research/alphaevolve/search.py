@@ -3,6 +3,7 @@
 import asyncio
 import logging
 import math
+from dataclasses import replace
 
 from sqlalchemy import inspect
 from sqlmodel import func, select
@@ -10,9 +11,9 @@ from sqlmodel import func, select
 from research.alphaevolve import paper
 from research.alphaevolve.history import Evaluation, Generation, history_records
 from research.alphaevolve.paper.evaluation import assess
-from research.rewards import mean_rewards
-from rsikit.evaluation import PolicyError
-from rsikit.policy import Policy, validate_policy
+from research.rewards import episode_error, measure_rewards
+from rsikit import search
+from rsikit.policy import PolicyDefinition
 
 
 def _log_history(run):
@@ -110,129 +111,129 @@ async def run_search(
     screening_min_reward=None,
     initial_policy=None,
 ):
-    """Display completed policies immediately and keep the same messages in run.log."""
-    if isinstance(generator, paper.AlphaEvolve):
-        return await run_paper_search(
-            generator,
-            run,
-            rollouts,
-            generations=generations,
-            batch_size=batch_size,
-            generation_concurrency=generation_concurrency,
-            seeds=seeds,
-            screening_seeds=screening_seeds,
-            screening_min_reward=screening_min_reward,
-            initial_policy=initial_policy,
-        )
+    """Configure the shared runner and persist algorithm-owned history."""
     seeds = tuple(seeds)
-    first_generation = 1
+    is_paper = isinstance(generator, paper.AlphaEvolve)
+    if is_paper:
+        _check_gym_evaluation(
+            generator.config.features,
+            seeds,
+            screening_seeds,
+            screening_min_reward,
+            generator.config.objective,
+        )
+        if generator._attempt_offset or generator.attempts:
+            _log_history(run)
+    generator.config = replace(
+        generator.config,
+        proposals=generator._attempt_offset + len(generator.attempts) + generations * batch_size,
+        batch_size=batch_size,
+        generation_concurrency=generation_concurrency,
+    )
     with run.database() as db:
-        if inspect(db.bind).has_table(Generation.__tablename__):
-            first_generation = (db.exec(select(func.max(Generation.number))).one() or 0) + 1
+        last_generation = (
+            db.exec(select(func.max(Generation.number))).one() or 0
+            if inspect(db.bind).has_table(Generation.__tablename__)
+            else 0
+        )
+    offset = max(0, last_generation - generator._batch_number)
+    event_starts = {}
+    with run.database() as db:
+        saved_batches = (
+            {row.number - offset for row in db.exec(select(Generation)) if row.complete}
+            if inspect(db.bind).has_table(Generation.__tablename__)
+            else set()
+        )
+    # Earlier batches may have been driven manually, outside this Run.
+    saved_batches.update(
+        batch
+        for batch in {row["batch"] for row in generator.attempts}
+        if all(
+            row["status"] in ("evaluated", "discarded")
+            for row in generator.attempts
+            if row["batch"] == batch
+        )
+    )
     logger = logging.getLogger("rsikit")
-    outcome = "failed"
+    logger.info("Run: %s", run.path)
+    logger.info("Optimizer: %s", type(generator).__module__)
     logger.info(
         "Starting search",
         extra={
             "progress": dict(
                 kind="search_started",
                 optimizer=type(generator).__module__,
-                total_candidates=generations * batch_size + len(generator.attempts),
-                total_generations=generations + generator._batch_number,
+                total_candidates=generator.config.proposals,
                 columns=generator.leaderboard_columns,
-                resumed=False,
             )
         },
     )
-    try:
-        logger.info("Run: %s", run.path)
-        logger.info("Optimizer: %s", type(generator).__module__)
-        for offset in range(generations):
-            generation = first_generation + offset
-            logger.info("Generation %s/%s", offset + 1, generations)
-            history = dict(
-                generation=generation,
-                attempt_start=len(generator.attempts),
-                event_start=len(generator.events),
+
+    async def evaluate(policies):
+        if is_paper:
+            return await assess(
+                rollouts,
+                policies,
                 seeds=seeds,
+                features=generator.config.features,
+                screening_seeds=screening_seeds,
+                screening_min_reward=screening_min_reward,
             )
-            complete, failures = (False, {})
-            try:
-                policies = await generator.generate(
-                    n=batch_size, concurrency=generation_concurrency
-                )
-                scores = {}
-                while policies:
-                    run.save(*history_records(generator, **history, failures=failures))
-                    try:
-                        generator.evaluation_started(policies)
-                        scores = await mean_rewards(rollouts, policies, seeds=seeds)
-                        failures = {}
-                        break
-                    except PolicyError as exc:
-                        if not exc.failures:
-                            raise
-                        failures = exc.failures
-                        run.save(*history_records(generator, **history, failures=failures))
-                        slots = asyncio.Semaphore(generation_concurrency)
+        return await measure_rewards(rollouts, policies, seeds=seeds)
 
-                        async def repair(policy):
-                            async with slots:
-                                return await generator.repair(policy, failures[policy.id])
-
-                        failed = {p.id: p for p in policies if p.id in failures}
-                        repairs = {
-                            id: asyncio.create_task(repair(policy)) for id, policy in failed.items()
-                        }
-                        try:
-                            replacements = dict(
-                                zip(repairs, await asyncio.gather(*repairs.values()))
-                            )
-                        finally:
-                            for task in repairs.values():
-                                task.cancel()
-                            await asyncio.gather(*repairs.values(), return_exceptions=True)
-                        policies = [
-                            replacement
-                            for policy in policies
-                            if (replacement := replacements.get(policy.id, policy)) is not None
-                        ]
-                generator.update_scores(
-                    scores,
-                    seed_scores={
-                        policy.id: {
-                            seed: score
-                            for seed, score in run.scores(policy).items()
-                            if seed in seeds
-                        }
-                        for policy in policies
-                    },
-                )
-                complete = True
-            finally:
+    def checkpoint(agent):
+        for batch in sorted({row["batch"] for row in agent.attempts} - saved_batches):
+            rows = [row for row in agent.attempts if row.get("batch") == batch]
+            if rows:
+                start = event_starts.setdefault(batch, len(agent.events))
+                complete = all(row["status"] in ("evaluated", "discarded") for row in rows)
+                for row in rows:
+                    if row.get("policy") is not None:
+                        run.save_policy(row["policy"])
                 run.save(
-                    *history_records(generator, **history, complete=complete, failures=failures)
-                )
-            logger.info(
-                "Finished generation",
-                extra={
-                    "progress": dict(
-                        kind="batch_finished",
-                        batch_id=str(generator._batch_number),
-                        status="completed",
+                    *history_records(
+                        agent,
+                        generation=offset + batch,
+                        attempt_start=0,
+                        attempts=rows,
+                        event_start=start,
+                        seeds=seeds,
+                        complete=complete,
+                        failures={
+                            row["policy"].id: row["error"]
+                            for row in rows
+                            if row["status"] == "execution_failed"
+                        },
                     )
-                },
-            )
-            if not policies:
-                logger.warning("No surviving policies in this generation; continuing")
-            if generator.best is not None:
-                logger.info("Best so far: %s", generator.best.name)
+                )
+                if complete:
+                    if agent.best is not None:
+                        logger.info("Best so far: %s", agent.best.name)
+                    saved_batches.add(batch)
+                    logger.info(
+                        "Finished generation",
+                        extra={
+                            "progress": dict(
+                                kind="batch_finished", batch_id=str(batch), status="completed"
+                            )
+                        },
+                    )
+        if is_paper:
+            agent.checkpoint()
+
+    outcome = "failed"
+    try:
+        if initial_policy is not None:
+            policy = PolicyDefinition.from_file(initial_policy)
+            policy.validate()
+            measurement = (await evaluate([policy]))[policy.id]
+            if not measurement or episode_error(measurement) is not None:
+                raise ValueError("Initial policy failed screening; it was not registered")
+            generator.register_initial(policy, generator._evaluation_result(measurement))
+        await search(generator, evaluate, on_checkpoint=checkpoint)
         outcome = "completed"
     except asyncio.CancelledError:
         outcome = "cancelled"
-        raise
-    except Exception:
-        logger.exception("Run failed; saved results and details are in %s", run.path)
         raise
     finally:
         logger.info(
@@ -242,143 +243,5 @@ async def run_search(
         )
 
 
-async def run_paper_search(
-    generator,
-    run,
-    rollouts,
-    *,
-    generations,
-    batch_size,
-    generation_concurrency=4,
-    seeds=(0,),
-    screening_seeds=(),
-    screening_min_reward=None,
-    initial_policy=None,
-):
-    """Overlap generation and evaluation; snapshot each evaluated batch.
-
-    Attempts belong to their first-seen snapshot group, not synchronized generations.
-    A group's complete flag waits for every assigned attempt to evaluate or discard;
-    its island snapshot remains the population at the original batch boundary.
-    """
-    seeds, screening_seeds = (tuple(seeds), tuple(screening_seeds))
-    _check_gym_evaluation(
-        generator.config.features,
-        seeds,
-        screening_seeds,
-        screening_min_reward,
-        generator.config.objective,
-    )
-    if generator._attempt_offset:
-        _log_history(run)
-    logger = logging.getLogger("rsikit")
-    generation = 1
-    with run.database() as db:
-        if inspect(db.bind).has_table(Generation.__tablename__):
-            generation = (db.exec(select(func.max(Generation.number))).one() or 0) + 1
-    next_attempt = len(generator.attempts)
-    event_start = len(generator.events)
-    unresolved = {}
-    failures = {}
-    failed_groups = set()
-    failed_versions = {}
-
-    async def evaluate(policies):
-        nonlocal failures
-        try:
-            results = await assess(
-                rollouts,
-                policies,
-                seeds=seeds,
-                features=generator.config.features,
-                screening_seeds=screening_seeds,
-                screening_min_reward=screening_min_reward,
-            )
-            failures = {
-                id: result.failure for id, result in results.items() if result.failure is not None
-            }
-            return results
-        except PolicyError as exc:
-            failures = exc.failures
-            raise
-
-    def persist(event, policies):
-        nonlocal next_attempt, event_start, generation
-        for record in generator.attempts[next_attempt:]:
-            unresolved[record["id"]] = (generation, record)
-        next_attempt = len(generator.attempts)
-        batches = {generation: []}
-        for number, record in unresolved.values():
-            batches.setdefault(number, []).append(record)
-            policy = record.get("policy")
-            version = (record["id"], record.get("revision", 0))
-            if event == "evaluation_failed" and policy is not None and (policy.id in failures):
-                failed_versions[version] = failures[policy.id]
-            if record["status"] in ("cancelled", "rejected", "error"):
-                failed_groups.add(number)
-        for number, attempts in batches.items():
-            complete = (
-                (bool(attempts) or event == "evaluated")
-                and number not in failed_groups
-                and all((row["status"] in ("evaluated", "discarded") for row in attempts))
-            )
-            rows = history_records(
-                generator,
-                generation=number,
-                attempt_start=0,
-                attempts=attempts,
-                event_start=event_start,
-                seeds=seeds,
-                complete=complete,
-                failures={
-                    row["policy"].id: failed_versions[version]
-                    for row in attempts
-                    if (version := (row["id"], row.get("revision", 0))) in failed_versions
-                },
-            )
-            if number != generation:
-                rows.pop()
-                if complete:
-                    with run.database() as db:
-                        snapshot = db.get(Generation, number)
-                    snapshot.complete = True
-                    rows.append(snapshot)
-            run.save(*rows)
-        unresolved_keys = [
-            key
-            for key, (_, row) in unresolved.items()
-            if row["status"] not in ("generating", "generated", "repaired", "evaluating")
-        ]
-        for key in unresolved_keys:
-            del unresolved[key]
-        if event == "evaluated":
-            if generator.best is not None:
-                logger.info("Best so far: %s", generator.best.name)
-            generation += 1
-            event_start = len(generator.events)
-
-    try:
-        logger.info("Run: %s", run.path)
-        logger.info("Optimizer: %s", type(generator).__module__)
-        if initial_policy is not None:
-            policy = Policy.from_file(initial_policy)
-            validate_policy(policy)
-            result = (await evaluate([policy]))[policy.id]
-            if not result.accepted:
-                raise ValueError("Initial policy failed screening; it was not registered")
-            generator.register_initial(policy, result)
-        await paper.search(
-            generator,
-            evaluate,
-            proposals=generations * batch_size,
-            generation_concurrency=generation_concurrency,
-            evaluation_batch_size=batch_size,
-            on_event=persist,
-        )
-    except Exception:
-        logger.exception("Run failed; saved results and details are in %s", run.path)
-        raise
-    finally:
-        if unresolved or next_attempt < len(generator.attempts):
-            persist("finished", [])
-        generator.checkpoint()
+# Historical spelling; all variants now share the same application loop.
+run_paper_search = run_search

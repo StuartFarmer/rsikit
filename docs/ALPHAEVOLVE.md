@@ -1,7 +1,7 @@
 # AlphaEvolve
 
 The default `alphaevolve.paper` implementation uses a persistent MAP-Elites/island
-population, multiple maximized metrics, evaluation feedback, and overlapping
+population, multiple maximized metrics, evaluation feedback, and concurrent
 generation/evaluation. `Executor` evaluates policies; `Run` stores their results. Slick
 handles model calls and Pydantic validates generated responses.
 
@@ -19,7 +19,7 @@ does not reproduce the paper's performance results.
 | 2.3 Generation | Weighted provider ensemble, exact sequential edits, optional full rewrites |
 | 2.4 Evaluation | Multiple maximized metrics, threshold cascades, optional LLM feedback, parallel isolated Gym episodes |
 | 2.5 Evolution | Persistent evaluated-program database; metric-specific elites within descriptor cells on each island |
-| 2.6 Pipeline | Bounded asynchronous generation workers overlapping batched evaluation |
+| 2.6 Pipeline | Complete proposal/evaluation rounds with bounded concurrency within each stage; cross-stage overlap is deferred |
 
 Section 2.5 describes the combination of MAP-Elites and islands without publishing
 the exact archive, selection, or migration algorithms. The following are **local,
@@ -64,9 +64,9 @@ the choice. Every generated or repaired program must define exactly one top-leve
 `Solution` class. This prevents a later class from silently replacing the intended
 controller; it does not prove that all statements affect the returned action.
 
-`--generations * --batch-size` is the proposal budget for this pipeline, not a
-generation barrier. The first batch seeds selection; subsequent generation and
-evaluation overlap with bounded pending work. `--generation-concurrency` controls
+`--generations * --batch-size` is the original-attempt budget. Each complete
+proposal round is measured before the next round is generated; the first round
+seeds selection. `--generation-concurrency` controls
 both model proposals and concurrent runtime repairs, sharing one limit;
 `--concurrency` controls episode processes. Independent failed policies are
 repaired concurrently in all variants, with each policy retaining its repair
@@ -122,90 +122,66 @@ Without that override, the saved generation count is used. You may also override
 `--batch-size`, `--generation-concurrency`, and `--concurrency`. Changing task,
 model, evaluation, or search settings is rejected to avoid mixing experiments.
 Resume restores the last checkpoint's evaluated population, RNG and search
-counters; interrupted model calls and unevaluated proposals are not replayed.
+counters, pending evaluation rounds, and queued repairs. Interrupted remote model
+calls cannot be replayed.
 Runs made with `original` or `improved` have no optimizer checkpoint and cannot
 use this command. Controllers request missing episodes explicitly; Run owns storage.
 
 ### Use the optimizer directly
 
 Configure `slick.prompts.TEMPLATE_ROOT = Path(alphaevolve.__file__).parent` once.
-All three variants implement `rsikit.Optimizer`. Original inherits the protocol
-explicitly; Improved and Paper inherit through Original:
+All three variants implement [the common optimizer contract](INNER_LOOP.md#one-optimization-loop).
+Batch size and original-attempt limits belong to `Config`:
 
 ```python
-policies = await optimizer.propose(10)
-# Once matching episodes have been collected by the caller:
-optimizer.update(zip(policies, episodes, strict=True))
-```
+from rsikit import search
+from research.alphaevolve.paper import AlphaEvolve, Config
 
-Evaluation remains caller-controlled. Pair each policy with its corresponding
-Episode; `strict=True` rejects differing list lengths. This protocol introduces
-no job scheduling or batch evaluation API.
-
-The common protocol proposes `list[type[Policy]]` and consumes
-`Iterable[tuple[type[Policy], Episode]]`. These are persisted policy definitions;
-execution creates fresh policy instances per episode. The policy ID hashes its
-name and exact source, survives save/load, and excludes description edits.
-
-Original and Improved rank candidates by mean episode return. Their existing
-scalar fitness interface is now `update_scores(scores, seed_scores=...)`.
-Paper's `update` derives `reward`, `worst_reward`, and `stability` from episode
-returns. Repeated IDs in the same call aggregate multiple episodes; `reward` is
-their mean and `stability` is their negative population standard deviation.
-Optional `mean_reward` and `reward_std` descriptors use the same values. With one
-episode, the mean and worst equal its total reward and the observed deviation is
-zero. It is not an estimate of performance variability across unseen episodes.
-
-Episode contains raw transitions. EvaluationResult also carries optimizer decisions
-and provenance that cannot all be recovered from a trajectory:
-
-| EvaluationResult field | Episode-based update |
-| --- | --- |
-| `metrics` | Derived reward objectives; arbitrary objectives need task-specific logic. |
-| `features` | Derived reward descriptors; other descriptors need task-specific logic. |
-| `seed_scores` | Empty: Episode has no seed ID. |
-| `feedback` | Empty: no external grader or diagnostic text is invented. |
-| `accepted` | True for successfully assessed episodes; screening remains an explicit decision. |
-| `failure` | None: failed executions do not return a completed Episode. |
-
-For custom metrics, screening, external grading, or seed-labelled evidence, supply
-the richer result through `update_results`, keeping metric directions maximized:
-
-```python
-from research.alphaevolve.paper import AlphaEvolve, Config, EvaluationResult
-
-generator = AlphaEvolve(
+optimizer = AlphaEvolve(
     "Walk forward without falling",
     provider,
     context=environment.instructions,
-    config=Config(features={"forward_distance": (0, 100, 20)}, mode="rewrite"),
+    config=Config(
+        proposals=250, batch_size=10, mode="rewrite", features={"forward_distance": (0, 100, 20)}
+    ),
     database_path=run.path / "population.sqlite",
 )
+
+
+async def evaluate(policies):
+    # The evaluator records distance in episode.infos[-1]["features"]["forward_distance"].
+    return await evaluate_policies(policies)  # {policy.id: {seed: episode}}
+
+
 try:
-    policies = await generator.generate(n=10)
-    # The caller's isolated evaluator measures these values.
-    results = await evaluate_policies(policies)
-    generator.update_results(
-        {
-            policy.id: EvaluationResult(
-                metrics=results[policy.id].metrics,
-                features={"forward_distance": results[policy.id].distance},
-                feedback=results[policy.id].diagnostic,
-            )
-            for policy in policies
-        }
-    )
+    best = await search(optimizer, evaluate)
 finally:
-    generator.close()
+    optimizer.close()
 ```
 
-`register_initial(policy, result)` seeds all islands with a caller-evaluated policy;
-pass `island=` for one island. `search(generator, evaluate_batch, proposals=...)`
-runs the overlapping controller, where `evaluate_batch` returns
-`{policy.id: EvaluationResult}`. It handles bounded policy repairs and propagates
-infrastructure/provider failures. Evaluators own isolation; the optimizer never
-executes source itself. The bundled source contract remains `Solution(Policy)`;
-other tasks can place their algorithms in that program and supply an evaluator.
+`propose()` returns unique policy definitions. `update()` consumes exactly those
+IDs mapped to seed-keyed Episodes; bare Episode pairs and scalar mappings are no
+longer its public feedback format. Seed identity survives evaluation. Original
+and Improved maximize mean seed scores. Paper builds its private `EvaluationResult`
+in update, deriving `reward` (mean), `worst_reward` (minimum), `stability` (negative
+population standard deviation), and configured `mean_reward`/`reward_std`
+descriptors. Custom metrics and features come from the final episode info dictionaries;
+the paper optimizer averages each named value across the seed panel and validates
+that every seed provides the same metric/feature names.
+Required objective/descriptor evidence is checked before any archive mutation.
+
+Screening and grading stay in the evaluator. An empty seed mapping does not
+trigger repair; an episode with `error` set queues repair for the next
+proposal round. Repairs preserve original attempt counts and successful siblings.
+Per-seed variation is retained even when means are equal. With one seed, observed
+standard deviation is zero; it does not estimate unseen-seed variability.
+
+`register_initial(policy, result)` remains an AlphaEvolve-specific archive helper
+using its own result type, with `island=` selecting one island. The historical
+`research.alphaevolve.paper.search(..., proposals=...)` entry point is a thin
+wrapper around `rsikit.search`; its evaluator now returns seed-keyed Episodes, and its
+legacy return remains `None`. New integrations should use the core runner, which
+returns the best policy or `None`.
 
 For optional staged evaluation and an actual model-based feedback grader:
 
@@ -232,12 +208,15 @@ for all accepted programs. Keep held-out evaluations out of training feedback.
 lineage, cells, and optimizer checkpoints. Reopening with the same archive
 configuration and task/context restores selection, RNG, counters, recent failure
 context, and scored prompt ideas. The CLI also saves attempt/revision history and
-island member IDs to `run.sqlite`. Reopening the population does **not** resume
-in-flight model calls or unevaluated proposals, nor reproduce remote model output.
-The caller must retain the same evaluator and seed set. `Run.open` alone only
-opens evaluation storage; it does not create an optimizer. Full raw model responses
-remain in the current process's `attempts`, not a durable transcript; checkpoints
-retain only recent rejection excerpts needed for prompts.
+island member IDs to `run.sqlite`. Round checkpoints preserve original attempts,
+pending policy definitions, seed panels, and queued repairs. Reopening reissues
+pending evaluation and continues repairs without allocating another original
+attempt. Unfinished original generation attempts are retried with their saved
+IDs, parents, inspirations, and repair allowance; previous interruption evidence
+is retained. Retrying cannot replay an in-flight remote call or guarantee identical
+remote output. Keep the same evaluator and seeds. Legacy completed archives are
+accepted; incomplete legacy streaming checkpoints are rejected before generation.
+`Run.open` alone opens evaluation storage and does not restore an optimizer.
 
 ## Historical baselines
 
@@ -308,12 +287,11 @@ Discarded proposals may have no policy ID or score; they are included in history
 Provider failures and cancellation save the current generation as incomplete.
 A hard process kill can lose updates since the last committed boundary; it cannot
 create a completed-generation snapshot. Successfully saved episode scores remain
-available even when optimizer selection has not run. For baselines, `complete` means the outer
-loop reached `update`, including generations with no surviving policies. Appending
+available even when optimizer selection has not run. For baselines, `complete` means all attempts and repairs settled, including
+generations with no surviving policies. Appending
 another `run_search` call starts after the last saved generation number. This does
-not itself restore optimizer state. The paper pipeline assigns proposals to the
-snapshot group when first observed, with island snapshots at evaluated-batch
-boundaries. These are asynchronous history groups, not synchronized generations.
+not itself restore optimizer state. Paper now uses synchronized proposal rounds
+with island snapshots after feedback and any bounded repairs have settled.
 Paper snapshots also include `member_count` and member IDs; the `resets` JSON
 contains migration events with `source`, `target`, and `policy_id` instead of
 baseline reset/donor events.
@@ -358,10 +336,10 @@ from slick import prompts
 from slick.providers import OpenRouterAPI
 
 from research import alphaevolve
-from rsikit import Executor, Run
+from rsikit import Executor, Run, search
 from research.rollouts import Rollouts
-from research.rewards import mean_rewards
-from research.alphaevolve.improved import AlphaEvolve
+from research.rewards import measure_rewards
+from research.alphaevolve.improved import AlphaEvolve, Config
 
 # Configure Slick once at application startup.
 prompts.TEMPLATE_ROOT = Path(alphaevolve.__file__).parent
@@ -372,6 +350,7 @@ generator = AlphaEvolve(
         "Action 0 pushes left; 1 pushes right. Each surviving step earns 1 reward."
     ),
     provider=OpenRouterAPI(model="openai/gpt-oss-120b:nitro", max_output_tokens=8192),
+    config=Config(proposals=250, batch_size=10, generation_concurrency=4),
 )
 executor = Executor(concurrency=4)
 
@@ -379,58 +358,36 @@ executor = Executor(concurrency=4)
 with gym.make("CartPole-v1", max_episode_steps=500) as environment:
     async with executor, Run.create(name="cartpole") as run:
         rollouts = Rollouts(environment, executor, run)
-        for generation in range(25):
-            policies = await generator.generate(n=10, concurrency=4)
-            scores = await mean_rewards(rollouts, policies)
-            generator.update_scores(scores, seed_scores={p.id: run.scores(p) for p in policies})
-        print(generator.best.name)
+        best = await search(
+            generator,
+            lambda policies: measure_rewards(rollouts, policies, seeds=(0, 1, 2)),
+        )
+        if best is not None:
+            print(best.name)
 ```
 
-`n=10` means ten proposal attempts in that generation, not a fixed archive size.
-Unrepairable candidates are discarded, so the returned list can be shorter or empty.
-They are not replaced with extra generation calls.
-Founding proposals are generated from the task and distributed across empty islands.
-Once all islands have founders, later batches mutate or rewrite evaluated parents.
-Names and one-sentence approach descriptions come from the model. Environment instructions are static inputs
-supplied by the executor when it creates a policy. The model does not generate or
-configure them. Generated policies inherit the constructor and initialize their
-own state in `reset()`. Generation runs up to four proposals concurrently and does not execute
-policies, create files, or access Run. Every proposal in a batch sees the previous
-updates; selection changes only when you supply feedback with `update` or `update_scores`.
+`batch_size=10` means ten original proposal attempts per round, not an archive
+size. Invalid candidates consume their existing repair allowance and can leave
+fewer survivors. All-invalid batches advance internally until candidates are
+available or the original-attempt budget is exhausted.
 
-`generate(n=10, concurrency=4)` limits concurrent proposal chains, including their
-repair and optional guidance calls. Use `concurrency=1` for sequential generation.
-Names and descriptions are logged as proposals finish; the returned list preserves
-proposal order among survivors. Invalid candidates are discarded without cancelling
-siblings. On provider failure or cancellation, unfinished siblings are cancelled and
-awaited; that interrupted batch does not enter pending optimizer state. With optional meta
-guidance enabled, response timing
-can affect which guidance later proposals use. Keep the generate/evaluate/update
-loop sequential so every generation uses the previous generation's measured scores.
+Founders are measured before descendant generation. Every batch sees prior
+feedback; selection changes only in update. `generation_concurrency` bounds
+proposal chains including repairs and guidance calls. Episode concurrency belongs
+to the evaluator. Names/descriptions are generated, while environment instructions
+remain caller-supplied. Generated policies inherit the constructor and initialize
+state in `reset()`.
 
-The research reward callback is the first persistence boundary: it stores and exports the requested
-policies before dispatch so interruptions can be resumed, then saves scores and
-artifacts as they arrive. It returns `{policy_id: score}`. Identical policy IDs are
-evaluated once; their score applies to all matching proposals in `update_scores`.
+`measure_rewards` returns per-seed `Episode` values and persists individual
+scores and episodes through Run. Identical returned policy IDs are evaluated once.
+Use the same seed set throughout a search and separate held-out seeds when
+checking generalization. The optimizer constructor's `seed` controls parent/model
+selection, separately from environment and policy episode seeds.
 
-By default, evaluation uses one episode with seed 0 for every policy. A seed controls
-random starting conditions; using the same seed makes comparisons reproducible.
-For a broader comparison, `await mean_rewards(rollouts, policies, seeds=[0, 1, 2])` returns the
-mean reward. `run.scores(policy)` retains the individual scores. Use the same seed
-set throughout a search and separate held-out seeds when checking generalization.
-The optimizer's constructor `seed` controls parent/model selection, separately from
-these environment and policy episode seeds.
-
-`update_scores(scores, seed_scores={policy_id: {seed: reward}})` optionally retains per-seed
-results alongside each candidate's scalar score. The CLI supplies Run's existing
-scores for the current search seeds. Mutation, rewrite, and optional search-guidance
-prompts receive this evidence; inspiration policies include their per-seed results too.
-Only the scalar score controls selection. Passing `update_scores(scores)` alone remains
-supported and supplies no per-seed detail. Keep held-out results out of this feedback.
-
-Pass one configured, serializable environment. The executor loads independent state
-for each evaluation process inside a shared Docker container. See [runs](RUNS.md)
-for recording, artifacts, lifecycle, and evaluation recovery.
+The old `generate(n, concurrency=...)` and `update_scores(scores, seed_scores=...)`
+helpers remain for low-level callers. They are outside the common complete-round
+contract; new orchestration should use `propose()` and `update()` or `search()`.
+No loop should mix these helper conventions with an outstanding public round.
 
 ## Baseline search behavior
 
@@ -454,7 +411,7 @@ until every island has a founder; subsequent reseeding can share champions.
 Exact mutations must match uniquely and stay inside optional EVOLVE-BLOCK regions.
 These rules and the mutation response schema belong to AlphaEvolve's own
 `generation.py`. Generation and repair operations return policy definitions;
-the optimizer explicitly calls `validate_policy` before accepting them.
+the optimizer explicitly calls `policy.validate()` before accepting them.
 Rewrites preserve the immutable skeleton. Syntax and the top-level `Solution` class
 are checked before a policy is returned; execution remains in an episode process.
 Weighted provider ensembles and prompt variants remain available. Optional generated
@@ -492,36 +449,21 @@ The CLI also repairs `PolicyError` failures, including constructor errors,
 invalid actions, and policy execution timeouts. The executor finishes the batch,
 preserving successful results, and exposes failed-policy diagnostics through
 `error.failures`. Infrastructure errors take priority over policy failures and
-stop the run without model repairs. The example composes repair explicitly:
+stop the run without model repairs. The common loop handles repair decisions:
 
 ```python
-policies = await generator.generate(n=10)
-scores = {}
-while policies:
-    try:
-        scores = await mean_rewards(rollouts, policies)
-        break
-    except PolicyError as error:
-        replacements = {
-            policy.id: await generator.repair(policy, error.failures[policy.id])
-            for policy in {p.id: p for p in policies}.values()
-            if policy.id in error.failures
-        }
-        if not replacements:
-            raise
-        policies = [
-            replacement for p in policies if (replacement := replacements.get(p.id, p)) is not None
-        ]
-generator.update_scores(scores, seed_scores={p.id: run.scores(p) for p in policies})
+from rsikit import search
+from research.rewards import measure_rewards
+
+best = await search(generator, lambda ps: measure_rewards(rollouts, ps, seeds=(0, 1)))
 ```
 
-`PolicyError` is imported from `rsikit.evaluation`. The caller orchestrates evaluation;
-Run stores its evidence. Repaired policies receive their own IDs and are saved
-on the next rollout request. Existing successful scores are reused. Failed versions stay
-in the run with unfinished scores; no low score is invented. Only the repaired,
-evaluated version enters the optimizer's archive. Discarded policies never enter
-selection, even if some of their episodes succeeded. An empty generation leaves
-the archive unchanged and the CLI continues to the next generation.
+The evaluator supplies episodes with errors; update queues repairs; the next
+proposal round generates replacements. Successful siblings are retained and are
+not resubmitted. Failed versions keep their evidence and no low score is invented.
+Only accepted, measured versions enter the archive. Discarded attempts consume
+the original attempt budget; the optimizer terminates even if no program survives.
+
 Run recovery retries stored
 versions; it does not silently rewrite them.
 

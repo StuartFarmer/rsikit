@@ -1,5 +1,14 @@
 # RSIKit
 
+Run searches or evaluate policy files with the [unified CLI](docs/CLI.md):
+
+```bash
+rsikit run --config experiments/ocean-2048.yaml
+# Inspect without running:
+rsikit run --config experiments/ocean-2048.yaml --print-config
+```
+
+
 Evolve and evaluate class-based policies in
 [Gymnasium](https://gymnasium.farama.org/) environments.
 
@@ -7,15 +16,18 @@ Install the shared library with `pip install rsikit` (Python 3.10+).
 Research algorithms and examples require a clone of this repository.
 This is an experimental release; APIs may change.
 
-- `Policy`: the solution type: load with `from_text` / `from_file`, save with
-  `to_text` / `to_file`, and execute through `reset`, `act`, and `close`.
-- `generate`: returns a named `Policy` subclass from the LLM.
-- `rsikit.policy.validate_policy`: explicitly checks generated source without executing it.
-- `Evaluator`: rolls out existing environment and policy instances.
+- `Policy`: the runtime ABC with `reset`, `act`, and `close`.
+- `PolicyDefinition`: immutable source and metadata; load with `from_text` /
+  `from_file`, save with `to_text` / `to_file`, and check source with `validate()`.
+- `PolicyEncoder`: encodes/decodes definitions and owns static source validation.
+- `generate`: returns a named `PolicyDefinition` from the LLM.
+- `evaluate` / `Evaluator`: roll out existing environment and policy instances.
+- `Job` / `execute`: evaluate private worker copies with one seed per episode.
 - `Episode`: records observations, actions, rewards, flags, infos, and artifacts.
-- `Optimizer`: the `propose(n)` / `update(policy_episode_pairs)` protocol, implemented by all three AlphaEvolve variants.
+- `Optimizer`: the `propose()` / `update(episodes)` protocol, with `done` and `best`, implemented by all six optimizers.
+- `Episode` feedback and `search`: raw per-seed rollout evidence and one external optimization loop.
 - `Run`: persists one optimizer run: configuration, checkpoints, policies, and episodes.
-- `Executor`: runs fresh local episode processes with bounded concurrency and deadlines.
+- `Executor`: owns a SQLite queue and Huey process workers for evaluation batches.
 - `AlphaEvolve`: evolutionary search using Slick and Gymnasium feedback.
 - `ShinkaEvolve`: island archives, adaptive model selection, and diff/rewrite/crossover search.
 - `LineageSearch`: diverse approach families, measured refinement and pivots, and stagnation-based completion.
@@ -23,7 +35,85 @@ This is an experimental release; APIs may change.
 The shared library lives in `rsikit/`. The four independent search algorithms
 live under [`research/`](research/README.md) and import shared functionality from
 `rsikit`, never from another algorithm. Run research examples from the repository
-root; the library wheel includes only `rsikit`.
+root; the wheel includes both `rsikit` and `research`, including the unified CLI.
+
+Start with instances, then use the same kinds of objects for a sweep:
+
+```python
+from copy import deepcopy
+import gymnasium as gym
+from rsikit import Job, Policy, evaluate, execute
+
+
+class RandomPolicy(Policy):
+    async def act(self, observation):
+        return self.action_space.sample()
+
+
+# Inside an async function:
+with gym.make("CartPole-v1") as environment:
+    policy = RandomPolicy(
+        deepcopy(environment.observation_space), deepcopy(environment.action_space)
+    )
+    try:
+        episode = await evaluate(policy, environment, seed=42)
+        print(episode.total_reward)
+        jobs = [Job(policy, environment, seed=seed) for seed in range(10)]
+        completed_jobs = await execute(jobs, concurrency=4)
+        print([job.result.total_reward for job in completed_jobs])
+    finally:
+        await policy.close()
+```
+
+One seed resets both objects once per episode. Direct evaluation uses the original
+instances; execution copies them into workers and returns the original jobs with
+`result` attached. Inputs must be serializable; keep them unchanged while jobs run.
+For large runs, use `Executor.iterate(jobs)` to stream and persist each result.
+See [lifecycle and failure behavior](docs/INNER_LOOP.md).
+
+`Executor` owns its SQLite queue and starts Huey process workers when you enter
+its required async context.
+The default queue is temporary; no separate service or Docker container is needed.
+To retain queued jobs and results, provide a database path:
+
+```python
+from rsikit import Executor
+
+async with Executor(database="evaluations.sqlite", concurrency=4) as executor:
+    completed_jobs = await executor.execute(jobs)
+    for job in completed_jobs:
+        print(job.task_id, job.result.total_reward)
+    # Submit another batch here to reuse the same workers.
+```
+
+Use each Executor instance for one context lifetime. Calling `execute()` or
+`iterate()` outside that context raises an error. To reopen a persistent queue,
+create a new Executor with the same database path. The standalone `execute()`
+function opens and closes its own context.
+
+Concurrent batches share Huey's workers. Finish or cancel and await any batch
+tasks before leaving the context; close partially consumed streams with
+`contextlib.aclosing`. Each batch has one result loop. Queue I/O runs in pooled
+threads so SQLite locks do not block the event loop; no thread waits for an entire
+evaluation, and there is no async waiter per job.
+
+The queue name (`evaluations`) and durable SQLite writes (`fsync=True`) are internal
+defaults. An executor consumes pending tasks from earlier sessions too. Completed
+results remain keyed by `job.task_id` when a database path is supplied. This queue
+is separate from `Run` episode storage; persisting a queue does not restore the
+original Python `Job` objects or automatically save episodes into a Run.
+
+Workers reuse their processes but deserialize private inputs for every job.
+Cancellation revokes queued jobs; jobs already running finish under Huey's
+signal-based timeout. Exiting the context waits for running jobs and joins the
+workers. Huey does not recover tasks lost after a worker crashes; detected local
+worker exits raise an infrastructure error rather than waiting forever.
+
+Native process workers require POSIX `fork` (Linux/macOS); they do not support
+Windows or provide clean-interpreter isolation from the parent. The whole
+application can still run in Docker. Multi-machine backend configuration is deferred.
+
+Generate policies and persist a research run:
 
 ```python
 from pathlib import Path
@@ -34,7 +124,6 @@ from slick.providers import OpenRouterAPI
 
 import rsikit.generation as generation
 from rsikit import Executor, Run, generate
-from rsikit.policy import validate_policy
 from research.rollouts import Rollouts
 from research.rewards import mean_rewards
 
@@ -48,7 +137,7 @@ policy = await generate(
     "velocity. Action 0 pushes left and 1 pushes right. Maximize surviving steps.",
     provider=provider,
 )
-validate_policy(policy)
+policy.validate()
 executor = Executor(concurrency=4)
 with gym.make("CartPole-v1", max_episode_steps=500) as environment:
     async with executor, Run.create(name="cartpole-comparison") as run:
@@ -79,7 +168,7 @@ the source layer; dependency installation and scientific checks remain cached
 unless their inputs change.
 
 Configure episode limits with `Executor(concurrency=4, episode_timeout=60)`.
-Each episode gets a fresh child process, and timeouts preserve successful siblings.
+Huey reuses worker processes and applies signal-based whole-task timeouts.
 Generated code shares the application's network, API credentials and mounted
 outputs, including access to its environment and scores. See
 [execution and launcher settings](docs/IN_PROCESS_SANDBOX.md).
@@ -92,7 +181,7 @@ uv pip install --python .venv/bin/python -e '.[dev]'
 ./scripts/run examples.cartpole
 ```
 
-Runtime dependencies are Gymnasium, NumPy, Slick (`slick-ai`), Pydantic, SQLModel, cloudpickle, and Rich.
+Runtime dependencies are Gymnasium, NumPy, Slick (`slick-ai`), Pydantic, SQLModel, cloudpickle, Huey, and Rich.
 
 The application image additionally includes SciPy, python-control (`control`), CVXPY
 with OSQP/Clarabel/SCS, scikit-learn (`sklearn`), and CPU-only PyTorch (`torch`).
@@ -109,14 +198,18 @@ No sibling checkout or `slick-bits` dependency is required.
 ```
 
 A program exports `Solution(Policy)`. One policy instance and event loop persist
-throughout an episode. Both `Executor` and `run_program` execute the environment,
-policy and scoring together in a child of the current application. Use the launcher
+throughout an episode. Load files with `PolicyDefinition.from_file`, then pass their
+definitions in `Job(policy, environment, seed=...)` to `execute()` or
+`Executor.execute()`. It executes the environment and policy together
+in a child of the current application. Use the launcher
 to put that application in Docker; calling the library directly runs locally.
 
-For caller-owned instances, use `Evaluator(env, policy, max_steps=1000)` and
-`await evaluator.run(observation, info=info)` after resetting both objects.
+For caller-owned instances, use `Evaluator(max_steps=1000)` and
+`await evaluator.evaluate(policy, env, seed=42)` to reset both objects and run an episode.
 It returns an `Episode` with observations, actions, rewards, end flags, and infos
-for later analysis. Creation, seeding, and cleanup stay with the caller.
+for later analysis. Creation and cleanup stay with the caller.
+`Episode` is a Pydantic model; worker results and saved `.pkl` episodes use pickle
+to retain NumPy arrays, scalars, tuples, and bytes. Only load trusted run directories.
 
 See the [API guide](docs/INNER_LOOP.md) for task instructions, class contracts,
 results, and execution limits.
@@ -126,6 +219,9 @@ For finite-shoe blackjack with betting and memory across hands, see the
 `./scripts/run examples.blackjack --compare-gym`.
 Run a Blackjack test with automatic leader videos after each generation using
 `./scripts/run examples.blackjack_train --output runs/blackjack-test`.
+
+For single-asset strategy search from your own CSV, use `--env PriceSeries`
+with `--env-data-path prices.csv`; see the [price-series environment](docs/PRICE_SERIES.md).
 
 For daily BTC portfolio allocation with transaction fees and a seven-year training /
 three-year validation split, see the [Bitcoin environment](docs/BITCOIN.md).
@@ -183,6 +279,19 @@ Add `--video` (the worker image includes rendering dependencies):
 ./scripts/run examples.inner_loop --video
 ```
 
+## Shared optimization API
+
+Construct any built-in optimizer, then use `await search(optimizer, evaluate)`.
+The evaluator returns `{policy.id: {seed: episode}}`. Each episode contains its
+trajectory and an optional candidate `error`; an empty seed mapping means screened out.
+The optimizer owns proposal sizes, repairs, selection, and completion; the
+external runner owns the loop. See [the common contract](docs/INNER_LOOP.md#one-optimization-loop).
+
+The unified CLI selects `--optimizer alphaevolve` (paper by default, with
+`--variant original|improved|paper`), `shinka`, `elite`, or `lineage`. All share
+environment evaluation, budget accounting, and held-out winner selection.
+See [CLI options](docs/CLI.md).
+
 ## AlphaEvolve
 
 See the [AlphaEvolve guide](docs/ALPHAEVOLVE.md) for the Python API, search controls,
@@ -194,20 +303,21 @@ and structured generation contracts. Run the CartPole example with an API model:
 ```
 
 The launcher builds the application image automatically. The default `paper`
-variant uses `openai/gpt-oss-120b:nitro` and overlaps generation with evaluation:
+variant uses `openai/gpt-oss-120b:nitro`. All variants use complete proposal rounds:
 
 ```python
-from research.alphaevolve.paper import search
+from rsikit import search
 
-# evaluate_batch returns policy.id -> EvaluationResult with metrics and descriptors.
-await search(generator, evaluate_batch, proposals=250, evaluation_batch_size=10)
+# Configure proposals=250 and batch_size=10 on the optimizer.
+# evaluate_batch returns {policy.id: {seed: episode}}.
+best = await search(generator, evaluate_batch)
 ```
 
 Run saves policies, scores, and artifacts during evaluation, and exports Python
 automatically. The optimizer saves its population in `population.sqlite`, with
 metric-specific elites in descriptor bins on each island. Lower primary-score
 candidates remain available when they win another metric or niche. Ten limits the
-evaluation batch size; the retained population is separate. Rich progress shows each policy's
+proposal round size; the retained population is separate. Rich progress shows each policy's
 name and description as it is generated, then scores as evaluations finish.
 A score table follows each evaluation batch; `run.log` keeps messages and error details.
 Self-healing allows two model repairs per policy for malformed generation or episode
@@ -230,7 +340,8 @@ Continue a `paper` run with its saved population and settings:
 ```
 
 This adds 25 batches using the saved batch size. Logs/history stay in the same
-directory. Interrupted proposals are not replayed; older baseline runs have no
+directory. Pending evaluation and repair rounds are restored; interrupted remote
+model calls cannot be replayed. Older baseline runs have no
 optimizer checkpoint. See [resume details](docs/ALPHAEVOLVE.md#resume-a-paper-run).
 See [the comparison setup](docs/ALPHAEVOLVE.md#comparing-the-variants).
 The CLI also saves per-proposal outcomes, ancestry, repair versions, and per-generation
@@ -293,7 +404,7 @@ checks, the Python API, and analysis queries.
 Keep a leaderboard of 10 elites and evaluate 50 new organisms per generation.
 Candidates are new ideas, focused edits of an elite, or remixes combining multiple
 elites. Only measured scores decide promotion; the top 10 from old elites plus
-newcomers survive. Generation and Docker evaluation overlap, with bounded repair
+newcomers survive. Generation and evaluation run in separate concurrent stages, with bounded repair
 and a Rich leaderboard.
 
 ```sh
@@ -345,8 +456,27 @@ The EliteTable manuscripts, experiments, results, and poker work now live in the
 standalone sibling repository [`elitelist_papers`](../elitelist_papers/README.md).
 
 Research algorithms, examples, and tests are included in the source distribution
-and excluded from the library wheel. The core supplies policy generation, explicit
+and included alongside `rsikit` in the wheel. The core supplies policy generation, explicit
 source validation, execution, environments, run storage, and progress display.
 Each optimizer owns its mutation contracts and source-editing rules.
 
 Standard optimization loops automatically display a shared Rich dashboard inside Docker: combined proposal/evaluation progress, optimizer-specific leaderboard columns, active work and recent errors. Full logs remain in the run directory. See [automatic terminal progress](docs/RUNS.md#automatic-terminal-progress).
+
+### Ocean policy search
+
+Ocean evaluation uses PufferLib's existing Python environments and native batch
+bindings, pinned to its Python-facing 3.0 source. The CLI supports 2048 and Breakout:
+
+```bash
+./scripts/run examples.benchmark_ocean correctness \
+  --env g2048 --seeds 2 --batch-size 4 --max-steps 32 \
+  --output runs/ocean-upstream-check
+```
+
+Each seed identifies one episode; batch size limits concurrent games. Docker
+builds the upstream bindings with the episodic compatibility patch
+automatically; Ocean and full-test images use `linux/amd64` because upstream's
+Linux native archives are x86-64. Local development uses `uv sync --extra ocean
+--extra dev` followed by `.venv/bin/python scripts/install_ocean.py`.
+See [the Ocean protocol and search commands](docs/OCEAN_BENCHMARK.md) for scoring,
+installation, workload accounting, and the change from the historical benchmark.

@@ -32,9 +32,7 @@ from rsikit import Evaluator
 with BlackjackEnv() as env:
     policy = Solution(deepcopy(env.observation_space), deepcopy(env.action_space))
     try:
-        observation, info = env.reset(seed=42)
-        await policy.reset(seed=1)
-        episode = await Evaluator(env, policy).run(observation, info=info)
+        episode = await Evaluator().evaluate(policy, env, seed=42)
     finally:
         await policy.close()
 print(episode.total_reward, len(episode))
@@ -45,10 +43,12 @@ The environment's `instructions` describes the rules and observation layout to
 generated policies. Its `Box`/`Discrete` spaces work with the existing sandbox
 codec. Only the observation reaches the policy through `act()`.
 
-The same example source can run through `run_program(Path("examples/blackjack.py"),
-BlackjackEnv, env_seed=42, policy_seed=1)` with the existing Docker policy worker.
-When using `Executor`, which also moves the environment into Docker, rebuild
-the worker image after adding this environment so the new module is installed.
+Load the same source with `PolicyDefinition.from_file("examples/blackjack.py")`
+and pass `[Job(policy, environment, seed=42)]` to `execute()` or
+`Executor.execute()`, with `environment = BlackjackEnv()`.
+The caller closes the environment template;
+execution runs in a fresh local child. Use the application launcher for Docker
+isolation, and rebuild its image after adding environments.
 
 ## Actions and rules
 
@@ -205,30 +205,63 @@ episode length; historical scores are not comparable to the new episode totals.
 
 ## Table preview
 
-The optional Pillow renderer produces a 1280×720 RGB frame with the table,
-individual hands and wagers, last action, and cumulative net points per action.
-It draws directly at 1280×720, without supersampling. Each frame is one action;
+The optional renderer produces a canonical SVG frame with the table, individual
+hands and wagers, last action, and cumulative net points per action. `render_svg()`
+returns a standalone SVG with bundled Latin Modern fonts; `render()` rasterizes
+that SVG through resvg to a 1280×720 RGB frame for Gymnasium/video. Each frame is one action;
 playback is 30 frames and 30 actions per second (`render_fps=30`), with no repeated
 or intermediate animation frames.
 Generate the initial design preview with:
 
 ```sh
 ./scripts/run examples.blackjack_screen --output runs/blackjack-screen.png
+./scripts/run examples.blackjack_screen --output runs/blackjack-screen.svg
 ```
 
 This saves `runs/blackjack-screen.png` on the host from a real baseline
 replay: seed 301, action 68, two split hands, and +3 net points. Use `--seed`,
 `--steps`, and `--output` to select another frame. Install the `video` extra
-if Pillow is unavailable.
+for SVG-to-video rendering; no system fonts or TeX installation are needed.
 
 `BlackjackRenderer(BlackjackEnv())` wraps only visual runs; ordinary training
 keeps the original environment. Its private card identities preserve the exact
 shuffle and do not enter observations. The dealer's hole stays hidden until
 revealed by the game. The chart tracks settled reward, so wagers and hits leave
-it flat until the round finishes. Card art is from Kenney's Playing Cards Pack,
-distributed under CC0; the license is included with the bundled assets.
+it flat until the round finishes. Cards, suits, labels, and charts are vector
+geometry/text; unrevealed card identities are absent from the SVG as well as the video.
+
+Saved policy exports include a final `.svg` snapshot and a `.svg.zip` archive
+alongside each MP4. The archive contains `frames/00000000.svg` onward, shared
+`fonts/`, and `timeline.json` with 30 fps and seed segment boundaries. Extract the
+whole archive to preserve relative font paths. Frame zero is the first post-action
+state. Frames retain stable scene IDs for future web animation; no browser player
+or animation runtime is required during training. Theme-version changes rerender
+media while retaining verified action traces.
 
 ## All-seed generation videos
+
+Render the best saved elite from every completed generation of the current run:
+
+```sh
+./scripts/blackjack-videos
+```
+
+This defaults to `runs/blackjack-parallel-20261003-225001` and writes MP4s under
+`videos/generation-NN/`, with a gallery at `videos/index.html`. It uses all saved
+training seeds and 24 shoes per seed. Incomplete generations are skipped; rerun
+the script to pick up newly completed generations. Docker is required, and the
+existing launcher rebuilds the image to include renderer fixes.
+The script uses host Python 3 to take a consistent SQLite backup before launching
+Docker, avoiding live database reads across Docker Desktop's file share. The
+temporary snapshot is removed when the exporter exits; the source is unchanged.
+
+Pass another run (relative to the repository root) and optional exporter flags:
+
+```sh
+./scripts/blackjack-videos runs/blackjack-parallel-20261003-225001 --seeds 0 --workers 2
+```
+
+For the top four elites per generation instead:
 
 ```sh
 ./scripts/run examples.blackjack_videos runs/blackjack-smoke3

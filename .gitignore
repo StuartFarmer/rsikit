@@ -1,4 +1,6 @@
 .venv/
+# Created by upstream PufferLib on import.
+/resources
 __pycache__/
 *.py[cod]
 .ruff_cache/
@@ -24,3 +26,9 @@ videos/
 .env
 .env.*
 !.env.example
+paper_workspace
+docs
+.superpowers/
+accompanying/
+research/
+data/

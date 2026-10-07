@@ -1,0 +1,361 @@
+diff --git a/pufferlib/ocean/breakout/binding.c b/pufferlib/ocean/breakout/binding.c
+index adf7667..38e0017 100644
+--- a/pufferlib/ocean/breakout/binding.c
++++ b/pufferlib/ocean/breakout/binding.c
+@@ -1,6 +1,8 @@
+ #include "breakout.h"
+ 
+ #define Env Breakout
++#define RSI_EPISODIC
++#define MY_GET
+ #include "../env_binding.h"
+ 
+ static int my_init(Env* env, PyObject* args, PyObject* kwargs) {
+@@ -30,3 +32,12 @@ static int my_log(PyObject* dict, Log* log) {
+     assign_to_dict(dict, "episode_length", log->episode_length);
+     return 0;
+ }
++
++static PyObject* my_get(PyObject* dict, Env* env) {
++
++    assign_to_dict(dict, "score", env->score);
++    assign_to_dict(dict, "perf", env->score / (float)env->max_score);
++    assign_to_dict(dict, "episode_return", env->score);
++    assign_to_dict(dict, "episode_length", env->tick);
++    return dict;
++}
+diff --git a/pufferlib/ocean/breakout/breakout.h b/pufferlib/ocean/breakout/breakout.h
+index 8366b50..76b6ca6 100644
+--- a/pufferlib/ocean/breakout/breakout.h
++++ b/pufferlib/ocean/breakout/breakout.h
+@@ -38,6 +38,8 @@ typedef struct Client {
+ 
+ typedef struct Breakout {
+     Client* client;
++    bool episodic;
++    unsigned int rng_state;
+     Log log;
+     float* observations;
+     float* actions;
+@@ -430,7 +432,7 @@ void step_frame(Breakout* env, float action) {
+ 
+         env->ball_vy = cos(direction) * env->ball_speed * TICK_RATE;
+         env->ball_vx = sin(direction) * env->ball_speed * TICK_RATE;
+-        if (rand() % 2 == 0) {
++        if ((env->episodic ? rand_r(&env->rng_state) : rand()) % 2 == 0) {
+             env->ball_vx = -env->ball_vx;
+         }
+     }   
+@@ -463,11 +465,15 @@ void step_frame(Breakout* env, float action) {
+     if (env->num_balls < 0 || env->score == env->max_score) {
+         env->terminals[0] = 1;
+         add_log(env);
+-        c_reset(env);
++        if (!env->episodic) c_reset(env);
+     }
+ }
+ 
+ void c_step(Breakout* env) {
++    if (env->episodic && env->terminals[0]) {
++        env->rewards[0] = 0;
++        return;
++    }
+     env->terminals[0] = 0;
+     env->rewards[0] = 0.0;
+ 
+@@ -475,6 +481,7 @@ void c_step(Breakout* env) {
+     for (int i = 0; i < env->frameskip; i++) {
+         env->tick += 1;
+         step_frame(env, action);
++        if (env->episodic && env->terminals[0]) break;
+     }
+ 
+     compute_observations(env);
+diff --git a/pufferlib/ocean/breakout/breakout.py b/pufferlib/ocean/breakout/breakout.py
+index b5a3021..fb342b9 100644
+--- a/pufferlib/ocean/breakout/breakout.py
++++ b/pufferlib/ocean/breakout/breakout.py
+@@ -67,6 +67,9 @@ class Breakout(pufferlib.PufferEnv):
+         return (self.observations, self.rewards,
+             self.terminals, self.truncations, info)
+ 
++    def episode_stats(self):
++        return binding.vec_get(self.c_envs)
++
+     def render(self):
+         binding.vec_render(self.c_envs, 0)
+ 
+diff --git a/pufferlib/ocean/env_binding.h b/pufferlib/ocean/env_binding.h
+index f64b614..04e61d6 100644
+--- a/pufferlib/ocean/env_binding.h
++++ b/pufferlib/ocean/env_binding.h
+@@ -491,6 +491,39 @@ static PyObject* vec_reset(PyObject* self, PyObject* args) {
+     }
+ 
+     PyObject* seed_arg = PyTuple_GetItem(args, 1);
++#ifdef RSI_EPISODIC
++    if (PyList_Check(seed_arg) || PyTuple_Check(seed_arg)) {
++        PyObject* seeds = PySequence_Fast(seed_arg, "Expected episode seeds");
++        if (!seeds) return NULL;
++        if (PySequence_Fast_GET_SIZE(seeds) != vec->num_envs) {
++            Py_DECREF(seeds);
++            PyErr_SetString(PyExc_ValueError, "Expected one seed per environment");
++            return NULL;
++        }
++        // Validate the entire panel before changing any game.
++        for (int i = 0; i < vec->num_envs; i++) {
++            PyObject* item = PySequence_Fast_GET_ITEM(seeds, i);
++            long seed = PyLong_CheckExact(item) ? PyLong_AsLong(item) : -1;
++            if (PyErr_Occurred() || seed < 0 || seed > INT_MAX) {
++                Py_DECREF(seeds);
++                PyErr_SetString(PyExc_ValueError, "Episode seeds must be nonnegative int32 integers");
++                return NULL;
++            }
++        }
++        for (int i = 0; i < vec->num_envs; i++) {
++            Env* env = vec->envs[i];
++            env->episodic = true;
++            env->rng_state = PyLong_AsLong(PySequence_Fast_GET_ITEM(seeds, i));
++            env->terminals[0] = 0;
++            env->rewards[0] = 0;
++            memset(&env->log, 0, sizeof(Log));
++            c_reset(env);
++        }
++        Py_DECREF(seeds);
++        Py_RETURN_NONE;
++    }
++    for (int i = 0; i < vec->num_envs; i++) vec->envs[i]->episodic = false;
++#endif
+     if (!PyObject_TypeCheck(seed_arg, &PyLong_Type)) {
+         PyErr_SetString(PyExc_TypeError, "seed must be an integer");
+         return NULL;
+@@ -597,6 +630,27 @@ static PyObject* vec_log(PyObject* self, PyObject* args) {
+     return dict;
+ }
+ 
++#ifdef RSI_EPISODIC
++static PyObject* vec_get(PyObject* self, PyObject* args) {
++    if (PyTuple_Size(args) != 1) {
++        PyErr_SetString(PyExc_TypeError, "vec_get requires 1 argument");
++        return NULL;
++    }
++    VecEnv* vec = unpack_vecenv(args);
++    if (!vec) return NULL;
++    PyObject* rows = PyList_New(vec->num_envs);
++    if (!rows) return NULL;
++    for (int i = 0; i < vec->num_envs; i++) {
++        PyObject* row = PyDict_New();
++        if (!row) { Py_DECREF(rows); return NULL; }
++        my_get(row, vec->envs[i]);
++        if (PyErr_Occurred()) { Py_DECREF(row); Py_DECREF(rows); return NULL; }
++        PyList_SET_ITEM(rows, i, row);
++    }
++    return rows;
++}
++#endif
++
+ static PyObject* vec_close(PyObject* self, PyObject* args) {
+     VecEnv* vec = unpack_vecenv(args);
+     if (!vec) {
+@@ -653,6 +707,9 @@ static PyMethodDef methods[] = {
+     {"vec_init", (PyCFunction)vec_init, METH_VARARGS | METH_KEYWORDS, "Initialize a vector of environments"},
+     {"vec_reset", vec_reset, METH_VARARGS, "Reset the vector of environments"},
+     {"vec_step", vec_step, METH_VARARGS, "Step the vector of environments"},
++#ifdef RSI_EPISODIC
++    {"vec_get", vec_get, METH_VARARGS, "Per-environment current episode metrics"},
++#endif
+     {"vec_log", vec_log, METH_VARARGS, "Log the vector of environments"},
+     {"vec_render", vec_render, METH_VARARGS, "Render the vector of environments"},
+     {"vec_close", vec_close, METH_VARARGS, "Close the vector of environments"},
+@@ -672,5 +729,12 @@ static PyModuleDef module = {
+ 
+ PyMODINIT_FUNC PyInit_binding(void) {
+     import_array();
+-    return PyModule_Create(&module);
++    PyObject* result = PyModule_Create(&module);
++#ifdef RSI_EPISODIC
++    if (result && PyModule_AddStringConstant(result, "rsikit_episodic_patch", "episodes-v1") < 0) {
++        Py_DECREF(result);
++        return NULL;
++    }
++#endif
++    return result;
+ }
+diff --git a/pufferlib/ocean/g2048/binding.c b/pufferlib/ocean/g2048/binding.c
+index 679703e..4aace29 100644
+--- a/pufferlib/ocean/g2048/binding.c
++++ b/pufferlib/ocean/g2048/binding.c
+@@ -1,6 +1,8 @@
+ #include "g2048.h"
+ 
+ #define Env Game
++#define RSI_EPISODIC
++#define MY_GET
+ #include "../env_binding.h"
+ 
+ static int my_init(Env* env, PyObject* args, PyObject* kwargs) {
+@@ -28,4 +30,13 @@ static int my_log(PyObject* dict, Log* log) {
+     assign_to_dict(dict, "snake_state", log->snake_state);
+     assign_to_dict(dict, "snake_reward", log->snake_reward);
+     return 0;
+-}
+\ No newline at end of file
++}
++static PyObject* my_get(PyObject* dict, Env* env) {
++
++    assign_to_dict(dict, "merge_score", env->score);
++    assign_to_dict(dict, "score", 1 << env->max_tile);
++    assign_to_dict(dict, "perf", calculate_perf(env->max_tile));
++    assign_to_dict(dict, "episode_return", env->episode_reward);
++    assign_to_dict(dict, "episode_length", env->tick);
++    return dict;
++}
+diff --git a/pufferlib/ocean/g2048/g2048.h b/pufferlib/ocean/g2048/g2048.h
+index 801fc74..7dfeb7e 100644
+--- a/pufferlib/ocean/g2048/g2048.h
++++ b/pufferlib/ocean/g2048/g2048.h
+@@ -55,6 +55,8 @@ typedef struct {
+ } Log;
+ 
+ typedef struct {
++    bool episodic;
++    unsigned int rng_state;
+     Log log;                        // Required
+     unsigned char* observations;    // Cheaper in memory if encoded in uint_8
+     int* actions;                   // Required
+@@ -134,7 +136,7 @@ void c_close(Game* game);
+ 
+ void init(Game* game) {
+     game->lifetime_max_tile = 0;
+-    game->is_endgame_env = (rand() / (float)RAND_MAX) < game->endgame_env_prob;
++    game->is_endgame_env = ((game->episodic ? rand_r(&game->rng_state) : rand()) / (float)RAND_MAX) < game->endgame_env_prob;
+ }
+ 
+ void update_observations(Game* game) {
+@@ -196,15 +198,15 @@ void add_log(Game* game) {
+     game->log.n += 1;
+ }
+ 
+-static inline unsigned char get_new_tile(void) {
++static inline unsigned char get_new_tile(Game* game) {
+     // 10% chance of 2, 90% chance of 1
+-    return (rand() % 10 == 0) ? 2 : 1;
++    return ((game->episodic ? rand_r(&game->rng_state) : rand()) % 10 == 0) ? 2 : 1;
+ }
+ 
+ static inline void place_tile_at_random_cell(Game* game, unsigned char tile) {
+     if (game->empty_count == 0) return;
+ 
+-    int target = rand() % game->empty_count;
++    int target = (game->episodic ? rand_r(&game->rng_state) : rand()) % game->empty_count;
+     int pos = 0;
+     for (int i = 0; i < SIZE; i++) {
+         for (int j = 0; j < SIZE; j++) {
+@@ -224,7 +226,7 @@ void set_scaffolding_curriculum(Game* game) {
+     game->stop_at_65536 = true;
+ 
+     if (game->lifetime_max_tile < 14) {
+-        int curriculum = rand() % 5;
++        int curriculum = (game->episodic ? rand_r(&game->rng_state) : rand()) % 5;
+ 
+         // Spawn one high tiles from 8192, 16384, 32768, 65536
+         unsigned char high_tile = max(12 + curriculum, game->lifetime_max_tile);
+@@ -232,7 +234,7 @@ void set_scaffolding_curriculum(Game* game) {
+         if (high_tile >= 16) game->stop_at_65536 = false;
+ 
+     } else {
+-        int curriculum = rand() % 8;
++        int curriculum = (game->episodic ? rand_r(&game->rng_state) : rand()) % 8;
+ 
+         if (curriculum < 2) { // curriculum 0, 1
+             place_tile_at_random_cell(game, 14 + curriculum); // Spawn one of 16384 or 32768
+@@ -268,7 +270,7 @@ void set_scaffolding_curriculum(Game* game) {
+ 
+ void set_endgame_curriculum(Game* game) {
+     game->stop_at_65536 = true;
+-    int curriculum = rand() % 4;
++    int curriculum = (game->episodic ? rand_r(&game->rng_state) : rand()) % 4;
+ 
+     // Place the tiles in the second-third rows, so that they can be moved up in the first move
+     unsigned char tiles[] = {15, 14, 13, 12};
+@@ -285,6 +287,10 @@ void set_endgame_curriculum(Game* game) {
+ }
+ 
+ void c_reset(Game* game) {
++    if (game->episodic) {
++        game->lifetime_max_tile = 0;
++        init(game);
++    }
+     memset(game->grid, EMPTY, SIZE * SIZE);
+     game->score = 0;
+     game->tick = 0;
+@@ -310,14 +316,14 @@ void c_reset(Game* game) {
+     } else {
+         // Higher tiles are spawned in scaffolding episodes
+         // Having high tiles saves moves to get there, allowing agents to experience it faster
+-        game->is_scaffolding_episode = (rand() / (float)RAND_MAX) < game->scaffolding_ratio;
++        game->is_scaffolding_episode = ((game->episodic ? rand_r(&game->rng_state) : rand()) / (float)RAND_MAX) < game->scaffolding_ratio;
+         if (game->is_scaffolding_episode) {
+             set_scaffolding_curriculum(game);
+ 
+         } else {
+             // Add two random tiles at the start
+             for (int i = 0; i < 2; i++) {
+-                place_tile_at_random_cell(game, get_new_tile());
++                place_tile_at_random_cell(game, get_new_tile(game));
+             }
+         }
+     }
+@@ -556,6 +562,10 @@ float update_stats_and_get_heuristic_rewards(Game* game) {
+ }
+ 
+ void c_step(Game* game) {
++    if (game->episodic && game->terminals[0]) {
++        game->rewards[0] = 0;
++        return;
++    }
+     float reward = 0.0f;
+     float score_add = 0.0f;
+     unsigned char prev_max_tile = game->max_tile;
+@@ -564,7 +574,7 @@ void c_step(Game* game) {
+ 
+     if (did_move) {
+         game->moves_made++;
+-        place_tile_at_random_cell(game, get_new_tile());
++        place_tile_at_random_cell(game, get_new_tile(game));
+         game->score += score_add;
+ 
+         // Add heuristic rewards/penalties and update grid stats
+@@ -603,7 +613,8 @@ void c_step(Game* game) {
+ 
+     if (game->terminals[0]) {
+         add_log(game);
+-        c_reset(game);
++        if (!game->episodic) c_reset(game);
++        game->terminals[0] = 1; // Reset must not erase the transition's done flag.
+     }
+ }
+ 
+@@ -616,7 +627,7 @@ void step_without_reset(Game* game) {
+ 
+     if (did_move) {
+         game->moves_made++;
+-        place_tile_at_random_cell(game, get_new_tile());
++        place_tile_at_random_cell(game, get_new_tile(game));
+         game->score += score_add;
+         update_stats_and_get_heuristic_rewards(game); // The reward is ignored.
+         update_observations(game); // Observations only change if the grid changes
+diff --git a/pufferlib/ocean/g2048/g2048.py b/pufferlib/ocean/g2048/g2048.py
+index e65b225..6ee9294 100644
+--- a/pufferlib/ocean/g2048/g2048.py
++++ b/pufferlib/ocean/g2048/g2048.py
+@@ -60,6 +60,9 @@ class G2048(pufferlib.PufferEnv):
+             self.terminals, self.truncations, info
+         )
+ 
++    def episode_stats(self):
++        return binding.vec_get(self.c_envs)
++
+     def render(self):
+         binding.vec_render(self.c_envs, 0)
+ 

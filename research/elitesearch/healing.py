@@ -6,7 +6,7 @@ from slick import parse, render
 from slick.providers import Provider
 
 from rsikit.generation import WORKER_LIBRARIES
-from rsikit.policy import Policy
+from rsikit.policy import PolicyDefinition
 
 from .generation import _PolicyResponse
 
@@ -19,7 +19,7 @@ class SelfHealer:
 
     async def repair(
         self, reference: str, failed: str, diagnostic: str, *, provider=None, record=None
-    ) -> type[Policy]:
+    ) -> PolicyDefinition:
         schema = _PolicyResponse.model_json_schema()
         context = render(
             "repair.j2",

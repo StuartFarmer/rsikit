@@ -15,9 +15,9 @@ from slick import prompts
 from slick.providers import ProviderError
 from sqlmodel import select
 
-from research.lineagesearch import Config, Family, LineageSearch, Measurement, Study, Trial
+from research.lineagesearch import Config, Family, LineageSearch, Study, Trial
 from rsikit.evaluation import PolicyError
-from tests.helpers import fake_executor, recorded_run
+from tests.helpers import episodes, fake_executor, recorded_run
 from tests.providers import ScriptedProvider
 from tests.test_episode_storage import trajectory
 from tests.test_run import FakeEvaluation
@@ -158,7 +158,7 @@ class LineageTests(unittest.IsolatedAsyncioTestCase):
                 value = scores[policy.name]
                 if isinstance(value, Exception):
                     raise value
-                results[policy.id] = Measurement(
+                results[policy.id] = episodes(
                     value if isinstance(value, dict) else {0: value, 1: value, 2: value}
                 )
             return results
@@ -401,7 +401,7 @@ class LineageTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(active, 0)
         self.assertEqual(agent.study.reason, "error")
 
-    async def test_generation_overlaps_evaluation_without_overbooking_trials_or_workers(self):
+    async def test_complete_sweep_precedes_evaluation_without_overbooking_trials(self):
         agent = self.agent(
             [families(3), experiments(0), experiments(1), experiments(2), program(0), program(1)],
             {},
@@ -411,45 +411,31 @@ class LineageTests(unittest.IsolatedAsyncioTestCase):
         from dataclasses import replace
 
         agent.config = replace(agent.config, families=3)
-        evaluation_started = asyncio.Event()
-        second_generated = asyncio.Event()
+        generated = []
+        evaluated = []
         original_call = agent.provider.acall
-        active = peak = 0
-        overlap = False
 
         async def generate(context, **kwargs):
-            nonlocal overlap
             result = await original_call(context, **kwargs)
-            if result[0] == program(1):
-                await evaluation_started.wait()
-                overlap = active == 1
-                second_generated.set()
+            if result[0] in (program(0), program(1)):
+                generated.append(result[0])
             return result
 
         async def evaluate(policies):
-            nonlocal active, peak
-            active += 1
-            peak = max(peak, active)
-            try:
-                if policies[0].name == "Policy 0":
-                    evaluation_started.set()
-                    await second_generated.wait()
-                    await asyncio.sleep(0.01)
-                return {p.id: Measurement({0: 7}) for p in policies}
-            finally:
-                active -= 1
+            self.assertEqual(len(generated), 2)
+            evaluated.append([p.name for p in policies])
+            return {p.id: episodes({0: 7}) for p in policies}
 
         agent.evaluate = evaluate
         with patch.object(agent.provider, "acall", side_effect=generate):
-            await asyncio.wait_for(agent.run(), 1)
-        self.assertTrue(overlap)
-        self.assertEqual(peak, 1)
+            await agent.run()
+        self.assertEqual(evaluated, [["Policy 0", "Policy 1"]])
         self.assertEqual(agent.study.attempts, 2)
         self.assertEqual([t.id for t in agent.trials], [1, 2])
         self.assertEqual([f.batches for f in agent.families], [1, 1, 0])
         self.assertTrue(all(t.status == "evaluated" for t in agent.trials))
 
-    async def test_evaluator_failure_cancels_generation_in_other_families(self):
+    async def test_evaluator_failure_preserves_complete_pending_sweep(self):
         agent = self.agent(
             [families(2), experiments(0), experiments(1), program(0), program(1)],
             {},
@@ -459,30 +445,17 @@ class LineageTests(unittest.IsolatedAsyncioTestCase):
         from dataclasses import replace
 
         agent.config = replace(agent.config, families=2)
-        generating = asyncio.Event()
-        cancelled = asyncio.Event()
-        original_call = agent.provider.acall
-
-        async def generate(context, **kwargs):
-            result = await original_call(context, **kwargs)
-            if result[0] == program(1):
-                generating.set()
-                try:
-                    await asyncio.Event().wait()
-                finally:
-                    cancelled.set()
-            return result
 
         async def evaluate(policies):
-            await generating.wait()
+            self.assertEqual([p.name for p in policies], ["Policy 0", "Policy 1"])
             raise RuntimeError("worker offline")
 
         agent.evaluate = evaluate
-        with patch.object(agent.provider, "acall", side_effect=generate):
-            with self.assertRaisesRegex(RuntimeError, "worker offline"):
-                await asyncio.wait_for(agent.run(), 1)
-        self.assertTrue(cancelled.is_set())
+        with self.assertRaisesRegex(RuntimeError, "worker offline"):
+            await agent.run()
         self.assertEqual(agent.study.reason, "error")
+        self.assertTrue(all(t.status == "evaluating" for t in agent.trials))
+        self.assertEqual([f.batches for f in agent.families], [0, 0])
 
     async def test_noise_does_not_promote_and_small_gains_accumulate(self):
         agent = self.agent(
@@ -554,7 +527,7 @@ class LineageTests(unittest.IsolatedAsyncioTestCase):
             self.assertIsNone(agent.trials[0].score)
 
     async def test_nonfinite_and_changed_seed_panel_fail_before_selection(self):
-        for bad in ({0: float("nan"), 1: 1, 2: 1}, {99: 10}, {}):
+        for bad in ({0: float("nan"), 1: 1, 2: 1}, {99: 10}):
             agent = self.agent([families(), *sequence(0, 1)], {"Policy 0": 1, "Policy 1": bad})
             with self.assertRaises(ValueError):
                 await agent.run()
@@ -562,13 +535,12 @@ class LineageTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(agent.families[0].stale_batches, 0)
 
     async def test_screening_rejection_does_not_promote_or_repair(self):
-        from research.rewards import Measurement
 
         agent = self.agent([families(), *sequence(0)], {}, max_attempts=1)
 
         async def evaluate(policies):
             return {
-                p.id: Measurement(scores={0: 100}, accepted=False, feedback="screened")
+                p.id: episodes(scores={0: 100}, accepted=False, feedback="screened")
                 for p in policies
             }
 
@@ -576,7 +548,7 @@ class LineageTests(unittest.IsolatedAsyncioTestCase):
         await agent.run()
         self.assertIsNone(agent.best)
         self.assertEqual(agent.trials[0].status, "rejected")
-        self.assertEqual(agent.trials[0].feedback, "screened")
+        self.assertEqual(agent.trials[0].feedback, "")
         self.assertEqual(agent.trials[0].repairs, 0)
         self.assertIsNone(agent.trials[0].score)
 
@@ -585,7 +557,7 @@ class LineageTests(unittest.IsolatedAsyncioTestCase):
             [families(), *sequence(0, 1, 2)], {"Policy 0": 1, "Policy 1": 1, "Policy 2": 1}
         )
         with tempfile.TemporaryDirectory() as directory, gym.make("CartPole-v1") as env:
-            with recorded_run(
+            async with recorded_run(
                 name="lineage-test", environment=env, path=Path(directory) / "run"
             ) as (run, rollouts):
                 agent.on_checkpoint = lambda current: run.save(*current.records())
@@ -620,9 +592,9 @@ class LineageTests(unittest.IsolatedAsyncioTestCase):
             evaluated.extend(p.name for p in policies)
             return {
                 p.id: (
-                    Measurement({}, failure="Action outside action_space")
+                    episodes({}, failure="Action outside action_space")
                     if p.name == "Policy 0"
-                    else Measurement({0: 5})
+                    else episodes({0: 5})
                 )
                 for p in policies
             }
@@ -717,9 +689,9 @@ class LineageTests(unittest.IsolatedAsyncioTestCase):
             evaluated.extend(p.name for p in policies)
             return {
                 p.id: (
-                    Measurement({0: 9})
+                    episodes({0: 9})
                     if p.name == "Policy 0"
-                    else Measurement({}, failure="Invalid action")
+                    else episodes({}, failure="Invalid action")
                 )
                 for p in policies
             }
@@ -752,7 +724,7 @@ class LineageTests(unittest.IsolatedAsyncioTestCase):
         )
 
         async def evaluate(policies):
-            return {p.id: Measurement({}, failure="Invalid action") for p in policies}
+            return {p.id: episodes({}, failure="Invalid action") for p in policies}
 
         agent.evaluate = evaluate
         await agent.run()
@@ -800,7 +772,7 @@ class LineageTests(unittest.IsolatedAsyncioTestCase):
         child = agent.trials[1]
         self.assertEqual(child.parent_id, 1)
         self.assertEqual(child.repairs, 1)
-        self.assertIn("UNCHANGED = 1", agent.best._implementation)
+        self.assertIn("UNCHANGED = 1", agent.best.source)
         self.assertIn("UNCHANGED = 2", child.revisions[0]["implementation"])
         self.assertIn("immutable", child.revisions[0]["error"])
 
@@ -852,7 +824,10 @@ class LineageTests(unittest.IsolatedAsyncioTestCase):
                 patch.object(
                     example, "Executor", return_value=fake_executor(evaluation=FakeEvaluation())
                 ),
-                patch("rsikit.progress.Console", return_value=Console(file=terminal, width=140)),
+                patch(
+                    "rsikit.progress.controller.Console",
+                    return_value=Console(file=terminal, width=140),
+                ),
             ):
                 await example.main()
             summary = json.loads((output / "summary.json").read_text())

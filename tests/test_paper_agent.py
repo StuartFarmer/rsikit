@@ -12,11 +12,10 @@ from research import alphaevolve
 from research.alphaevolve import paper
 from research.alphaevolve.generation import Mutation
 from research.alphaevolve.original.agent import Guidance
-from rsikit.evaluation import PolicyError
-from rsikit.policy import Policy
+from rsikit.policy import PolicyDefinition
+from tests.helpers import episodes
 from tests.providers import ScriptedProvider
 from tests.test_alphaevolve import program
-from tests.test_episode_storage import trajectory
 
 
 class PaperAgentTests(unittest.IsolatedAsyncioTestCase):
@@ -24,6 +23,113 @@ class PaperAgentTests(unittest.IsolatedAsyncioTestCase):
         root = patch.object(prompts, "TEMPLATE_ROOT", Path(alphaevolve.__file__).parent)
         root.start()
         self.addCleanup(root.stop)
+
+    async def test_reopen_retries_interrupted_original_attempt_without_losing_successful_sibling(
+        self,
+    ):
+        from slick.providers import ProviderError
+
+        from rsikit import search
+
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "population.sqlite"
+            config = paper.Config(islands=1, proposals=2, batch_size=2, meta_interval=0)
+            agent = paper.AlphaEvolve(
+                "task",
+                ScriptedProvider([program(0), ProviderError("offline")]),
+                config=config,
+                database_path=path,
+            )
+
+            async def first_evaluate(policies):
+                return {p.id: episodes({0: 5}) for p in policies}
+
+            with self.assertRaises(ProviderError):
+                await search(agent, first_evaluate)
+            self.assertIsNotNone(agent.best)
+            agent.close()
+            provider = ScriptedProvider([program(1)])
+            agent = paper.AlphaEvolve("task", provider, config=config, database_path=path)
+            self.addCleanup(agent.close)
+            measured = []
+
+            async def evaluate(policies):
+                measured.extend(p.name for p in policies)
+                return {p.id: episodes({0: 5}) for p in policies}
+
+            await search(agent, evaluate)
+            self.assertEqual(measured, ["Policy 1"])
+            self.assertEqual(len(provider.calls), 1)
+            self.assertEqual(len(agent.attempts), 2)
+            self.assertEqual(agent.completed, 2)
+            self.assertTrue(agent.done)
+
+    async def test_reopen_preserves_pending_round_then_repairs_without_new_attempts(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "population.sqlite"
+            config = paper.Config(
+                islands=1, proposals=2, batch_size=2, max_repairs=1, meta_interval=0
+            )
+            agent = paper.AlphaEvolve(
+                "task",
+                ScriptedProvider([program(0), program(1)]),
+                config=config,
+                database_path=path,
+            )
+            first, second = await agent.propose()
+            agent.close()
+            provider = ScriptedProvider([])
+            agent = paper.AlphaEvolve("task", provider, config=config, database_path=path)
+            self.assertEqual([p.id for p in await agent.propose()], [first.id, second.id])
+            self.assertEqual(provider.calls, [])
+            agent.update({first.id: episodes({0: 1, 1: 3}), second.id: episodes(failure="broken")})
+            agent.close()
+            agent = paper.AlphaEvolve(
+                "task", ScriptedProvider([program(2)]), config=config, database_path=path
+            )
+            (repaired,) = await agent.propose()
+            agent.update({repaired.id: episodes({0: 4, 1: 6})})
+            self.assertTrue(agent.done)
+            self.assertEqual(len(agent.attempts), 2)
+            self.assertEqual(agent.completed, 2)
+            self.assertEqual(agent.best.id, repaired.id)
+            agent.close()
+            agent = paper.AlphaEvolve(
+                "task", ScriptedProvider([]), config=config, database_path=path
+            )
+            self.assertTrue(agent.done)
+            self.assertEqual(agent.best.id, repaired.id)
+            self.assertEqual(await agent.propose(), [])
+            agent.close()
+
+    async def test_legacy_completed_archive_opens_but_unresolved_stream_is_rejected(self):
+        for complete in (True, False):
+            with self.subTest(complete=complete), tempfile.TemporaryDirectory() as directory:
+                path = Path(directory) / "population.sqlite"
+                config = paper.Config(islands=1, proposals=1, meta_interval=0)
+                agent = paper.AlphaEvolve(
+                    "task", ScriptedProvider([program(0)]), config=config, database_path=path
+                )
+                (policy,) = await agent.propose()
+                if complete:
+                    agent.update({policy.id: episodes({0: 3})})
+                agent.checkpoint()
+                state = agent.database.load_state("optimizer")
+                state.pop("round_state")
+                agent.database.save_state("optimizer", state)
+                agent.database.close()
+                if complete:
+                    restored = paper.AlphaEvolve(
+                        "task", ScriptedProvider([]), config=config, database_path=path
+                    )
+                    self.assertTrue(restored.done)
+                    self.assertEqual(restored.best.id, policy.id)
+                    restored.close()
+                else:
+                    with self.assertRaisesRegex(ValueError, "Legacy streaming checkpoint"):
+                        paper.AlphaEvolve(
+                            "task", ScriptedProvider([]), config=config, database_path=path
+                        )
 
     def test_invalid_counters_fail_before_starting_a_search(self):
         for field in (
@@ -45,72 +151,91 @@ class PaperAgentTests(unittest.IsolatedAsyncioTestCase):
             seed_scores={0: reward},
         )
 
-    async def test_propose_and_episode_pairs_derive_fitness_by_persistent_identity(self):
-        from rsikit import Episode, Optimizer
-
+    async def test_round_measurements_build_internal_metrics_and_preserve_seed_identity(self):
         agent = paper.AlphaEvolve(
             "task",
             ScriptedProvider([program(0), program(1)]),
             config=paper.Config(
                 islands=1,
+                proposals=2,
+                batch_size=2,
                 meta_interval=0,
                 features={"mean_reward": (0, 10, 2), "reward_std": (0, 5, 2)},
             ),
         )
         self.addCleanup(agent.close)
-        optimizer: Optimizer = agent
-        policies = await optimizer.propose(2)
-        # Reloaded definitions have different Python identities but the same persistent ID.
-        restored = Policy.from_text(policies[0].to_text())
-        first_episode = Episode(
-            observations=[0, 1, 2],
-            actions=[0, 0],
-            rewards=[1.0, 2.0],
-            terminations=[False, True],
-            truncations=[False, False],
-            infos=[{}, {}, {}],
-        )
-        episodes = [first_episode, trajectory(7), trajectory(8)]
-        optimizer.update(zip([restored, policies[0], policies[1]], episodes, strict=True))
-        candidates = {row.policy.id: row for row in agent.database.all()}
-        first = candidates[policies[0].id]
-        self.assertEqual(first.metrics, {"reward": 5, "worst_reward": 3, "stability": -2})
-        self.assertEqual(first.features, {"mean_reward": 5, "reward_std": 2})
-        self.assertEqual(first.seed_scores, {})  # An Episode does not identify its seed.
+        first, second = await agent.propose()
+        restored = PolicyDefinition.from_text(first.to_text())
+        agent.update({restored.id: episodes({0: 3, 1: 7}), second.id: episodes({0: 8, 1: 8})})
+        candidates = {c.policy.id: c for c in agent.database.all()}
         self.assertEqual(
-            candidates[policies[1].id].metrics, {"reward": 8, "worst_reward": 8, "stability": 0}
+            candidates[first.id].metrics, {"reward": 5, "worst_reward": 3, "stability": -2}
         )
-        self.assertEqual(agent.best.id, policies[1].id)
-        self.assertEqual(agent.completed, 2)
-        self.assertEqual(agent._pending, {})
+        self.assertEqual(candidates[first.id].features, {"mean_reward": 5, "reward_std": 2})
+        self.assertEqual(candidates[first.id].seed_scores, {0: 3, 1: 7})
+        self.assertEqual(agent.best.id, second.id)
+        self.assertTrue(agent.done)
 
-    async def test_bad_episode_pairs_leave_the_whole_batch_pending(self):
-        from rsikit import Episode
-
+    async def test_invalid_measurements_leave_entire_round_pending(self):
         agent = paper.AlphaEvolve(
             "task",
             ScriptedProvider([program(0), program(1)]),
-            config=paper.Config(islands=1, meta_interval=0),
+            config=paper.Config(
+                islands=1, proposals=2, batch_size=2, features={"speed": (0, 10, 2)}
+            ),
         )
         self.addCleanup(agent.close)
-        policies = await agent.generate(2)
-        for episodes in (
-            [trajectory(3), Episode()],
-            [trajectory(3), trajectory(float("nan"))],
-            [trajectory(3)],
+        first, second = await agent.propose()
+        for results in (
+            {first.id: episodes({0: 3})},
+            {first.id: episodes({0: 3}, features={"speed": 2}), second.id: episodes({0: 7})},
+            {p.id: episodes({0: 3}, features={"speed": True}) for p in (first, second)},
         ):
-            with self.subTest(episodes=episodes), self.assertRaises(ValueError):
-                agent.update(zip(policies, episodes, strict=True))
+            with self.assertRaises(ValueError):
+                agent.update(results)
             self.assertEqual(agent.completed, 0)
             self.assertEqual(agent.database.all(), [])
-            self.assertEqual(len(agent._pending), 2)
+        agent.update(
+            {
+                p.id: episodes({0: 3}, metrics={"reward": 9}, features={"speed": 2})
+                for p in (first, second)
+            }
+        )
+        self.assertEqual(agent.database.best.score, 9)
+
+    async def test_pending_round_and_repair_queue_survive_reopen(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "population.sqlite"
+            config = paper.Config(islands=1, proposals=2, batch_size=2, max_repairs=1)
+            agent = paper.AlphaEvolve(
+                "task",
+                ScriptedProvider([program(0), program(1)]),
+                config=config,
+                database_path=path,
+            )
+            first, second = await agent.propose()
+            agent.close()
+            agent = paper.AlphaEvolve(
+                "task", ScriptedProvider([program(2)]), config=config, database_path=path
+            )
+            self.assertEqual([p.id for p in await agent.propose()], [first.id, second.id])
+            agent.update({first.id: episodes({0: 4}), second.id: episodes(failure="broken")})
+            agent.close()
+            agent = paper.AlphaEvolve(
+                "task", ScriptedProvider([program(2)]), config=config, database_path=path
+            )
+            self.addCleanup(agent.close)
+            (repaired,) = await agent.propose()
+            agent.update({repaired.id: episodes({0: 8})})
+            self.assertTrue(agent.done)
+            self.assertEqual((agent.completed, agent.repair_calls), (2, 1))
 
     async def test_scalar_feedback_updates_the_paper_archive(self):
         agent = paper.AlphaEvolve(
             "task", ScriptedProvider([program(0)]), config=paper.Config(islands=1)
         )
         self.addCleanup(agent.close)
-        (policy,) = await agent.propose(1)
+        (policy,) = await agent.generate(1)
         agent.update_scores({policy.id: 3}, seed_scores={policy.id: {42: 3}})
         (candidate,) = agent.database.all()
         self.assertEqual(candidate.policy.id, policy.id)
@@ -128,15 +253,13 @@ class PaperAgentTests(unittest.IsolatedAsyncioTestCase):
         async def evaluate(policies):
             evaluated.extend(policies)
             if len(evaluated) == 1:
-                error = PolicyError(diagnostic)
-                error.failures = {policies[0].id: diagnostic}
-                raise error
-            return {p.id: paper.EvaluationResult({"reward": 1}) for p in policies}
+                return {policies[0].id: episodes(failure=diagnostic)}
+            return {p.id: episodes({0: 1}) for p in policies}
 
         await paper.search(agent, evaluate, proposals=1, evaluation_batch_size=1)
 
         self.assertEqual(len(evaluated), 2)
-        self.assertEqual(agent.best._implementation, program(1).implementation)
+        self.assertEqual(agent.best.source, program(1).implementation)
         self.assertEqual([c.policy.id for c in agent.database.all()], [evaluated[1].id])
         self.assertEqual((agent.completed, agent.repair_calls), (1, 1))
         self.assertEqual(agent._pending, {})
@@ -199,7 +322,7 @@ class PaperAgentTests(unittest.IsolatedAsyncioTestCase):
             config=paper.Config(islands=1, mode="rewrite", meta_interval=0),
         )
         self.addCleanup(agent.close)
-        seed = Policy.from_text(program(0).implementation, name="Initial")
+        seed = PolicyDefinition.from_text(program(0).implementation, name="Initial")
         agent.register_initial(seed, paper.EvaluationResult(metrics={"reward": 1}))
         child = (await agent.generate())[0]
         agent.update_results({child.id: paper.EvaluationResult(metrics={"reward": 100})})
@@ -226,6 +349,34 @@ class PaperAgentTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(agent._pending), 2)
         self.assertEqual(agent.completed, 0)
 
+    async def test_direct_result_entry_points_revalidate_mutated_acceptance_and_failure(self):
+        agent = paper.AlphaEvolve(
+            "task",
+            ScriptedProvider([program(0), program(1)]),
+            config=paper.Config(islands=1, mode="rewrite", meta_interval=0),
+        )
+        self.addCleanup(agent.close)
+        result = paper.EvaluationResult(metrics={"reward": 10})
+        result.failure = "execution failed"
+        seed = PolicyDefinition.from_text(program(0).implementation, name="Initial")
+        with self.assertRaises(ValueError):
+            agent.register_initial(seed, result)
+        self.assertEqual(agent.database.all(), [])
+
+        first, second = await agent.generate(n=2)
+        result.failure = None
+        result.accepted = "yes"
+        results = {first.id: paper.EvaluationResult(metrics={"reward": 2}), second.id: result}
+        with self.assertRaises(ValueError):
+            agent.update_results(results)
+        self.assertEqual(agent.database.all(), [])
+        self.assertEqual(len(agent._pending), 2)
+        result.accepted = True
+        result.failure = "execution failed"
+        agent.update_results(results)
+        self.assertEqual([c.policy.id for c in agent.database.all()], [first.id])
+        self.assertEqual(agent._pending, {})
+
     async def test_evaluated_seed_and_rejected_child(self):
         agent = paper.AlphaEvolve(
             "task",
@@ -233,7 +384,7 @@ class PaperAgentTests(unittest.IsolatedAsyncioTestCase):
             config=paper.Config(mode="rewrite", meta_interval=0),
         )
         self.addCleanup(agent.close)
-        seed = Policy.from_text(program(0).implementation, name="Initial")
+        seed = PolicyDefinition.from_text(program(0).implementation, name="Initial")
         agent.register_initial(seed, paper.EvaluationResult(metrics={"reward": 1}))
         self.assertTrue(all(island.policy.id == seed.id for island in agent.islands))
         child = (await agent.generate())[0]

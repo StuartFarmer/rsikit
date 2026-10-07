@@ -2,7 +2,7 @@
 
 from slick import parse, render
 
-from rsikit.policy import Policy
+from rsikit.policy import PolicyDefinition
 
 from ..generation import Mutation, _PolicyResponse, apply_edits
 from ..original.agent import AlphaEvolve as OriginalAlphaEvolve
@@ -19,7 +19,7 @@ class AlphaEvolve(OriginalAlphaEvolve):
     def _register_founder(self, candidate: _Candidate, island_id: int) -> None:
         # Renaming an identical program must not found another island.
         if not any(
-            island is not None and island.policy._implementation == candidate.policy._implementation
+            island is not None and island.policy.source == candidate.policy.source
             for island in self.islands
         ):
             self._register(candidate, island_id)
@@ -37,7 +37,7 @@ class AlphaEvolve(OriginalAlphaEvolve):
         *,
         provider,
         record=None,
-    ) -> type[Policy]:
+    ) -> PolicyDefinition:
         schema = Mutation.model_json_schema()
         context = render(
             "improved/prompts/mutate.j2",
@@ -52,8 +52,8 @@ class AlphaEvolve(OriginalAlphaEvolve):
         if record is not None:
             record["raw"] = raw
         mutation = parse(raw, Mutation)
-        return Policy.from_text(
-            apply_edits(parent.policy._implementation, mutation.edits),
+        return PolicyDefinition.from_text(
+            apply_edits(parent.policy.source, mutation.edits),
             name=mutation.name,
             description=mutation.description,
         )
@@ -67,7 +67,7 @@ class AlphaEvolve(OriginalAlphaEvolve):
         *,
         provider,
         record=None,
-    ) -> type[Policy]:
+    ) -> PolicyDefinition:
         schema = _PolicyResponse.model_json_schema()
         context = render(
             "improved/prompts/rewrite.j2",

@@ -21,9 +21,9 @@ from research.alphaevolve.generation import Mutation, _PolicyResponse
 from research.alphaevolve.history import Evaluation, Generation
 from research.alphaevolve.original.agent import Guidance
 from research.alphaevolve.paper.evaluation import assess
-from research.rewards import mean_rewards
+from research.rewards import episode_scores, mean_rewards
 from rsikit.evaluation import PolicyError
-from rsikit.policy import Policy
+from rsikit.policy import PolicyDefinition
 from rsikit.progress import show_scores
 from tests.helpers import fake_executor, recorded_run
 from tests.providers import ScriptedProvider
@@ -43,7 +43,7 @@ class VariantTests(unittest.IsolatedAsyncioTestCase):
                 "Executor",
                 return_value=fake_executor(evaluation=evaluation or FakeEvaluation()),
             ),
-            patch("rsikit.progress.Console", return_value=Console(file=io.StringIO())),
+            patch("rsikit.progress.controller.Console", return_value=Console(file=io.StringIO())),
             patch.object(prompts, "TEMPLATE_ROOT", Path(alphaevolve.__file__).parent),
         ):
             await example.main()
@@ -79,7 +79,10 @@ class VariantTests(unittest.IsolatedAsyncioTestCase):
                     patch.object(
                         example, "Executor", return_value=fake_executor(evaluation=FakeEvaluation())
                     ),
-                    patch("rsikit.progress.Console", return_value=Console(file=io.StringIO())),
+                    patch(
+                        "rsikit.progress.controller.Console",
+                        return_value=Console(file=io.StringIO()),
+                    ),
                     patch.object(prompts, "TEMPLATE_ROOT"),
                 ):
                     await example.main()
@@ -322,7 +325,9 @@ class VariantTests(unittest.IsolatedAsyncioTestCase):
                 return trajectory(float(source.split("return ")[1].split()[0]) + seed, {})
 
             evaluation.evaluate.side_effect = evaluate
-            policies = [Policy.from_text(program(i).implementation, name=str(i)) for i in (0, 10)]
+            policies = [
+                PolicyDefinition.from_text(program(i).implementation, name=str(i)) for i in (0, 10)
+            ]
             with recorded_run(
                 name="cascade",
                 environment=environment,
@@ -337,9 +342,13 @@ class VariantTests(unittest.IsolatedAsyncioTestCase):
                     screening_seeds=(0,),
                     screening_min_reward=5,
                 )
-                self.assertFalse(results[policies[0].id].accepted)
-                self.assertTrue(results[policies[1].id].accepted)
-                self.assertEqual(results[policies[1].id].metrics["reward"], 11)
+                self.assertFalse(results[policies[0].id])
+                self.assertTrue(results[policies[1].id])
+                self.assertEqual(
+                    sum(episode_scores(results[policies[1].id]).values())
+                    / len(episode_scores(results[policies[1].id])),
+                    11,
+                )
                 self.assertEqual(evaluation.evaluate.await_count, 3)
                 self.assertEqual(run.scores(policies[0]), {0: 0})
 
@@ -351,7 +360,9 @@ class VariantTests(unittest.IsolatedAsyncioTestCase):
                 return trajectory(float(seed), {})
 
             evaluation.evaluate.side_effect = evaluate
-            policies = [Policy.from_text(program(i).implementation, name=str(i)) for i in (0, 1)]
+            policies = [
+                PolicyDefinition.from_text(program(i).implementation, name=str(i)) for i in (0, 1)
+            ]
             with recorded_run(
                 name="screening",
                 environment=environment,
@@ -369,7 +380,11 @@ class VariantTests(unittest.IsolatedAsyncioTestCase):
                 await mean_rewards(rollouts, policies[1:], seeds=(99,))
                 output = io.StringIO()
                 show_scores(policies, run, Console(file=output), seeds=(0, 1))
-                self.assertEqual(results[policies[0].id].metrics["reward"], 0.5)
+                self.assertEqual(
+                    sum(episode_scores(results[policies[0].id]).values())
+                    / len(episode_scores(results[policies[0].id])),
+                    0.5,
+                )
                 self.assertIn("0.5", output.getvalue())
                 self.assertIn("unfinished", output.getvalue())
                 self.assertNotIn("99.0", output.getvalue())
@@ -496,53 +511,35 @@ class VariantTests(unittest.IsolatedAsyncioTestCase):
                 )
             evaluation.evaluate.assert_not_awaited()
 
-    async def test_overlapping_snapshot_stays_incomplete_when_sibling_is_cancelled(self):
+    async def test_round_snapshot_stays_incomplete_when_generation_is_cancelled(self):
         with (
             tempfile.TemporaryDirectory() as directory,
             patch.object(prompts, "TEMPLATE_ROOT", Path(alphaevolve.__file__).parent),
             gym.make("CartPole-v1") as environment,
         ):
-            evaluation = FakeEvaluation()
             provider = ScriptedProvider([program(i) for i in range(3)])
-            generating, evaluated = (asyncio.Event(), asyncio.Event())
+            generating = asyncio.Event()
             acall = provider.acall
 
             async def generate(*args, **kwargs):
-                index = len(provider.calls)
                 response = await acall(*args, **kwargs)
-                if index == 2:
+                if len(provider.calls) == 3:
                     generating.set()
                     await asyncio.Event().wait()
                 return response
 
-            async def evaluate(source, environment, seed):
-                if "return 1" in source:
-                    await generating.wait()
-                return trajectory(7, {})
-
-            def update(results):
-                names = [row["policy"].name for key in results for row in generator._pending[key]]
-                original_update(results)
-                if "Policy 1" in names:
-                    evaluated.set()
-
             provider.acall = generate
-            evaluation.evaluate.side_effect = evaluate
             generator = paper.AlphaEvolve(
                 "task", provider, config=paper.Config(islands=1, mode="rewrite", meta_interval=0)
             )
             self.addCleanup(generator.close)
-            original_update = generator.update_results
-            with (
-                recorded_run(
-                    name="overlap",
-                    environment=environment,
-                    path=Path(directory) / "run",
-                    executor=fake_executor(evaluation=evaluation),
-                    console=Console(file=io.StringIO()),
-                ) as (run, rollouts),
-                patch.object(generator, "update_results", side_effect=update),
-            ):
+            with recorded_run(
+                name="rounds",
+                environment=environment,
+                path=Path(directory) / "run",
+                executor=fake_executor(evaluation=FakeEvaluation()),
+                console=Console(file=io.StringIO()),
+            ) as (run, rollouts):
                 task = asyncio.create_task(
                     run_search(
                         generator,
@@ -553,97 +550,64 @@ class VariantTests(unittest.IsolatedAsyncioTestCase):
                         generation_concurrency=2,
                     )
                 )
-                try:
-                    await asyncio.wait_for(evaluated.wait(), 2)
-                finally:
-                    task.cancel()
-                    with self.assertRaises(asyncio.CancelledError):
-                        await task
+                await asyncio.wait_for(generating.wait(), 2)
+                task.cancel()
+                with self.assertRaises(asyncio.CancelledError):
+                    await task
                 with run.database() as db:
-                    attempts = db.exec(select(Evaluation).order_by(Evaluation.attempt)).all()
+                    rows = db.exec(select(Evaluation).order_by(Evaluation.attempt)).all()
                     self.assertEqual(
-                        [row.status for row in attempts], ["evaluated", "evaluated", "cancelled"]
+                        [r.status for r in rows], ["evaluated", "evaluated", "cancelled"]
                     )
-                    self.assertEqual(attempts[1].generation, attempts[2].generation)
-                    self.assertFalse(db.get(Generation, attempts[2].generation).complete)
-                    self.assertTrue(db.get(Generation, attempts[0].generation).complete)
+                    self.assertNotEqual(rows[1].generation, rows[2].generation)
+                    self.assertFalse(db.get(Generation, rows[2].generation).complete)
+                    self.assertTrue(db.get(Generation, rows[1].generation).complete)
 
-    async def test_concurrent_generation_preserves_failed_revision_while_repair_waits(self):
+    async def test_failed_revision_is_saved_before_repair_starts(self):
         with (
             tempfile.TemporaryDirectory() as directory,
             patch.object(prompts, "TEMPLATE_ROOT", Path(alphaevolve.__file__).parent),
             gym.make("CartPole-v1") as environment,
         ):
+            provider = ScriptedProvider([program(i) for i in range(3)])
             evaluation = FakeEvaluation()
-            provider = ScriptedProvider([program(i) for i in range(4)])
-            sibling_started, repairing, sibling_saved = (asyncio.Event() for _ in range(3))
-            acall = provider.acall
-
-            async def generate(*args, **kwargs):
-                index = len(provider.calls)
-                response = await acall(*args, **kwargs)
-                if index == 2:
-                    sibling_started.set()
-                    await repairing.wait()
-                elif index == 3:
-                    repairing.set()
-                    await sibling_saved.wait()
-                return response
 
             async def evaluate(source, environment, seed):
                 if "return 1" in source:
-                    await sibling_started.wait()
-                    raise PolicyError("bad concurrent action")
+                    raise PolicyError("bad action")
                 return trajectory(7, {})
 
-            provider.acall = generate
             evaluation.evaluate.side_effect = evaluate
-            generator = paper.AlphaEvolve(
+            agent = paper.AlphaEvolve(
                 "task", provider, config=paper.Config(islands=1, mode="rewrite", meta_interval=0)
             )
-            self.addCleanup(generator.close)
+            self.addCleanup(agent.close)
             with recorded_run(
-                name="repair-overlap",
+                name="repair",
                 environment=environment,
                 path=Path(directory) / "run",
                 executor=fake_executor(evaluation=evaluation),
                 console=Console(file=io.StringIO()),
             ) as (run, rollouts):
-                save = run.save
+                acall = provider.acall
 
-                def save_and_release(*records):
-                    save(*records)
-                    if any(
-                        (
-                            isinstance(row, Evaluation)
-                            and row.attempt == 3
-                            and (row.status == "generated")
-                            for row in records
-                        )
-                    ):
-                        sibling_saved.set()
+                async def generate(*args, **kwargs):
+                    if len(provider.calls) == 2:
+                        with run.database() as db:
+                            row = db.get(Evaluation, (2, 2, 0))
+                            self.assertEqual(row.status, "failed")
+                            self.assertIn("bad action", row.error)
+                    return await acall(*args, **kwargs)
 
-                with patch.object(run, "save", side_effect=save_and_release):
-                    await asyncio.wait_for(
-                        run_search(
-                            generator,
-                            run,
-                            rollouts,
-                            generations=3,
-                            batch_size=1,
-                            generation_concurrency=2,
-                        ),
-                        3,
-                    )
+                provider.acall = generate
+                await run_search(agent, run, rollouts, generations=2, batch_size=1)
                 with run.database() as db:
                     rows = db.exec(
                         select(Evaluation)
                         .where(Evaluation.attempt == 2)
                         .order_by(Evaluation.revision)
                     ).all()
-                    self.assertEqual([row.status for row in rows], ["failed", "evaluated"])
-                    self.assertIn("bad concurrent action", rows[0].error)
-                    self.assertIsNone(rows[1].error)
+                    self.assertEqual([r.status for r in rows], ["failed", "evaluated"])
 
     async def test_variants_share_mechanics_but_change_founding_and_feedback(self):
         rendered = {}

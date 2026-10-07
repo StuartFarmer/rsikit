@@ -48,11 +48,11 @@ rounded down. The remaining slots edit elites. Their sum must be at most 1.
 parents are sampled uniformly without replacement for a remix. `--search-seed`
 controls operator shuffling and parent sampling.
 
-Generation overlaps evaluation as candidates become ready. All model calls,
-including repairs, share `--generation-concurrency`; Docker episode workers use
-the separate `--concurrency` setting. New candidates can use free workers while
-earlier candidates finish their remaining seeds. A generation completes before breeding the
-next one so it can use the updated leaderboard.
+Generation finishes before evaluation starts. All model calls, including repairs,
+share `--generation-concurrency`; episode workers use a separate evaluation limit.
+Each round completes before update. Repair rounds settle before promotion, and
+the next generation uses the updated leaderboard. New manifests label this
+schedule `round-v1`; it replaces earlier generation/evaluation overlap.
 
 `--generation-timeout` sets both the OpenRouter request timeout and the search's
 wall-clock deadline per model call (default 120 seconds), including repairs.
@@ -67,21 +67,34 @@ generation/evaluation progress and the leaderboard after each generation.
 Artifacts include `experiment.json`, `run.log`, `leaderboard.json`, `best.py`,
 `summary.json`, and database tables `elitesearch_organism` and
 `elitesearch_generation`. Every generation stores its elite IDs and promotions.
-These are inspection records; resuming interrupted searches is not implemented.
+The unified CLI restores these records with `rsikit resume`; the historical example
+launcher does not expose resume. Completed generations are not promoted again.
 
 Search seeds default to 0–4. The final best elite is also evaluated on held-out
 seeds 100–104, without changing the leaderboard or repairing against those results.
 Improvement on search seeds is not a guarantee of improvement on unseen seeds.
 
-Programmatic callers import `Config` and `EliteSearch` from
-`research.elitesearch`, configure Slick's template root to `research/elitesearch/prompts`, and inject
-an async callback returning `{policy.id: Measurement(scores=per_seed_scores)}`.
-Import `Measurement` and `measure_rewards(rollouts, policies, seeds=...)` from
-`research.rewards`, and construct `Rollouts(environment, executor, run)` explicitly.
-Candidate failures use `Measurement(failure="diagnostic")`; screening rejections
-use `accepted=False` without a failure. Infrastructure failures raise.
-Concurrent callbacks share a Rollouts collector and executor.
-The caller owns isolated execution and persistence through `on_checkpoint` and
-`agent.records()`. Generated code is never executed by the optimizer itself.
+Programmatic callers configure Slick's template root to
+`research/elitesearch/prompts`, construct the optimizer, and use the common runner:
+
+```python
+from rsikit import search
+from research.elitesearch import Config, EliteSearch
+
+agent = EliteSearch(
+    task,
+    provider,
+    config=Config(population_size=50, generations=20),
+    on_checkpoint=lambda current: run.save(*current.records()),
+)
+best = await search(agent, evaluate)
+```
+
+The async evaluator returns exactly `{policy.id: {seed: episode}}`.
+Failures use `episode.error`; an empty seed mapping means screened out. Infrastructure failures raise. `propose()` chooses the round,
+`update()` validates all feedback before changing state, and promotion waits for
+terminal repair outcomes. The caller owns execution and persistence. The legacy
+constructor evaluator and `run()` wrapper still work; `run()` delegates to core
+search and returns organism records. The unified selector is `--optimizer elite`.
 
 See [evaluation throughput](EVALUATOR_PERFORMANCE.md) for timing and benchmark commands.

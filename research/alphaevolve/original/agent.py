@@ -8,20 +8,21 @@ import asyncio
 import logging
 import math
 import random
-from collections.abc import Iterable, Mapping, Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from statistics import fmean
 from typing import Literal
 
-from pydantic import BaseModel, Field, ValidationError
+from pydantic import BaseModel, ConfigDict, Field, ValidationError
+from pydantic.dataclasses import dataclass as validated_dataclass
 from rich.table import Column
 from slick import parse, render
 from slick.providers import Provider, ProviderError
 
-from rsikit.episode import Episode
+from research.rewards import episode_error, episode_scores
 from rsikit.generation import WORKER_LIBRARIES
-from rsikit.optimization import Optimizer
-from rsikit.policy import InvalidPolicy, Policy, validate_policy
+from rsikit.optimization import Optimizer, validate_results
+from rsikit.policy import InvalidPolicy, PolicyDefinition
 
 from ..generation import (
     InvalidCandidate,
@@ -42,7 +43,7 @@ class Guidance(BaseModel, extra="forbid"):
 
 @dataclass(frozen=True)
 class _Candidate:
-    policy: type[Policy]
+    policy: PolicyDefinition
     score: float
     seed_scores: dict[int, float] = field(default_factory=dict)
 
@@ -58,16 +59,21 @@ class PromptIdea:
         return self.reward / max(1, self.uses)
 
 
-@dataclass(frozen=True)
+@validated_dataclass(
+    frozen=True, config=ConfigDict(strict=True, extra="forbid", allow_inf_nan=False)
+)
 class Config:
-    islands: int = 4
-    inspirations: int = 3
-    exploration: float = 0.2
-    reset_interval: int = 100
-    meta_interval: int = 0
+    batch_size: int = Field(default=10, ge=1)
+    proposals: int = Field(default=250, ge=0)
+    generation_concurrency: int = Field(default=4, ge=1)
+    islands: int = Field(default=4, ge=1)
+    inspirations: int = Field(default=3, ge=0)
+    exploration: float = Field(default=0.2, ge=0, le=1)
+    reset_interval: int = Field(default=100, ge=0)
+    meta_interval: int = Field(default=0, ge=0)
     mode: Literal["diff", "rewrite"] = "diff"
-    generation_timeout: float | None = None
-    max_repairs: int = 2
+    generation_timeout: float | None = Field(default=None, gt=0)
+    max_repairs: int = Field(default=2, ge=0)
 
 
 class AlphaEvolve(Optimizer):
@@ -99,6 +105,12 @@ class AlphaEvolve(Optimizer):
         self.islands: list[_Candidate | None] = [None] * config.islands
         self._best: _Candidate | None = None
         self._pending: dict[str, list[dict]] = {}
+        self._round = {}
+        self._repairs = {}
+        self._proposing = False
+        self._proposal_error = None
+        self._retry = []
+        self._seed_panel = None
         self.prompt_ideas = [PromptIdea("")]
         # ponytail: in-memory attempt history; bound it if searches exceed RAM.
         self.attempts: list[dict] = []
@@ -130,9 +142,12 @@ class AlphaEvolve(Optimizer):
 
     def _log_candidate(self, row, *, status=None, restored=False):
         policy = row.get("policy")
-        state = status or {"repaired": "generated", "rejected": "failed", "error": "failed"}.get(
-            row["status"], row["status"]
-        )
+        state = status or {
+            "repaired": "generated",
+            "rejected": "failed",
+            "error": "failed",
+            "execution_failed": "failed",
+        }.get(row["status"], row["status"])
         logger.info(
             "%s: %s — %s",
             policy.name if policy else f"Attempt {row['id']}",
@@ -196,10 +211,10 @@ class AlphaEvolve(Optimizer):
         )
 
     @property
-    def best(self) -> type[Policy] | None:
+    def best(self) -> PolicyDefinition | None:
         return None if self._best is None else self._best.policy
 
-    async def initialize(self, proposal: int, *, provider, record=None) -> type[Policy]:
+    async def initialize(self, proposal: int, *, provider, record=None) -> PolicyDefinition:
         """Create an initial named policy without a hand-written seed program."""
         schema = _PolicyResponse.model_json_schema()
         context = render(
@@ -219,7 +234,7 @@ class AlphaEvolve(Optimizer):
         *,
         provider,
         record=None,
-    ) -> type[Policy]:
+    ) -> PolicyDefinition:
         schema = Mutation.model_json_schema()
         context = render(
             "original/prompts/mutate.j2",
@@ -234,8 +249,8 @@ class AlphaEvolve(Optimizer):
         if record is not None:
             record["raw"] = raw
         mutation = parse(raw, Mutation)
-        return Policy.from_text(
-            apply_edits(parent.policy._implementation, mutation.edits),
+        return PolicyDefinition.from_text(
+            apply_edits(parent.policy.source, mutation.edits),
             name=mutation.name,
             description=mutation.description,
         )
@@ -249,7 +264,7 @@ class AlphaEvolve(Optimizer):
         *,
         provider,
         record=None,
-    ) -> type[Policy]:
+    ) -> PolicyDefinition:
         schema = _PolicyResponse.model_json_schema()
         context = render(
             "original/prompts/rewrite.j2",
@@ -265,7 +280,7 @@ class AlphaEvolve(Optimizer):
             record["raw"] = raw
         return parse(raw, _PolicyResponse).to_policy()
 
-    async def _repair_valid(self, record, reference, failed, diagnostic) -> type[Policy]:
+    async def _repair_valid(self, record, reference, failed, diagnostic) -> PolicyDefinition:
         # Adapt main's check/repair/recheck loop; count all repairs for this proposal.
         repairs = record.setdefault("repairs", [])
         provider = self.models[record["model"]][0]
@@ -291,14 +306,14 @@ class AlphaEvolve(Optimizer):
                     ),
                     self.config.generation_timeout,
                 )
-                content = proposal._implementation
+                content = proposal.source
                 call["implementation"] = content
                 if content == failed:
                     raise InvalidCandidate("Repair returned the unchanged implementation")
                 if reference:
                     check_rewrite(reference, content)
                 evolution_regions(content)
-                validate_policy(proposal)
+                proposal.validate()
                 call["valid"] = True
                 return proposal
             except (InvalidPolicy, ValidationError) as exc:
@@ -309,25 +324,38 @@ class AlphaEvolve(Optimizer):
                 call.update(valid=False, error=diagnostic)
         raise InvalidCandidate(f"Repair exhausted after {len(repairs)} repairs: {diagnostic}")
 
-    async def repair(self, policy: type[Policy], diagnostic: str) -> type[Policy] | None:
+    async def repair(
+        self, policy: PolicyDefinition, diagnostic: str, *, _records=None
+    ) -> PolicyDefinition | None:
         """Repair an unevaluated policy after a episode failure, preserving its ancestry.
 
         The same budget covers generation and runtime repairs. The caller evaluates
         the returned replacement through Run; failed versions remain in storage.
         Exhaustion discards pending copies of this policy and returns None.
         """
-        records = self._pending[policy.id]
+        records = list(self._pending[policy.id]) if _records is None else _records
+
+        def detach():
+            remaining = [
+                row
+                for row in self._pending.get(policy.id, [])
+                if not any(row is repaired for repaired in records)
+            ]
+            if remaining:
+                self._pending[policy.id] = remaining
+            else:
+                self._pending.pop(policy.id, None)
+
         record = max(records, key=lambda row: len(row.get("repairs", [])))
         for row in records:
             self._log_candidate(row, status="repairing")
         parent = record["parent"]
-        reference = policy._implementation if parent is None else parent.policy._implementation
+        reference = policy.source if parent is None else parent.policy.source
         try:
-            replacement = await self._repair_valid(
-                record, reference, policy._implementation, diagnostic
-            )
+            replacement = await self._repair_valid(record, reference, policy.source, diagnostic)
         except InvalidPolicy as exc:
-            for row in self._pending.pop(policy.id):
+            detach()
+            for row in records:
                 row.update(status="discarded", error=str(exc))
                 self._log_candidate(row)
             logger.warning("Discarded %s: %s", policy.name, exc)
@@ -335,7 +363,7 @@ class AlphaEvolve(Optimizer):
         for row in records:
             row.update(policy=replacement, status="repaired", revision=row.get("revision", 0) + 1)
             self._log_candidate(row)
-        self._pending.pop(policy.id)
+        detach()
         self._pending.setdefault(replacement.id, []).extend(records)
         logger.info("Repaired %s → %s — %s", policy.name, replacement.name, replacement.description)
         return replacement
@@ -358,7 +386,7 @@ class AlphaEvolve(Optimizer):
         generated = parse(raw, Guidance)
         return generated.instruction
 
-    async def generate(self, n: int = 1, *, concurrency: int = 4) -> list[type[Policy]]:
+    async def generate(self, n: int = 1, *, concurrency: int = 4) -> list[PolicyDefinition]:
         """Attempt n proposals and return survivors after bounded repair.
 
         Proposals are neither executed nor saved. Only a successfully returned
@@ -394,17 +422,133 @@ class AlphaEvolve(Optimizer):
             self._pending.setdefault(record["policy"].id, []).append(record)
         return [record["policy"] for record in records]
 
-    async def propose(self, n: int = 1) -> list[type[Policy]]:
-        return await self.generate(n)
+    @property
+    def done(self) -> bool:
+        return (
+            not self._proposing
+            and self._proposal_error is None
+            and not self._retry
+            and not self._pending
+            and not self._round
+            and not self._repairs
+            and self._attempt_offset + len(self.attempts) >= self.config.proposals
+        )
 
-    def update(self, results: Iterable[tuple[type[Policy], Episode]]) -> None:
-        """Rank candidates by mean episode return within this update."""
-        returns = {}
-        for policy, episode in results:
-            if not episode.rewards:
-                raise ValueError("Expected a nonempty episode")
-            returns.setdefault(policy.id, []).append(episode.total_reward)
-        self.update_scores({policy_id: fmean(values) for policy_id, values in returns.items()})
+    async def propose(self) -> list[PolicyDefinition]:
+        if self._proposing or self._round:
+            raise RuntimeError("Previous proposal round is still outstanding")
+        if self._proposal_error is not None:
+            raise self._proposal_error
+        self._proposing = True
+        try:
+            while True:
+                policies = []
+                if self._repairs:
+                    slots = asyncio.Semaphore(self.config.generation_concurrency)
+
+                    groups = {id: list(self._pending[id]) for id in self._repairs}
+
+                    async def repair(policy_id, diagnostic):
+                        async with slots:
+                            records = groups[policy_id]
+                            policy = records[0]["policy"]
+                            replacement = await self.repair(policy, diagnostic, _records=records)
+                            self._repairs.pop(policy_id, None)
+                            return replacement
+
+                    tasks = [
+                        asyncio.create_task(repair(id, diagnostic))
+                        for id, diagnostic in list(self._repairs.items())
+                    ]
+                    try:
+                        policies = [p for p in await asyncio.gather(*tasks) if p is not None]
+                    finally:
+                        for task in tasks:
+                            task.cancel()
+                        await asyncio.gather(*tasks, return_exceptions=True)
+                elif self._pending:
+                    # Restored or interrupted proposals retain their original attempt identities.
+                    policies = [rows[0]["policy"] for rows in self._pending.values()]
+                elif self._retry:
+                    # Restored original attempts keep their IDs, parents, and repair budgets.
+                    slots = asyncio.Semaphore(self.config.generation_concurrency)
+
+                    async def retry(record):
+                        async with slots:
+                            result = await self._propose(record)
+                            self._retry.remove(record)
+                            if result is not None:
+                                self._pending.setdefault(result["policy"].id, []).append(result)
+                                return result["policy"]
+
+                    tasks = [asyncio.create_task(retry(row)) for row in list(self._retry)]
+                    try:
+                        policies = [p for p in await asyncio.gather(*tasks) if p is not None]
+                    finally:
+                        for task in tasks:
+                            task.cancel()
+                        await asyncio.gather(*tasks, return_exceptions=True)
+                else:
+                    remaining = self.config.proposals - self._attempt_offset - len(self.attempts)
+                    if remaining <= 0:
+                        return []
+                    policies = await self.generate(
+                        min(self.config.batch_size, remaining),
+                        concurrency=self.config.generation_concurrency,
+                    )
+                if policies:
+                    self._round = {p.id: p for p in policies}
+                    self.evaluation_started(self._round.values())
+                    return list(self._round.values())
+                logger.info("No surviving policies in proposal round")
+        except BaseException as exc:
+            self._proposal_error = exc
+            ready = {}
+            for row in self.attempts:
+                if row["status"] in ("generated", "repaired") and row.get("policy") is not None:
+                    policy = row["policy"]
+                    pending = self._pending.setdefault(policy.id, [])
+                    if not any(saved is row for saved in pending):
+                        pending.append(row)
+                    ready[policy.id] = policy
+            # Drain returned siblings before surfacing a generation error; cancellation is immediate.
+            if ready and isinstance(exc, Exception):
+                self._round = ready
+                self.evaluation_started(ready.values())
+                return list(ready.values())
+            raise
+        finally:
+            self._proposing = False
+
+    def discard(self, policy, reason):
+        for record in self._pending.pop(policy.id, []):
+            record.update(status="discarded", error=reason)
+            self._log_candidate(record)
+
+    def _accept_episodes(self, results):
+        panels = {id: episode_scores(episodes) for id, episodes in results.items()}
+        self.update_scores(
+            {id: fmean(scores.values()) for id, scores in panels.items()}, seed_scores=panels
+        )
+
+    def update(self, results) -> None:
+        panel = validate_results(results, self._round, seed_panel=self._seed_panel)
+        self._accept_episodes(
+            {id: r for id, r in results.items() if (r and episode_error(r) is None)}
+        )
+        for policy_id, result in results.items():
+            error = episode_error(result)
+            self._repairs.pop(policy_id, None)
+            if error is not None:
+                self._repairs[policy_id] = error
+                for row in self._pending[policy_id]:
+                    row.update(status="execution_failed", error=error)
+                    self._log_candidate(row)
+            elif not result:
+                self.discard(self._round[policy_id], "Evaluation rejected")
+        self._seed_panel = panel
+        self._round.clear()
+        self._log_leaderboard()
 
     def update_scores(
         self,
@@ -454,9 +598,26 @@ class AlphaEvolve(Optimizer):
         )
         return island_id, parent, inspirations
 
-    async def _propose(self) -> dict | None:
-        attempt_id = self._attempt_offset + len(self.attempts) + 1
-        model_id = self.rng.choices(range(len(self.models)), [w for _, w in self.models])[0]
+    async def _propose(self, record=None) -> dict | None:
+        resuming = record is not None
+        if resuming:
+            attempt_id, model_id = record["id"], record["model"]
+            record.setdefault("interruptions", []).append(
+                {key: record[key] for key in ("status", "error", "raw") if key in record}
+            )
+            record["status"] = "generating"
+        else:
+            attempt_id = self._attempt_offset + len(self.attempts) + 1
+            model_id = self.rng.choices(range(len(self.models)), [w for _, w in self.models])[0]
+            record = {"id": attempt_id, "model": model_id, "status": "generating"}
+            if self._streaming_progress is not None:
+                offset, size, total = self._streaming_progress
+                group = (attempt_id - offset - 1) // size
+                record["batch"] = f"stream-{offset}-{group + 1}"
+                self._log_batch(record["batch"], min(size, total - group * size), streaming=True)
+            else:
+                record["batch"] = self._batch_number
+            self.attempts.append(record)
         provider = self.models[model_id][0]
         failures = (
             self._prior_failures
@@ -466,49 +627,50 @@ class AlphaEvolve(Optimizer):
                 if row.get("error")
             ]
         )[-3:]
-        record = {"id": attempt_id, "model": model_id, "status": "generating"}
-        if self._streaming_progress is not None:
-            offset, size, total = self._streaming_progress
-            group = (attempt_id - offset - 1) // size
-            record["batch"] = f"stream-{offset}-{group + 1}"
-            self._log_batch(record["batch"], min(size, total - group * size), streaming=True)
-        else:
-            record["batch"] = self._batch_number
-        self.attempts.append(record)
         self._log_candidate(record)
         try:
-            parent = idea = None
-            island_id = self._founding_island(attempt_id)
-            if island_id is not None:
-                operation = self.initialize
-                arguments = (attempt_id,)
+            idea = None
+            if resuming and "island" in record:
+                island_id, parent = record["island"], record["parent"]
+                inspirations = record.get("inspirations", [])
             else:
-                island_id, parent, inspirations = self.sample()
-            record.update(parent=parent, island=island_id)
-            if parent is not None:
-                idea = await self._choose_guidance(attempt_id, parent, failures, provider, record)
-                idea.uses += 1
-                variant = self.rng.choices(
-                    [v for v, _ in self.variants], [w for _, w in self.variants]
-                )[0]
-                guidance = "\n".join((variant, idea.instruction))
-                record["guidance"] = guidance
+                parent, inspirations = None, []
+                island_id = self._founding_island(attempt_id)
+                if island_id is None:
+                    island_id, parent, inspirations = self.sample()
+                record.update(parent=parent, island=island_id, inspirations=inspirations)
+            if parent is None:
+                operation, arguments = self.initialize, (attempt_id,)
+            else:
+                if resuming and "guidance" in record:
+                    idea = record.get("idea") or self.prompt_ideas[0]
+                    guidance = record["guidance"]
+                else:
+                    idea = await self._choose_guidance(
+                        attempt_id, parent, failures, provider, record
+                    )
+                    idea.uses += 1
+                    variant = self.rng.choices(
+                        [v for v, _ in self.variants], [w for _, w in self.variants]
+                    )[0]
+                    guidance = "\n".join((variant, idea.instruction))
+                    record.update(guidance=guidance, idea=idea)
                 operation = {"diff": self.mutate, "rewrite": self.rewrite}[self.config.mode]
                 arguments = (parent, inspirations, guidance, failures)
             logger.info("Requesting policy %s via %s", attempt_id, operation.__name__)
             self.generation_calls += 1
-            reference = "" if parent is None else parent.policy._implementation
+            reference = "" if parent is None else parent.policy.source
             try:
                 proposal = await asyncio.wait_for(
                     operation(*arguments, provider=provider, record=record),
                     self.config.generation_timeout,
                 )
-                content = proposal._implementation
+                content = proposal.source
                 record["content"] = content
                 if parent is not None:
                     check_rewrite(reference, content)
                 evolution_regions(content)
-                validate_policy(proposal)
+                proposal.validate()
                 policy = proposal
             except (InvalidPolicy, ValidationError) as exc:
                 if isinstance(exc, ValidationError) and "raw" not in record:

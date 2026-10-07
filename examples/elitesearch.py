@@ -6,9 +6,7 @@ import json
 import logging
 import math
 import os
-import signal
-import sys
-from contextlib import AsyncExitStack, suppress
+from contextlib import AsyncExitStack
 from pathlib import Path
 
 from slick import prompts
@@ -16,48 +14,12 @@ from slick.providers import OpenRouterAPI
 
 from research import elitesearch
 from research.elitesearch import Config, EliteSearch
+from research.elitesearch.videos import generation_videos
+from research.rewards import episode_error, episode_scores
 from research.rewards import measure_rewards as measure
 from research.rollouts import Rollouts
 from rsikit import Executor, Run
 from rsikit.envs.tasks import TASKS, make_environment
-
-
-async def generation_videos(queue, path, top, workers):
-    output = path / "videos"
-    output.mkdir(exist_ok=True)
-    while (generation := await queue.get()) is not None:
-        log_path = output / f"generation-{generation:02}.log"
-        with log_path.open("w") as log:
-            process = await asyncio.create_subprocess_exec(
-                sys.executable,
-                "-m",
-                "examples.blackjack_videos",
-                str(path),
-                "--output",
-                str(output),
-                "--top",
-                str(top),
-                "--workers",
-                str(workers),
-                "--through-generation",
-                str(generation),
-                stdout=log,
-                stderr=log,
-                start_new_session=True,
-            )
-            try:
-                code = await process.wait()
-            except asyncio.CancelledError:
-                if process.returncode is None:
-                    with suppress(ProcessLookupError):
-                        os.killpg(process.pid, signal.SIGTERM)
-                await process.wait()
-                raise
-        if code:
-            raise RuntimeError(f"Generation {generation} video export failed; see {log_path}")
-        logging.getLogger("research.elitesearch").info(
-            "Generation %s videos: %s", generation, output / "index.html"
-        )
 
 
 async def run_search(agent, run, rollouts, *, seeds, heldout_seeds, video_top=0, video_workers=2):
@@ -106,7 +68,7 @@ async def run_search(agent, run, rollouts, *, seeds, heldout_seeds, video_top=0,
             agent.best.to_file(run.path / "best.py")
             logger.info("Evaluating best elite on held-out seeds")
             result = (await measure(rollouts, [agent.best], heldout_seeds))[agent.best.id]
-            summary["heldout"] = dict(scores=result.scores, failure=result.failure)
+            summary["heldout"] = dict(scores=episode_scores(result), failure=episode_error(result))
         if video_task is not None:
             video_queue.put_nowait(None)
             logger.info("Waiting for queued generation videos to finish")
