@@ -73,7 +73,8 @@ the interpreter and dependency versions rather than asserting every combination.
 2. Tag that exact revision. Build the final wheel and sdist from it and retain
    checksums plus validation results. Upload only those reviewed files using the
    maintainer's configured package-index credentials/trusted publishing setup.
-3. Run **Publish documentation** on the same release tag. It builds only the curated
+3. Push that reviewed revision to `public-release`. **Publish documentation** runs
+   automatically on each push to that branch. It builds only the curated
    public tree, checks rendered API coverage, and publishes via the `github-pages`
    environment. Configure an environment review gate if desired. The source/edit
    links use the selected commit SHA.
@@ -84,4 +85,4 @@ the interpreter and dependency versions rather than asserting every combination.
    redirects for an older website.
 
 No workflow here automatically uploads to PyPI or makes the repository public.
-The manual docs workflow should be dispatched only after the candidate review.
+Push to `public-release` only when the documentation is ready to publish.

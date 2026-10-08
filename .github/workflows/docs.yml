@@ -1,8 +1,9 @@
 name: Publish documentation
 
-# Run manually on the reviewed release tag. Building a PR never publishes it.
+# Publish reviewed updates pushed to public-release. PR builds do not publish.
 on:
-  workflow_dispatch:
+  push:
+    branches: [public-release]
 
 permissions:
   contents: read

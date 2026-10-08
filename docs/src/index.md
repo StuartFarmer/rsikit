@@ -1,9 +1,8 @@
 # rsikit
 
-Generate, evaluate, and optimize Python policies in Gymnasium environments.
-rsikit supplies the policy lifecycle, episode evaluation, process workers, and
-saved runs. Included research optimizers use those pieces to search over policy
-source code.
+We are a collective of Silicon Valley engineers, Wall Street financial professionals, and PhDs building the next generation of self-improving intelligence. We are inspired by nature, complex systems, and emergent behavior. The best solutions are the ones evolution has perfected over billions of years.
+
+We also apply our research and methods to the financial sector and are open to collaboration on all fronts.
 
 | Start here | What you will find |
 | --- | --- |

@@ -21,7 +21,7 @@ repository-visibility change, live model request, or docs deployment was perform
 | Package metadata | Wheel and sdist pass `twine check`; `uv lock --check` passes. |
 | Clean public snapshot | Rebuilds wheel/sdist with content and metadata checks passing; featured-example and package-boundary tests pass (3 tests); `uv sync --locked --extra dev --extra docs` and docs build/rendered checks pass. |
 | Maze installer | Pinned source compiled on macOS; installed LICENSE/NOTICE match retained originals; all three native Maze tests pass on Python 3.10.18. |
-| Workflow configuration | Three workflows parse; read-only default permissions; docs publishing is manual and grants deployment permissions only to the deploy job. Remote GitHub runs are not claimed. |
+| Workflow configuration | Three workflows parse; read-only default permissions; docs publish on pushes to `public-release`, with deployment permissions granted only to the deploy job. |
 
 Optional checks report explicit skips when their runtime facilities are unavailable;
 passing tests do not establish search-quality or paper-reproduction claims.
