@@ -1,0 +1,8 @@
+Summarize constructive guidance for this task:
+{{ instance.task }}
+[Prior long-term reflection]
+{{ prior }}
+[New short-term reflections]
+{% for insight in insights %}{{ insight }}
+{% endfor %}
+Combine the useful insights into fewer than 50 words.

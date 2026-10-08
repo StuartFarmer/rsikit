@@ -1,0 +1,16 @@
+Improve the parent using free-form variation. Choose the scope of the changes.
+Use the evaluator's feedback and complementary ideas from the inspirations.
+
+Task (objective: {{ instance.direction }} the evaluator score):
+<task>{{ instance.task }}</task>
+Parent and evaluation data:
+{{ parent | tojson }}
+Inspirations and evaluation data:
+{{ inspirations | tojson }}
+
+Return a complete policy implementation inside the requested JSON response.
+Do not add commentary or an extra code fence.
+
+Return JSON matching {{ schema | tojson }}. The implementation must define exactly
+one Solution(Policy) class importing Policy from rsikit, with async act(self, observation).
+Preserve the Policy constructor and lifecycle; name and describe the policy.

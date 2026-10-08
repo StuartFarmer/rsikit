@@ -1,0 +1,23 @@
+Repair this organism using its actual validation or execution failure. Keep the
+useful idea, correct the error and return complete working Python. The failed
+material may be code, malformed JSON, or an invalid edit proposal.
+
+{% include 'context.j2' %}
+
+Original reference (empty for new ideas and remixes):
+<reference>{{ reference }}</reference>
+The whole organism is editable. Do not simply revert to the reference.
+
+<failed>{{ failed }}</failed>
+<diagnostic>{{ diagnostic }}</diagnostic>
+
+Return only JSON matching this schema. No Markdown fences:
+{{ schema | tojson }}
+
+---
+
+# Output Format
+
+Respond with ONLY a JSON value matching this schema — no preamble, no commentary, nothing outside the JSON.
+
+{{ schema_json }}

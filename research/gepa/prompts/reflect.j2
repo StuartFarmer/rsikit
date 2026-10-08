@@ -1,0 +1,13 @@
+Improve this policy using its measured training episodes.
+Task: {{ instance.task }}
+
+Current policy:
+{{ policy.to_text() }}
+
+Training evidence (encoded trajectories may be truncated):
+{{ examples | tojson }}
+
+Explain the improvement in the description; return the complete implementation,
+not a patch. Define exactly one Solution(Policy) importing Policy from rsikit,
+with async act(self, observation). Preserve the Policy constructor and lifecycle.
+Maximize episode reward. Return only JSON matching {{ schema | tojson }}.

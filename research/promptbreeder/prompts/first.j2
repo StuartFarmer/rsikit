@@ -1,0 +1,10 @@
+Improve this policy for {{ instance.task }}.
+Mutation instruction: {{ mutation }}
+Parent score (higher is better): {{ parent.score }}
+Per-seed scores: {{ parent.scores | tojson }}
+Parent implementation:
+{{ parent.policy.to_text() }}
+
+Return a complete Solution(Policy) with async act(self, observation).
+Preserve the Policy constructor and lifecycle. Name and describe your change.
+Return only JSON matching {{ schema | tojson }}.

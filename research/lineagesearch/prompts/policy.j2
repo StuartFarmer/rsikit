@@ -1,0 +1,35 @@
+Executable policy contract (applies to every proposal, implementation and repair):
+{{ instance.libraries }}
+- The worker executes your source in a fresh module. Include every import explicitly:
+  use `from rsikit import Policy` with `class Solution(Policy)`, or `import rsikit`
+  with `class Solution(rsikit.Policy)`. `from rsikit import Policy` does not bind rsikit.
+- The exact construction call is:
+  `Solution(observation_space, action_space, instructions=instructions)`.
+  Prefer NOT defining __init__. Inherit Policy.__init__ and initialize all state in reset.
+  If a constructor is necessary, its exact compatible form is:
+  `def __init__(self, observation_space, action_space, *, instructions=""):`
+  followed by `super().__init__(observation_space, action_space, instructions=instructions)`.
+  There is no rng constructor argument. Do not use __init__(self) or __init__(instructions).
+- A fresh policy instance is constructed for EACH evaluation episode. It receives
+  `await policy.reset(seed=seed)`, then `await policy.act(observation)` at each step,
+  and `await policy.close()` at the end. No state survives between episodes.
+- `await super().reset(seed=seed)` initializes self.rng and returns None, not an observation.
+  act receives only an observation: no reward, termination flag, environment or evaluator.
+  Online identification may use observations/actions within one episode; learning from
+  rewards or previous evaluation episodes is unavailable through this interface.
+- No network or host files. Do not hardcode evaluation seeds or add a main block.
+
+Use this working structure, replacing the example action with the proposed mechanism:
+```python
+import numpy as np
+from rsikit import Policy
+
+class Solution(Policy):
+    async def reset(self, *, seed=None):
+        await super().reset(seed=seed)
+        self.steps = 0  # Initialize gains, matrices and other episode state here.
+
+    async def act(self, observation):
+        self.steps += 1
+        return self.action_space.sample()
+```

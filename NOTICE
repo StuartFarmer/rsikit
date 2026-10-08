@@ -1,0 +1,27 @@
+rsikit
+Copyright 2026 rsikit contributors
+
+Original rsikit code and documentation are licensed under Apache-2.0.
+Third-party code, assets and datasets retain their own licenses and notices.
+
+Algorithm provenance and notices:
+- research/alphaevolve/NOTICE and LICENSE.funsearch (DeepMind FunSearch)
+- research/shinkaevolve/NOTICE (independent ShinkaEvolve adaptation)
+- research/evox/SOURCES.md and UPSTREAM_LICENSE (SkyDiscover)
+- research/reevo/LICENSE, research/gepa/LICENSE, research/promptbreeder/LICENSE
+- research/ocean/LICENSE and NOTICE (PufferLib/Ocean, including the Maze adapter)
+
+Bundled assets:
+- Latin Modern fonts: rsikit/envs/fonts/GUST-FONT-LICENSE.TXT and README.md
+- Kenney playing cards: rsikit/envs/data/blackjack/License.txt (CC0)
+
+Bundled Bitcoin price data:
+- Coin Metrics Community API, https://coinmetrics.io/
+- CC BY-NC 4.0: https://creativecommons.org/licenses/by-nc/4.0/
+- rsikit/envs/data/README.md describes the training-data transformation.
+- data/bitcoin/metadata.json records provenance of training and validation data.
+Apache-2.0 does not relicense this noncommercial dataset.
+
+The private development checkout's data/forex export has no recorded
+redistribution license. It is excluded from packages and the public source
+snapshot. It is not covered by this grant.

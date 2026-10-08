@@ -1,0 +1,23 @@
+Improve one elite through focused code edits. Preserve its useful behavior and
+make a testable improvement in its parameters, logic, representation or efficiency.
+Return exact search/replacement edits; each search must match exactly once.
+Edits apply sequentially. The whole organism is editable.
+
+{% include 'context.j2' %}
+
+Elite {{ parent.id }}: {{ parent.name }} — {{ parent.description }}
+Measured mean: {{ parent.score }}; seed rewards: {{ parent.seed_scores | tojson }}
+<source>
+{{ parent.implementation }}
+</source>
+
+Return only JSON matching this schema. No Markdown fences:
+{{ schema | tojson }}
+
+---
+
+# Output Format
+
+Respond with ONLY a JSON value matching this schema — no preamble, no commentary, nothing outside the JSON.
+
+{{ schema_json }}

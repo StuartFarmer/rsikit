@@ -1,0 +1,22 @@
+Repair this failed policy while preserving its experimental intent.
+{% include "evidence.j2" %}
+
+Trial and failure diagnostic:
+{{ trial | tojson }}
+Failed model output:
+<failed>{{ failed }}</failed>
+
+Correct the reported JSON, Python, interface, or execution error. Return a complete
+working replacement, not an explanation. Do not repeat the failed implementation.
+Keep the hypothesis and family mechanism. For a duplicate, implement a substantive
+distinct variant of the proposed experiment. Preserve the original parent's evolution
+markers and immutable text; without markers the full implementation may change.
+
+Follow the exact executable contract and skeleton above, checking the whole interface
+as well as the reported error. For constructor failures, remove the custom __init__
+and move its state initialization into reset after await super().reset(seed=seed).
+Ensure imports match the superclass spelling. Replace unavailable imports with
+alternatives from the available scientific stack above.
+
+# Output Format
+Return only JSON matching {{ schema | tojson }}.

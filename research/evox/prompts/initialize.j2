@@ -1,0 +1,8 @@
+Create one initial policy for this task. Return only the requested JSON object.
+
+Task (objective: {{ instance.direction }} the evaluator score):
+<task>{{ instance.task }}</task>
+
+Return JSON matching {{ schema | tojson }}. The implementation must define exactly
+one Solution(Policy) class importing Policy from rsikit, with async act(self, observation).
+Preserve the Policy constructor and lifecycle; name and describe the policy.

@@ -1,0 +1,22 @@
+Develop a new search instruction to help a coding model improve programs for this task.
+
+Task: {{ instance.task }}
+Background and evaluator contract: {{ instance.context }}
+
+Evaluated program:
+{{ parent.policy.source }}
+Score (maximized): {{ parent.score }}
+
+Existing search instructions, average positive offspring improvement, and uses:
+{{ ideas | tojson }}
+
+Recent failures:
+{{ failures | tojson }}
+
+Suggest a different representation, algorithmic approach, or productive experiment
+informed by these results. Preserve the task, immutable code boundaries, and evaluator.
+Return a concrete search instruction, not source code.
+
+# Output Format
+Return only JSON matching this schema, without Markdown fences:
+{{ schema | tojson }}

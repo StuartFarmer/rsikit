@@ -1,0 +1,12 @@
+Implement this one experimental approach as a complete executable policy.
+{% include "evidence.j2" %}
+Approach: {{ approach | tojson }}
+
+Return Python defining exactly one top-level Solution class using the contract above.
+Initialize episode state in reset rather than inventing a constructor signature.
+Change the executed mechanism, not merely its name, comments, or unused code.
+Preserve the parent's EVOLVE-BLOCK markers and all text outside them exactly. Without markers,
+the whole implementation may change. Do not introduce new evolution markers.
+
+# Output Format
+Return only JSON matching {{ schema | tojson }}.

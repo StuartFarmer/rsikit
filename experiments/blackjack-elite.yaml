@@ -1,0 +1,44 @@
+version: 1
+env: Blackjack
+optimizer: elite
+model: gpt-oss-120b:nitro
+output: ../runs/blackjack-elitetable
+search_seed: 0
+environment:
+  shoes_per_episode: 24
+optimizer_options:
+  population: 100
+  generations: 25
+  elites: 20
+  max_repairs: 3
+  new_fraction: 0.2
+  remix_fraction: 0.4
+  remix_parents: 3
+generation:
+  provider: openrouter
+  concurrency: 10
+  timeout: 120
+  max_input_tokens: 65536
+  max_output_tokens: 65536
+evaluation:
+  seeds:
+  - 0
+  - 1
+  - 2
+  - 3
+  - 4
+  workers: 8
+  timeout_per_seed: 30
+  score_key: return
+selection:
+  finalists: 1
+  validation_seeds: []
+  test_seeds:
+  - 100
+  - 101
+  - 102
+  - 103
+  - 104
+videos:
+  top: 1
+  workers: 1

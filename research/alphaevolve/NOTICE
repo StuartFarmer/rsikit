@@ -1,0 +1,36 @@
+AlphaEvolve implementation for RSIKit using Slick and Pydantic
+
+This is an independent implementation of the published AlphaEvolve algorithm,
+not Google DeepMind's internal agent. No AlphaEvolve agent source is published
+in the official accompanying repository.
+
+The original island founding and weaker-half reseeding in original/agent.py adapt
+the algorithm in the official FunSearch implementation:
+https://github.com/google-deepmind/funsearch/blob/main/implementation/programs_database.py
+Copyright 2023 DeepMind Technologies Limited
+Licensed under the Apache License, Version 2.0 (see LICENSE.funsearch).
+
+Modifications: ordinary Python state and RNG; arbitrary complete source text;
+per-cell, per-objective champions; caller-selected target metric; reset by
+completed attempts; asyncio workers; injected evaluators; external Slick prompts.
+
+AlphaEvolve's official results and verification code are available at:
+https://github.com/google-deepmind/alphaevolve_results
+They contain problem-specific results, not reusable agent code, and are not vendored.
+
+RSIKit adaptation: Python Solution classes, Pydantic JSON proposals instead of
+paper-format text diffs, syntax/interface checks, and isolated Gymnasium evaluation.
+Adapted from the local slick-bits implementation; no runtime dependency on slick-bits.
+The original variant preserves local baseline behavior from commit 5ba5685.
+The improved variant preserves changes from commit 8a6bc96: independent island
+founders instead of copying the best initial program to every island, plus
+per-seed rewards as prompt feedback. Both are local adaptations; neither is
+Google DeepMind's internal AlphaEvolve agent.
+
+The paper variant independently implements the mechanisms described in sections
+2.1-2.6 of https://arxiv.org/abs/2506.13131 . Its persistent per-metric/per-niche
+archive, rank sampling, descriptor discretization and member migration are local
+algorithm choices because those details are not specified by the paper. It reuses
+the local generation and repair machinery, with structured JSON diffs rather than
+the paper's textual SEARCH/REPLACE envelope. See docs/ALPHAEVOLVE.md for coverage
+and experimental differences; no reproduced paper or BipedalWalker score is claimed.

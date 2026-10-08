@@ -1,0 +1,20 @@
+Write a Python policy for Gymnasium CartPole-v1 using this approach: {{ approach }}.
+
+Actions: 0 (push left) or 1 (push right). The observation is [cart position, cart velocity,
+pole angle in radians, pole angular velocity]. Each surviving step earns 1 reward.
+The episode terminates when the pole falls or the cart leaves the permitted range;
+it is truncated after {{ max_steps }} steps. Maximize total episode reward.
+
+Implement the named approach, so these five requests test different behaviors:
+- random: sample self.action_space; ignore the observation. This is a baseline.
+- angle_only: select the action using only the sign of pole angle.
+- proportional_derivative: combine pole angle and angular velocity with fixed gains.
+- full_state_feedback: use all four observation components in a linear controller,
+  including cart centering and damping as well as pole stabilization.
+- predictive_rollout: predict motion for candidate actions with a small internal
+  physical model and short lookahead, then choose the lower-cost action. Use
+  cart position and pole angle in the cost. Keep runtime under one second per act.
+
+For predictive rollout the standard CartPole constants are gravity=9.8,
+cart mass=1.0, pole mass=0.1, half pole length=0.5, force magnitude=10.0,
+and timestep=0.02 seconds. Do not instantiate or step an environment inside a policy.

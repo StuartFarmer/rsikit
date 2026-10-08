@@ -1,0 +1,9 @@
+# Output Format
+Return only JSON matching {{ schema | tojson }}.
+The approaches array must contain exactly {{ count }} entries. Count them before finishing.
+Every entry has exactly these keys: hypothesis, mechanism, change, test.
+Keep each field to one short sentence, about 20 words or fewer. No extra commentary.
+Complete the JSON object and stop immediately after the {{ count }}th entry.
+When repairing the latest failed partition, preserve its usable entries: correct invalid
+fields, remove only excess entries, or add only the missing entries needed for the quota.
+Return the complete corrected partition; do not append a second list of alternatives.

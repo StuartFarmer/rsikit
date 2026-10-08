@@ -1,0 +1,24 @@
+Generate a policy for the following task. Choose its short descriptive name and a one-sentence description of its approach.
+
+{{ task }}
+
+Implement a complete Python module defining Solution(Policy), importing
+Policy from rsikit. Implement async act(self, observation) returning an action
+inside the environment's action space. Inherit Policy.__init__; do not define an
+__init__ method. The executor supplies the environment's observation/action spaces
+and static instructions. Read them through self.observation_space, self.action_space,
+and self.instructions. Do not generate, replace, or assign these instructions.
+
+Initialize and clear policy-owned state in async reset(self, *, seed=None), calling
+await super().reset(seed=seed) first. The inherited reset seeds self.rng and
+self.action_space. Optional async close(self) releases resources.
+
+{{ libraries }}
+
+Do not access the network, credentials, or host files. Do not call an LLM, create an environment,
+or include an executable main block. The implementation must be Python code,
+without Markdown fences.
+
+# Output Format
+Return only JSON matching this schema:
+{{ schema | tojson }}

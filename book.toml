@@ -1,0 +1,23 @@
+[book]
+title = "rsikit"
+description = "Generate, evaluate, and optimize Python policies."
+language = "en"
+src = "docs/src"
+
+[build]
+build-dir = "book"
+create-missing = false
+extra-watch-dirs = ["rsikit", "research", "examples", "scripts/mdbook_api.py"]
+
+[preprocessor.api]
+command = "uv run --locked --extra docs --python '>=3.11' python scripts/mdbook_api.py"
+before = ["links"]
+
+[output.html]
+no-section-label = true
+git-repository-url = "https://github.com/StuartFarmer/rsikit"
+edit-url-template = "https://github.com/StuartFarmer/rsikit/blob/main/{path}"
+site-url = "/rsikit/"
+
+[output.html.playground]
+runnable = false

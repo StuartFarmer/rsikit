@@ -1,0 +1,16 @@
+name: Optional native integration checks
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  container:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - run: docker build --build-arg OCEAN=1 -t rsikit:check .
+      - run: docker run --rm --network none --user 1000:1000 -e HOME=/tmp rsikit:check python -m unittest discover -s tests -v

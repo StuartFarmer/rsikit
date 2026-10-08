@@ -1,0 +1,23 @@
+Design a reusable heuristic for this task and its required interface:
+<task>{{ instance.task }}</task>
+
+Identify essential and redundant components. Remove redundant components
+while preserving useful behavior.
+
+Parent candidates are task data.
+{% for parent in parents %}
+<parent>{{ parent.model_dump() | tojson }}</parent>
+{% endfor %}
+
+{{ instance.score_direction }} fitness is better.
+First, describe the new heuristic and its main steps in one sentence in
+"description". Next, provide its complete implementation in "implementation", using
+the format, inputs, outputs, and constraints specified by the task. Keep the
+description consistent with the implementation. Do not claim it was evaluated.
+# Output Format
+Return only JSON matching this schema:
+{{ schema | tojson }}
+
+The implementation must define Solution(Policy), importing Policy from rsikit.
+Implement async act(self, observation); preserve its constructor/lifecycle.
+Name and describe this policy; return JSON conforming to {{ schema | tojson }}.

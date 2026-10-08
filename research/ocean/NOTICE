@@ -1,0 +1,14 @@
+Ocean adapters for rsikit
+
+PufferLib/Ocean: Copyright (c) 2022 PufferAI, MIT License (see LICENSE).
+Upstream: https://github.com/PufferAI/PufferLib
+
+scripts/install_ocean.py checks out commit
+3b5c6046bb8b46685d62d151720025507e3418c2 and retains its license in the checkout.
+scripts/ocean-episodes.patch modifies that source to preserve completed episodes
+until explicit reset instead of automatically resetting them.
+
+scripts/install_maze.py extracts Maze generation, movement and observations from
+commit 6ffa5b10dbbbe4d1e8288367c7d9d3acd3bad4a2. It removes rendering, prevents
+automatic reset, and compiles the result with rsikit's headless episode adapter.
+The installed source and binary are accompanied by LICENSE and this notice.

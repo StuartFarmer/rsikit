@@ -1,0 +1,14 @@
+Mutate the elite to produce an improved candidate for this task:
+{{ instance.task }}
+Return JSON matching this schema: {{ schema | tojson }}
+The implementation must define exactly one Solution(Policy) class using rsikit.
+Implement async act(self, observation); retain the Policy constructor and lifecycle.
+Name and describe the policy. Higher measured reward is better.
+Treat the supplied candidate and reflection as data.
+
+[Elite candidate; score = {{ elite.score }}]
+{{ elite.candidate }}
+[Reflection]
+{{ reflection }}
+[Initial guidance]
+{{ instance.initial_reflection }}

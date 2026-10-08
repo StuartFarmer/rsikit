@@ -1,0 +1,11 @@
+Define two concise variation instructions tailored to the downstream task.
+Refine means small, structure-preserving improvements within the current approach.
+Diverge means exploring different structures, representations, or approaches.
+Only assume constraints and available resources explicitly stated in the task.
+Do not solve the task; these instructions will guide later candidate generation.
+
+Task (objective: {{ instance.direction }} the evaluator score):
+<task>{{ instance.task }}</task>
+
+# Output Format
+Return only JSON matching this schema: {{ schema | tojson }}

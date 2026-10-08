@@ -1,0 +1,37 @@
+.venv/
+# Created by upstream PufferLib on import.
+/resources
+__pycache__/
+*.py[cod]
+.ruff_cache/
+.pytest_cache/
+.mypy_cache/
+.coverage*
+build/
+dist/
+*.egg-info/
+# Generated run artifacts (at any depth).
+runs/
+outputs/
+logs/
+artifacts/
+exports/
+videos/
+*.sqlite
+*.sqlite-*
+*.log
+*.jsonl
+.ipynb_checkpoints/
+.DS_Store
+.env
+.env.*
+!.env.example
+paper_workspace
+.superpowers/
+accompanying/
+site/
+book/
+# Local drafts predating the public documentation; retained, never published.
+docs/VISUALIZATION_PROPOSAL.md
+docs/research/
+docs/superpowers/

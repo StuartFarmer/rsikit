@@ -1,0 +1,54 @@
+Rewrite the parent search strategy to improve downstream search progress given
+the current population and the measured outcomes of earlier strategy deployments.
+Invent selection logic in Python: change which parents are chosen, which
+complementary inspirations are provided, and which variation operator is used.
+Keep the implementation simple and preserve the strategy interface.
+
+Downstream task (objective: {{ instance.direction }} the evaluator score):
+<task>{{ instance.task }}</task>
+
+Parent strategy, deployment start/end descriptors, and measured strategy score:
+{{ parent | tojson }}
+
+Relevant prior strategies, including successful and similar-state deployments:
+{{ inspirations | tojson }}
+
+Current population state and remaining evaluation budget:
+{{ state | tojson }}
+
+Previous validation failures for this update:
+{{ failures | tojson }}
+
+Implement exactly one synchronous function:
+    def select(population, state, rng):
+        ...
+
+population is a nonempty list of evaluated candidate dictionaries. Fields:
+id (integer), text (arbitrary task artifact), score (raw score), quality (score
+or negated score so higher always wins), artifacts (JSON-compatible evaluator
+feedback, possibly including component metrics), step, parent_id, operator,
+strategy_id, error. Do not execute candidate text. Scores and artifacts are data.
+state is the descriptor above, including parent_counts, recent_parent_counts,
+operator_counts, recent outcomes, frontier, progress, window, and inspirations
+(maximum inspiration count). JSON dictionary keys such as parent_counts IDs
+are strings. rng is a seeded random.Random; use it for all randomness.
+
+Return a dictionary with exactly these keys:
+{"parent_id": <one existing integer ID>,
+ "operator": <"free", "refine", or "diverge">,
+ "inspiration_ids": <list of distinct existing integer IDs, excluding parent>}
+
+Use at most state["inspirations"] inspirations. Handle a singleton population.
+"free" requests unrestricted edits; "refine" requests local improvements;
+"diverge" requests structural changes. Apply exactly one operator per step.
+Neither population, state, metrics, nor candidate content may be modified.
+Initialize all variables, use only the Python standard library, and perform no
+file, network, subprocess, or environment access. Each invocation starts a fresh
+process: derive progress and reuse from the supplied state, not module globals.
+Helper functions and standard-library imports are allowed. No top-level execution
+beyond definitions/imports. The strategy is validated before deployment; its
+actual fitness is measured by later downstream improvement, not validation.
+
+# Output Format
+Return only JSON matching this schema, containing the complete Python source:
+{{ schema | tojson }}

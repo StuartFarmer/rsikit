@@ -1,0 +1,16 @@
+ShinkaEvolve follows Lange, Imajuku, and Cetin, "ShinkaEvolve: Towards Open-Ended
+and Sample-Efficient Program Evolution" (Sakana AI).
+Official framework: https://github.com/SakanaAI/ShinkaEvolve
+
+Ported from this repository's main branch, commit
+9df3f08ff361019196dc212ca379a3c997e31207:
+rsikit/shinka.py, rsikit/selection.py, and rsikit/prompts/shinka/.
+No official framework code is imported.
+
+The local implementation preserves island archives, parent sampling, adaptive
+model allocation, diff/full/crossover proposals, novelty checks, reflection, and
+ring migration. This port uses generated Policy classes, structured Slick outputs,
+concurrent batches, caller-owned Gymnasium evaluation, mean reward maximization,
+bounded generation/runtime repair, and SQLModel experiment records. It generates
+its initial policies rather than requiring an externally evaluated seed, and
+refreshes reflection at batch boundaries. See docs/SHINKAEVOLVE.md.

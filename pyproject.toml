@@ -1,0 +1,59 @@
+[build-system]
+requires = ["hatchling>=1.27"]
+build-backend = "hatchling.build"
+
+[project]
+name = "rsikit"
+version = "0.0.1"
+description = "Generate, evaluate, and optimize Python policies in Gymnasium environments."
+readme = "README.md"
+requires-python = ">=3.10"
+license = "Apache-2.0"
+license-files = ["LICENSE", "NOTICE", "research/**/LICENSE*", "research/**/NOTICE", "research/**/UPSTREAM_LICENSE", "rsikit/envs/fonts/*LICENSE*", "rsikit/envs/data/blackjack/License.txt"]
+dependencies = [
+    "gymnasium>=1.3,<2",
+    "numpy>=1.24,<3",
+    "slick-ai>=0.3,<0.4",
+    "pydantic>=2,<3",
+    "sqlmodel>=0.0.24,<0.1",
+    "cloudpickle>=3.1,<4",
+    "huey>=3.4,<4",
+    "rich>=13,<16",
+    "PyYAML>=6,<7",
+]
+
+[project.scripts]
+rsikit = "research.cli:main"
+
+[project.urls]
+Repository = "https://github.com/StuartFarmer/rsikit"
+Issues = "https://github.com/StuartFarmer/rsikit/issues"
+Documentation = "https://stuartfarmer.github.io/rsikit/"
+
+[project.optional-dependencies]
+dev = ["ruff>=0.4"]
+docs = ["griffe2md==1.5.1; python_version >= '3.11'"]
+openai = ["slick-ai[openai]>=0.3,<0.4"]
+openrouter = ["slick-ai[openai]>=0.3,<0.4"]
+box2d = ["box2d-py==2.3.8", "gymnasium[classic-control]>=1.3,<2"]
+video = ["gymnasium[classic-control]>=1.3,<2", "moviepy>=2,<3", "pillow>=11,<13", "resvg-py>=0.5,<0.6"]
+ocean = ["torch>=2.9,<3", "gym==0.23.1", "pettingzoo>=1.24,<2", "setuptools>=70", "wheel", "Cython>=3"]
+meta = ["gepa==0.1.4", "slick-ai[openai]>=0.3,<0.4"]
+
+[tool.uv.extra-build-dependencies]
+box2d-py = ["swig>=4,<5"]
+
+[tool.uv.sources]
+torch = [{ index = "pytorch-cpu", marker = "sys_platform == 'linux'" }]
+
+[[tool.uv.index]]
+name = "pytorch-cpu"
+url = "https://download.pytorch.org/whl/cpu"
+explicit = true
+
+[tool.hatch.build.targets.wheel]
+packages = ["rsikit", "research"]
+
+[tool.hatch.build.targets.sdist]
+include = ["Dockerfile", ".dockerignore", "scripts/", "data/", "uv.lock", "rsikit/", "research/", "examples/", "experiments/", "tests/", "docs/", "README.md", "CONTRIBUTING.md", "SECURITY.md", "CHANGELOG.md", "LICENSE", "NOTICE", "book.toml", "pyproject.toml", "ruff.toml", ".gitignore"]
+exclude = ["maintainer/", "data/forex/", "docs/superpowers/", "docs/research/", "docs/VISUALIZATION_PROPOSAL.md"]
